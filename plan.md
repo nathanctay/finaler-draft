@@ -1,6 +1,6 @@
 # Finaler Draft Product and Delivery Plan
 
-**Status:** The Phase 0 foundation slice was committed by the user as `7e4b9f4`. The next delivery is canonical screenplay authoring, including the FDX/PDF fixture suite and document exports.
+**Status:** The Phase 0 foundation slice was committed by the user as `7e4b9f4`. The first Phase 1 schema slice is verified on `feature/phase-1-screenplay-schema` and awaits the user's review, commit, and merge; semantic editing, FDX, pagination, and export work remain separate deliveries.
 
 This is the source of truth for product scope, architecture, delivery order, quality gates, and operating rules. Update it deliberately when a decision changes. `progress.md` is the append-only record of work actually performed.
 
@@ -82,10 +82,21 @@ The editor will use semantic nodes with stable IDs, rather than unstructured tex
 ```text
 screenplay
   scene_heading | action | character | dialogue | parenthetical
-  transition | shot | dual_dialogue | note | page_break
+  transition | shot | dual_dialogue | page_break
+
+annotations
+  note (non-printing, anchored to a stable block ID and text range)
 ```
 
 Stable scene and block IDs support comments, scene navigation, revision diffs, imports/exports, and future storyboard links even when content is reordered. A shared schema package defines the validation rules and is used by the editor, API, import/export layer, and tests.
+
+The `@finaler-draft/screenplay` package is the public validation boundary for canonical screenplay snapshots. Schema version `1` uses a flat ordered `blocks` collection and UUID stable IDs: scene-heading block IDs are scene/storyboard anchors, avoiding duplicate scene containers. It validates scene headings, action, character, dialogue, parentheticals, transitions, shots, page breaks, and nested dual-dialogue containers with exactly two ordered dialogue columns that each begin with a character and include dialogue; rejects unknown canonical fields; and ensures every screenplay, title-page, root/nested block, and annotation identifier is globally unique within a screenplay. Title pages are a separate `titlePages` collection. Notes are a separate, non-printing annotation layer with stable IDs and bounded UTF-16 code-unit text-range anchors to text block IDs, never body blocks. It preserves authored text exactly rather than normalizing whitespace, and never persists computed pagination or layout data. A schema version change requires an explicit migration at an API/import boundary; consumers must not silently reinterpret a future version.
+
+To keep canonical snapshots safe to validate, synchronize, and render, schema version `1` bounds root blocks at 10,000, annotations at 10,000, and each dual-dialogue column at 100 blocks. It also caps canonical screenplay nodes at 25,000, counting every root block, dual-dialogue column container, and nested dialogue-column block, so valid per-array limits cannot compose into an oversized document. Every canonical authored-text field is limited to 20,000 UTF-16 code units and the complete screenplay budget, including title pages, scene numbers, blocks, and annotations, is 1,500,000 UTF-16 code units. These limits intentionally accommodate feature-length and longer scripts while making malformed or adversarial snapshots finite. Annotation offsets use JavaScript/ProseMirror UTF-16 code-unit indices, not Unicode code-point or grapheme-cluster counts; validation compares them to JavaScript string length in the same unit.
+
+The canonical screenplay is an ordered, flat block sequence. A scene is derived from a `scene_heading` block and the following blocks up to the next heading; the heading's stable block ID is its scene anchor. Title pages are a separate ordered collection and never participate in screenplay pagination. `dual_dialogue` is an explicit container with exactly two ordered dialogue columns and stable descendant IDs. Do not persist computed page positions, visual layout, or renderer output in the semantic document.
+
+Notes are non-printing annotations, not screenplay blocks. They must remain anchored to stable block/range identities and must never enter PDF, DOCX, or FDX screenplay flow by accident.
 
 Formatting, keyboard behavior, pagination, and PDF export are product-critical. Do not start Final Draft-style locked pages, colored production revisions, or scene-number insertion rules until deterministic pagination and a robust FDX fixture suite exist.
 
@@ -219,7 +230,7 @@ No agent may silently broaden scope, replace this plan, create a partial product
 
 ## Immediate next action
 
-Create the next feature branch for the canonical screenplay model, semantic editor, deterministic pagination foundation, and FDX/PDF/DOCX fixture suite. Authentication, database persistence, and collaboration remain separately planned Phase 0 work and must be sequenced before private documents are usable beyond local development.
+Review, commit, and merge the verified `feature/phase-1-screenplay-schema` slice. Then create the next feature branch for semantic screenplay editing and deterministic pagination, consuming the shared schema without changing its public contract casually. FDX/PDF/DOCX fixture work follows the renderer foundation. Authentication, database persistence, and collaboration remain separately planned Phase 0 work and must be sequenced before private documents are usable beyond local development.
 
 ## Research basis
 

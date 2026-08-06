@@ -24,6 +24,51 @@ Risks/next: <known risks, blocker, or next handoff>
 
 ## Log
 
+### 2026-08-06 — Codex and independent schema reviewer — feature/phase-1-screenplay-schema
+
+Status: verified
+Scope: Final review and verification of the bounded Phase 1 canonical screenplay-schema slice.
+Changes: The completed package provides strict, versioned validation; flat stable-ID screenplay blocks; derived scenes; title pages; non-printing range-anchored notes; dual-dialogue invariants; global ID uniqueness; and explicit text, collection, and aggregate-node resource limits. It is wired into the workspace build/typecheck pipeline.
+Verification: Passed `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, `pnpm build`, `PLAYWRIGHT_CHANNEL=chrome pnpm test:system`, and `git diff --check`. The screenplay package has 21 tests and 100% measured statement, branch, function, and line coverage. The local system test uses Chrome because the downloaded Playwright Chromium bundle is incomplete in this environment; CI installs its required Chromium runtimes.
+Review: Independent reviewer approved after three review passes. The initial review's dual-dialogue/scene/global-ID findings and final review's resource-composition and UTF-16 offset findings are resolved; no blocking findings remain.
+Risks/next: This is a verified, uncommitted feature slice. The user must review, stage, commit, and merge it. The future API must apply a request-body byte limit before receiving untrusted snapshots; schema validation only constrains parsed canonical data. The editor, persistence, FDX, pagination, PDF, and DOCX remain unimplemented.
+
+### 2026-08-06 — Codex and schema advisory reviewer — feature/phase-1-screenplay-schema
+
+Status: verified
+Scope: Resolve canonical-schema decisions before the Phase 1 implementation agent finalizes its public API.
+Changes: Recorded a flat ordered screenplay block model; derived scene identity from stable scene-heading block IDs; out-of-band title pages; non-printing, range-anchored notes; explicit two-column dual dialogue; and exclusion of computed layout from canonical data.
+Verification: Independent read-only review checked the plan against current application architecture and Final Draft interoperability constraints.
+Review: The lead accepted and relayed the decisions to the implementation agent before handoff.
+Risks/next: FDX import/export remains a later slice and must emit explicit diagnostics for unsupported source features rather than silently converting or discarding them.
+
+### 2026-08-06 — Codex and Phase 1 implementation agent — feature/phase-1-screenplay-schema
+
+Status: started
+Scope: First Phase 1 delivery: a shared, versioned canonical screenplay schema, validation API, fixtures, and test suite. The editor UI, persistence, authentication, FDX conversion, pagination, and export implementation are not included in this slice.
+Changes: Created the feature branch from user-committed `main`; implementation is delegated under the branch/review protocol.
+Verification: Pending implementation. Required gates are formatter, lint, strict typecheck, coverage-enforced unit tests, integration checks where applicable, and independent review.
+Review: Pending independent review after implementation.
+Risks/next: The schema is a cross-cutting contract. Any ambiguity or architecture conflict must be raised before the implementation agent finalizes its public API. No agent will stage, commit, or merge changes.
+
+### 2026-08-06 — Phase 1 schema implementation agent — feature/phase-1-screenplay-schema
+
+Status: started
+Scope: Implement the approved shared canonical screenplay schema package, realistic fixtures, and unit tests only.
+Changes: Added `packages/screenplay` with strict Zod validation, a versioned public API, fixture exports, and coverage configuration. Updated the root build/typecheck orchestration to include the package and recorded the validation contract in `plan.md`.
+Verification: Implementation in progress; focused package and full workspace quality gates will run before review handoff.
+Review: Pending independent review.
+Risks/next: The semantic model intentionally does not impose keyboard/editor sequencing rules or pagination behavior. Those belong to later editor and renderer slices.
+
+### 2026-08-06 — Phase 1 schema implementation agent — feature/phase-1-screenplay-schema
+
+Status: started
+Scope: Apply the independent advisory constraints to the canonical schema before verification.
+Changes: Replaced printable note blocks with separately anchored, non-printing annotations; separated title pages from body blocks; retained a flat body block order; and constrained dual dialogue to exactly two ordered columns with stable descendant IDs.
+Verification: Pending focused and full quality gates.
+Review: Binding advisory architecture decision received from the lead's independent reviewer.
+Risks/next: Computed pagination and layout data remain intentionally absent from canonical persistence.
+
 ### 2026-08-06 — Codex — main
 
 Status: verified
@@ -113,3 +158,39 @@ Changes: Created `plan.md` and this progress log. No application code, repositor
 Verification: Confirmed workspace was empty and not a Git repository. Researched official Final Draft, Yjs, Better Auth, Hocuspocus, Google Docs, and Railway documentation; sources are recorded in `plan.md`.
 Review: Research results cross-checked by separate agents for Final Draft parity and version restoration.
 Risks/next: User must authorize Phase 0 implementation. Before branch/worktree workflow can operate, the user must initialize Git and create the baseline commit because agents do not commit or merge on the user's behalf.
+
+### 2026-08-06 — Codex schema corrections agent — feature/phase-1-screenplay-schema
+
+Status: verified
+Scope: Correct the bounded Phase 1 canonical-schema review findings only.
+Changes: Required each dual-dialogue column to begin with a character block and include dialogue; added the public pure `deriveScenes` helper for flat ordered scene-heading blocks; made stable IDs globally unique across the screenplay, title pages, root/nested blocks, and annotations; added coverage for each invariant; and aligned the canonical-model plan assertion with the implementation.
+Verification: Passed `pnpm --filter @finaler-draft/screenplay test:coverage` (17 tests; 100% statements, branches, functions, and lines) and `pnpm --filter @finaler-draft/screenplay typecheck`. Focused Prettier formatting was applied before verification.
+Review: Corrections implement the lead's specified code-review requirements; no independent merge review performed in this bounded task.
+Risks/next: The schema slice remains uncommitted and must complete the full workspace quality gates and independent review before the user stages, commits, or merges it. No unrelated scope was changed.
+
+### 2026-08-06 — Codex schema corrections agent — feature/phase-1-screenplay-schema
+
+Status: verified
+Scope: Complete workspace verification for the bounded canonical-schema corrections.
+Changes: No additional implementation changes after the focused schema verification.
+Verification: Passed `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, and `git diff --check`. Workspace coverage remains at or above the configured 80% threshold; the screenplay package is 100% across all measured categories.
+Review: Pending the feature branch's independent review and user-controlled Git handoff.
+Risks/next: Do not stage, commit, or merge this work on the agent's behalf.
+
+### 2026-08-06 — Codex schema corrections agent — feature/phase-1-screenplay-schema
+
+Status: ready-for-review
+Scope: Resolve the independent final review's resource-bound and annotation-offset findings.
+Changes: Added exported bounds of 10,000 root blocks, 10,000 annotations, 100 blocks per dual-dialogue column, 20,000 UTF-16 code units per authored-text field, and 1,500,000 UTF-16 code units for the complete canonical screenplay. Total-text accounting includes screenplay/title-page text, scene numbers, root/nested block text, and annotation text. Published the `Utf16CodeUnitOffset` and `AnnotationAnchor` types, documented JavaScript/ProseMirror UTF-16 semantics, and tested non-BMP plus combining-sequence range boundaries and rejection.
+Verification: Passed focused `pnpm --filter @finaler-draft/screenplay test:coverage` (20 tests; 100% statements, branches, functions, and lines) and `pnpm --filter @finaler-draft/screenplay typecheck`. Passed workspace `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, `pnpm build`, and `git diff --check`.
+Review: This entry resolves the final review findings but is intentionally not verified until the independent reviewer approves the changes.
+Risks/next: Await independent final review, then user-controlled staging, commit, and merge. No agent has performed Git write operations.
+
+### 2026-08-06 — Codex schema corrections agent — feature/phase-1-screenplay-schema
+
+Status: ready-for-review
+Scope: Resolve the final review finding that individually bounded arrays could compose into an oversized canonical node tree.
+Changes: Exported and enforced `MAX_CANONICAL_NODES` at 25,000, counting each root block, both dual-dialogue column containers, and every nested dialogue-column block. Added composed near-boundary coverage: 24,969 canonical nodes are accepted and 25,172 are rejected while every individual array remains within its own limit. Updated the documented resource-bound contract.
+Verification: Passed focused `pnpm --filter @finaler-draft/screenplay test:coverage` (21 tests; 100% statements, branches, functions, and lines) and `pnpm --filter @finaler-draft/screenplay typecheck`. Passed workspace `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, `pnpm build`, and `git diff --check`.
+Review: The independent reviewer must re-review this correction before this feature slice is marked verified.
+Risks/next: No staging, commit, or merge has occurred. Retain the individual resource and text limits alongside the aggregate node budget.
