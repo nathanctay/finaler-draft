@@ -1,6 +1,6 @@
 # Finaler Draft Product and Delivery Plan
 
-**Status:** Phase 0 bootstrap authorized; implementation has not started beyond documentation and repository hygiene.
+**Status:** The Phase 0 foundation slice is verified on `feature/phase-0-foundation-workspace` and awaits the user's review, commit, and merge.
 
 This is the source of truth for product scope, architecture, delivery order, quality gates, and operating rules. Update it deliberately when a decision changes. `progress.md` is the append-only record of work actually performed.
 
@@ -14,18 +14,18 @@ Screenplays are sensitive creative work. Documents are private by default; shari
 
 ## Architecture decisions
 
-| Area | Decision | Reason |
-| --- | --- | --- |
-| Application stack | TypeScript end-to-end | The hard parts of this product—structured editing, browser offline support, and real-time collaboration—have the best-maintained ecosystem in TypeScript. A Go API plus a Node collaboration sidecar would add an authorization boundary and two language stacks without a current benefit. |
-| Frontend | React, TypeScript strict mode, Vite | A fast SPA with no full-stack framework requirement. |
-| API | Fastify running on Node LTS | Typed REST API, same-origin session handling, and a clean place for authorization, exports, and collaboration token/session checks. |
-| Authentication | Better Auth with PostgreSQL | Self-hosted email/password sessions for v1. Do not implement password handling ourselves. Add verified-email, reset, rate-limiting, and transactional email before public launch. |
-| Editor | Tiptap core / ProseMirror, custom screenplay extensions | The document is structured screenplay data, not HTML or generic rich text. Use only open-source core features; do not depend on Tiptap Cloud or paid extensions. |
-| Collaboration | Yjs via self-hosted Hocuspocus over WebSockets | Yjs handles concurrent/offline document merging; Hocuspocus is the WebSocket server and persistence/auth integration. |
-| Primary data | PostgreSQL | Durable relational metadata, permissions, Yjs binary updates/checkpoints, revision projections, comments, and audit data. |
-| Files | Railway object storage or S3-compatible storage | Imported files, PDFs, images, and storyboard assets. Do not put large assets in PostgreSQL. |
-| Deployment | Railway | One app service and PostgreSQL initially. Serve the Vite build from the Fastify application so web and API share an origin. Add a worker service for expensive exports when measurements justify it. |
-| Horizontal collaboration scale | Redis pub/sub, introduced before adding a second app instance | Connected users on separate instances must receive the same Yjs updates. |
+| Area                           | Decision                                                      | Reason                                                                                                                                                                                                                                                                                      |
+| ------------------------------ | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Application stack              | TypeScript end-to-end                                         | The hard parts of this product—structured editing, browser offline support, and real-time collaboration—have the best-maintained ecosystem in TypeScript. A Go API plus a Node collaboration sidecar would add an authorization boundary and two language stacks without a current benefit. |
+| Frontend                       | React, TypeScript strict mode, Vite                           | A fast SPA with no full-stack framework requirement.                                                                                                                                                                                                                                        |
+| API                            | Fastify running on Node LTS                                   | Typed REST API, same-origin session handling, and a clean place for authorization, exports, and collaboration token/session checks.                                                                                                                                                         |
+| Authentication                 | Better Auth with PostgreSQL                                   | Self-hosted email/password sessions for v1. Do not implement password handling ourselves. Add verified-email, reset, rate-limiting, and transactional email before public launch.                                                                                                           |
+| Editor                         | Tiptap core / ProseMirror, custom screenplay extensions       | The document is structured screenplay data, not HTML or generic rich text. Use only open-source core features; do not depend on Tiptap Cloud or paid extensions.                                                                                                                            |
+| Collaboration                  | Yjs via self-hosted Hocuspocus over WebSockets                | Yjs handles concurrent/offline document merging; Hocuspocus is the WebSocket server and persistence/auth integration.                                                                                                                                                                       |
+| Primary data                   | PostgreSQL                                                    | Durable relational metadata, permissions, Yjs binary updates/checkpoints, revision projections, comments, and audit data.                                                                                                                                                                   |
+| Files                          | Railway object storage or S3-compatible storage               | Imported files, PDFs, images, and storyboard assets. Do not put large assets in PostgreSQL.                                                                                                                                                                                                 |
+| Deployment                     | Railway                                                       | One app service and PostgreSQL initially. Serve the Vite build from the Fastify application so web and API share an origin. Add a worker service for expensive exports when measurements justify it.                                                                                        |
+| Horizontal collaboration scale | Redis pub/sub, introduced before adding a second app instance | Connected users on separate instances must receive the same Yjs updates.                                                                                                                                                                                                                    |
 
 ### Why Yjs is used with WebSockets
 
@@ -179,7 +179,7 @@ Every feature is incomplete until all applicable gates pass:
 
 ## Agent, branch, review, and progress protocol
 
-The repository is currently not initialized. Before feature work can use isolated branches/worktrees, the user must initialize the repository and create the baseline commit; project policy prohibits agents from making commits or merges on the user's behalf.
+The repository was initialized by the user with baseline commit `ccf12db`. Project policy prohibits agents from making commits or merges on the user's behalf.
 
 For each approved feature:
 
@@ -193,7 +193,7 @@ No agent may silently broaden scope, replace this plan, create a partial product
 
 ## Immediate next action
 
-On approval to begin implementation: scaffold Phase 0 and produce a commit-ready baseline. The user then creates the baseline commit, allowing feature agents to work in isolated branches under the protocol above.
+Review, commit, and merge the verified Phase 0 foundation slice from `feature/phase-0-foundation-workspace`. Then create the next feature branch for semantic screenplay editing and the FDX/PDF fixture suite; authentication, database persistence, and collaboration remain separately planned Phase 0 work.
 
 ## Research basis
 

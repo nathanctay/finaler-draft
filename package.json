@@ -1,0 +1,34 @@
+{
+  "name": "finaler-draft",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.17.1",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --stream --filter @finaler-draft/api --filter @finaler-draft/web dev",
+    "start": "pnpm --filter @finaler-draft/api start",
+    "build": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/web build && pnpm --filter @finaler-draft/api build",
+    "typecheck": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/web typecheck && pnpm --filter @finaler-draft/api typecheck",
+    "lint": "eslint . --max-warnings=0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "pnpm -r test",
+    "test:system": "pnpm build && playwright test",
+    "test:coverage": "pnpm -r test:coverage"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.34.0",
+    "@playwright/test": "1.55.0",
+    "@types/node": "24.3.0",
+    "eslint": "9.34.0",
+    "eslint-plugin-react-hooks": "5.2.0",
+    "eslint-plugin-react-refresh": "0.4.20",
+    "globals": "16.3.0",
+    "prettier": "3.6.2",
+    "typescript": "5.9.2",
+    "typescript-eslint": "8.41.0"
+  }
+}

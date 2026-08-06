@@ -42,3 +42,6 @@ local-storage/
 Thumbs.db
 .idea/
 .vscode/
+
+# Vite's optional local environment files
+apps/*/.env.local

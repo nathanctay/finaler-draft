@@ -2,7 +2,7 @@
 
 Finaler Draft is an original, web-based professional screenwriting application. It is being designed around the writing, collaboration, revision-history, and production workflows screenwriters expect from professional screenplay software, while remaining independent of Final Draft's branding, visual design, and trade dress.
 
-The project is currently in its engineering-foundation phase. No application functionality has been implemented yet.
+The project is in its engineering-foundation phase. It currently includes a tested workspace-shell prototype and API health endpoint; screenplay editing, persistence, authentication, imports/exports, and collaboration are not yet implemented.
 
 ## Product direction
 
@@ -20,17 +20,17 @@ The interface will feel like desktop authoring software: dense and keyboard-firs
 
 ## Intended stack
 
-| Area | Planned technology |
-| --- | --- |
-| Web application | React, TypeScript (strict mode), Vite |
-| API | Fastify on Node.js LTS |
-| Authentication | Better Auth with PostgreSQL |
-| Editor | Tiptap core / ProseMirror with custom screenplay extensions |
-| Collaboration | Yjs over WebSockets, served by self-hosted Hocuspocus |
-| Data | PostgreSQL and Drizzle migrations |
-| File storage | Railway object storage or compatible S3 storage |
-| Testing | Vitest, integration tests against real services, and Playwright |
-| Deployment | Railway |
+| Area            | Planned technology                                              |
+| --------------- | --------------------------------------------------------------- |
+| Web application | React, TypeScript (strict mode), Vite                           |
+| API             | Fastify on Node.js LTS                                          |
+| Authentication  | Better Auth with PostgreSQL                                     |
+| Editor          | Tiptap core / ProseMirror with custom screenplay extensions     |
+| Collaboration   | Yjs over WebSockets, served by self-hosted Hocuspocus           |
+| Data            | PostgreSQL and Drizzle migrations                               |
+| File storage    | Railway object storage or compatible S3 storage                 |
+| Testing         | Vitest, integration tests against real services, and Playwright |
+| Deployment      | Railway                                                         |
 
 Yjs is the collaboration model, not a replacement for WebSockets. WebSockets transport updates; Yjs resolves concurrent and offline changes safely. Hocuspocus provides the self-hosted WebSocket protocol, persistence, and authorization integration.
 
@@ -44,14 +44,14 @@ The complete architecture, acceptance criteria, roadmap, and quality gates live 
 
 ## Development prerequisites
 
-No local development environment is configured yet. When Phase 0 scaffolding begins, the expected prerequisites are:
+The Phase 0 workspace is configured. Its prerequisites are:
 
 - Current Node.js LTS and its supported package manager.
 - PostgreSQL for local integration testing.
 - A modern browser for Playwright system tests.
 - Railway account and project configuration only when deployment work is explicitly underway.
 
-Dependency versions, setup commands, environment-variable documentation, and local service instructions will be added as part of the Phase 0 implementation. Never commit `.env` files, credentials, tokens, or real production configuration.
+Install dependencies with `pnpm install`, copy `.env.example` to `.env` if local overrides are needed, and run `pnpm dev`. Build and launch the same-origin production service with `pnpm build` followed by `pnpm start`. Install the Chromium test runtime with `pnpm exec playwright install chromium chromium-headless-shell`, then run `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, and `pnpm test:system` before handoff. Railway uses the checked-in `railway.toml` to build, launch, and health-check the service. Never commit `.env` files, credentials, tokens, or real production configuration.
 
 ## Source of truth and working record
 
