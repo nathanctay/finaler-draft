@@ -24,6 +24,42 @@ Risks/next: <known risks, blocker, or next handoff>
 
 ## Log
 
+### 2026-08-06 — Codex and independent editor reviewer — feature/phase-1-semantic-editor
+
+Status: verified
+Scope: Final review and verification of the local semantic screenplay-editor slice.
+Changes: Replaced the static screenplay with custom Tiptap v3 screenplay nodes backed by the shared validation package. Added local semantic element conversion, Final Draft-style core Enter/Tab transitions, stable-ID-preserving splits and conversions, derived Navigator scenes, local undo/redo, empty-screenplay handling, accessible editing controls, and per-file coverage enforcement. No persistence, authentication, collaboration, FDX, PDF, DOCX, title-page editing, or print pagination was added.
+Verification: Passed `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, `pnpm build`, `PLAYWRIGHT_CHANNEL=chrome pnpm test:system`, and `git diff --check`. Web coverage is App 97.87% statements / 91.93% branches / 91.66% functions / 97.87% lines and screenplay editor 94.48% / 86.79% / 89.47% / 94.48%; per-file thresholds enforce 80% in every category. The local production test uses Chrome because the downloaded Playwright Chromium bundle is incomplete in this environment; CI installs its required Chromium runtimes.
+Review: Independent review approved after selected-text splitting, per-file coverage, and empty-document behavior were corrected. No blocking findings remain.
+Risks/next: The production editor bundle is 177.39 kB gzip and triggers Vite's 500 kB uncompressed-chunk warning. This is recorded in `plan.md` for route-level lazy loading and a bundle budget once routing is introduced; the warning must not be silenced. This feature is verified but uncommitted. The user must review, stage, commit, and merge it.
+
+### 2026-08-06 — Phase 1 semantic editor correction agent — feature/phase-1-semantic-editor
+
+Status: ready-for-review
+Scope: Resolve independent review findings on local semantic-editor splitting, empty-document behavior, and module-level coverage enforcement.
+Changes: Enter now respects both `TextSelection.from` and `TextSelection.to`: it preserves text before the selection, removes selected text, moves the remaining suffix into the next semantic block, retains the original block ID, and allocates a new UUID for the inserted block. The custom top-level editor document now permits zero screenplay blocks, projects that state as the shared schema's valid empty screenplay, and creates a fresh action block when Enter is pressed in an empty document. Enabled Vitest coverage enforcement per production file, not merely aggregate coverage. Added direct editor tests for non-collapsed and empty-boundary splits, keyboard dispatch, empty-document initialization, unsupported/malformed projection reporting, and no-active-block behavior.
+Verification: Passed `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, and `pnpm test:coverage`. Web tests: 9 passing; per-file thresholds are enforced at 80%. `App.tsx` reports 97.87% statements, 91.93% branches, 91.66% functions, and 97.87% lines. `screenplayEditor.ts` reports 94.48% statements, 86.79% branches, 89.47% functions, and 94.48% lines. Passed `PLAYWRIGHT_CHANNEL=chrome pnpm test:system` and `git diff --check`.
+Review: This correction set is ready for the reviewer who raised the findings. No staging, commit, or merge occurred.
+Risks/next: The slice remains intentionally local-only and unpaginated. Existing scope exclusions remain unchanged.
+
+### 2026-08-06 — Phase 1 semantic editor implementation agent — feature/phase-1-semantic-editor
+
+Status: ready-for-review
+Scope: Replace the static screenplay sample with the bounded local semantic-editor slice specified in `plan.md`.
+Changes: Added a custom Tiptap v3.23.6 document schema with screenplay-only blocks and stable UUID attributes; no StarterKit or generic paragraph schema is used. The editor projects every update to the committed `@finaler-draft/screenplay` validator, visibly reports invalid projections, derives Navigator scenes from that shared projection, preserves IDs for element conversions, and allocates fresh IDs for explicit caret splits. Implemented the approved Enter and Tab transitions, local undo/redo, active-element selector, accessible editing canvas, local word-count/validation status, and clear scope exclusions for unsupported nodes and operations. Replaced inert formatting controls and the fabricated page count. Added unit, UI-integration, and production-browser coverage. Pinned every installed Tiptap package, including transitive React menu dependencies, to exact v3.23.6 through root pnpm overrides to avoid version drift or peer mismatches.
+Verification: Passed `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, and `pnpm test:coverage`. The web suite contains five editor-focused tests and reports 93.77% statements, 80.19% branches, 90.69% functions, and 93.77% lines across the application and editor module, above the enforced 80% floor. Passed `PLAYWRIGHT_CHANNEL=chrome pnpm test:system` against the compiled production Fastify service; it exercises health, custom editor selection conversion, Navigator derivation, physical Enter insertion, local validation status, pane toggle, and zoom. `git diff --check` passed. Local Chrome is selected because this environment's downloaded Playwright Chromium is incomplete; CI continues to install its normal browser runtime.
+Review: Awaiting independent code review. No agent staged, committed, or merged changes.
+Risks/next: The canvas is intentionally a local, unpaginated semantic draft. It has no persistence, authentication, collaboration, title-page editing, dual-dialogue/page-break editing, imports, exports, or deterministic print layout. The current Vite bundle emits a non-blocking 500 kB chunk warning that should be addressed when route/editor code-splitting is introduced with TanStack Router, rather than obscuring this bounded editor delivery with premature bundler tuning.
+
+### 2026-08-06 — Codex and Phase 1 implementation agents — feature/phase-1-semantic-editor
+
+Status: started
+Scope: Replace the static screenplay demonstration with a local semantic screenplay editor using the committed shared schema, custom Tiptap nodes, element switching, default Enter/Tab transitions, derived Navigator scenes, and local undo/redo.
+Changes: Created this dependent feature branch from committed schema revision `5423afe`. Updated the source-of-truth editor behavior, scope exclusions, and acceptance direction in `plan.md` before implementation.
+Verification: Pending implementation. Required gates are formatter, lint, strict typecheck, coverage-enforced unit tests, browser/editor integration tests, production system test, and independent code review.
+Review: Pending architecture and final implementation review.
+Risks/next: The editor must not silently create an alternate document model, mutate shared-schema contracts, or claim print-accurate pagination. No authentication, persistence, collaboration, FDX, PDF, DOCX, or title-page editor is included in this slice. No agent may stage, commit, or merge.
+
 ### 2026-08-06 — Codex and independent schema reviewer — feature/phase-1-screenplay-schema
 
 Status: verified

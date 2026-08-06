@@ -11,8 +11,8 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
-      include: ['src/App.tsx'],
-      thresholds: { lines: 80, functions: 80, branches: 80, statements: 80 },
+      include: ['src/App.tsx', 'src/screenplayEditor.ts'],
+      thresholds: { perFile: true, lines: 80, functions: 80, branches: 80, statements: 80 },
     },
   },
 });

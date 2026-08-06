@@ -12,6 +12,11 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "@finaler-draft/screenplay": "workspace:*",
+    "@tiptap/core": "3.23.6",
+    "@tiptap/extension-history": "3.23.6",
+    "@tiptap/pm": "3.23.6",
+    "@tiptap/react": "3.23.6",
     "react": "19.1.1",
     "react-dom": "19.1.1"
   },

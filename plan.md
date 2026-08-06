@@ -1,6 +1,6 @@
 # Finaler Draft Product and Delivery Plan
 
-**Status:** The Phase 0 foundation slice was committed by the user as `7e4b9f4`. The first Phase 1 schema slice is verified on `feature/phase-1-screenplay-schema` and awaits the user's review, commit, and merge; semantic editing, FDX, pagination, and export work remain separate deliveries.
+**Status:** The Phase 0 foundation slice was committed by the user as `7e4b9f4`; the first Phase 1 schema slice was committed as `5423afe`. The local semantic-editor slice is verified on `feature/phase-1-semantic-editor` and awaits the user's review, commit, and merge; pagination, FDX, and export work remain separate deliveries.
 
 This is the source of truth for product scope, architecture, delivery order, quality gates, and operating rules. Update it deliberately when a decision changes. `progress.md` is the append-only record of work actually performed.
 
@@ -97,6 +97,14 @@ To keep canonical snapshots safe to validate, synchronize, and render, schema ve
 The canonical screenplay is an ordered, flat block sequence. A scene is derived from a `scene_heading` block and the following blocks up to the next heading; the heading's stable block ID is its scene anchor. Title pages are a separate ordered collection and never participate in screenplay pagination. `dual_dialogue` is an explicit container with exactly two ordered dialogue columns and stable descendant IDs. Do not persist computed page positions, visual layout, or renderer output in the semantic document.
 
 Notes are non-printing annotations, not screenplay blocks. They must remain anchored to stable block/range identities and must never enter PDF, DOCX, or FDX screenplay flow by accident.
+
+### Initial semantic-editor behavior
+
+The first editor implementation uses the open-source Tiptap core and React bindings with custom screenplay nodes; it does not use a generic rich-text starter schema or a paid Tiptap service. It edits a local canonical screenplay projection only. Persistence, authentication, collaboration, FDX conversion, title-page editing, and deterministic paginated print layout are deliberately separate slices.
+
+The initial keyboard defaults mirror the core Final Draft writing flow: Enter after a scene heading creates action, after action creates action, after character or parenthetical creates dialogue, and after dialogue creates action. Tab from action creates character; Tab from dialogue creates parenthetical. The toolbar element selector changes the active block's screenplay element. Each transformation must preserve the block's stable identity where the schema permits it, and the UI must show the active element and derive Navigator scenes from the shared schema. Local undo/redo is required; it must not be presented as collaboration history.
+
+The semantic-editor production bundle currently measures about 177 kB gzip and triggers Vite's default 500 kB uncompressed-chunk warning. Do not suppress that warning. When the TanStack Router route tree is introduced, lazy-load the editor route and establish a documented bundle budget before adding further authoring extensions.
 
 Formatting, keyboard behavior, pagination, and PDF export are product-critical. Do not start Final Draft-style locked pages, colored production revisions, or scene-number insertion rules until deterministic pagination and a robust FDX fixture suite exist.
 
@@ -230,7 +238,7 @@ No agent may silently broaden scope, replace this plan, create a partial product
 
 ## Immediate next action
 
-Review, commit, and merge the verified `feature/phase-1-screenplay-schema` slice. Then create the next feature branch for semantic screenplay editing and deterministic pagination, consuming the shared schema without changing its public contract casually. FDX/PDF/DOCX fixture work follows the renderer foundation. Authentication, database persistence, and collaboration remain separately planned Phase 0 work and must be sequenced before private documents are usable beyond local development.
+Review, commit, and merge the verified local semantic-editor slice on `feature/phase-1-semantic-editor`. The next feature branch will establish deterministic pagination and print-preview fixtures; FDX/PDF/DOCX work follows the renderer foundation. Authentication, database persistence, and collaboration remain separately planned Phase 0 work and must be sequenced before private documents are usable beyond local development.
 
 ## Research basis
 
@@ -242,4 +250,6 @@ Review, commit, and merge the verified `feature/phase-1-screenplay-schema` slice
 - Railway private, S3-compatible object storage and export-worker patterns: <https://docs.railway.com/storage-buckets> and <https://docs.railway.com/guides/storage-buckets-guide>
 - TanStack Router type-safe routes and validated search parameters: <https://tanstack.com/router/latest/docs/guide/type-safety> and <https://tanstack.com/router/latest/docs/guide/search-params>
 - Playwright server-side PDF generation: <https://playwright.dev/docs/api/class-page#page-pdf>
+- Tiptap editor core license and extension model: <https://github.com/ueberdosis/tiptap> and <https://github.com/ueberdosis/tiptap/blob/main/LICENSE.md>
+- Final Draft element conversion and default Enter/Tab behavior: <https://kb.finaldraft.com/hc/en-us/articles/27648345770772-How-do-I-change-one-element-to-another-in-a-script> and <https://kb.finaldraft.com/hc/en-us/articles/27977488282644-What-keyboard-shortcuts-can-I-use-in-Final-Draft>
 - Final Draft image-capable Beat Board: <https://kb.finaldraft.com/hc/en-us/articles/15575274173716-Is-there-any-way-to-integrate-storyboards-into-Final-Draft>

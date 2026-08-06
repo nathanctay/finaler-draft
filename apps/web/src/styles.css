@@ -21,7 +21,8 @@ button {
 }
 button:focus-visible,
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+[contenteditable='true']:focus-visible {
   outline: 2px solid #2379bb;
   outline-offset: -2px;
 }
@@ -78,6 +79,8 @@ select:focus-visible {
   background: #75bc88;
 }
 .account-button {
+  display: grid;
+  place-items: center;
   width: 26px;
   height: 26px;
   border: 1px solid #b9c9d1;
@@ -96,6 +99,7 @@ select:focus-visible {
 .menubar {
   padding: 0 8px;
 }
+.menubar > span:not(.menubar-spacer),
 .menubar button {
   height: 30px;
   padding: 0 10px;
@@ -135,15 +139,33 @@ select:focus-visible {
   background: #c9d0d4;
 }
 .element-selector {
-  display: flex;
-  justify-content: space-between;
-  width: 140px;
+  display: block;
+  width: 156px;
   height: 31px;
-  padding: 0 8px;
   border: 1px solid #bfc8cd;
   border-radius: 2px;
   background: white;
   font-size: 12px;
+}
+.element-selector select {
+  width: 100%;
+  height: 100%;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+.tool-button:disabled {
+  cursor: default;
+  color: #a3adb2;
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 .workspace {
   display: flex;
@@ -185,9 +207,8 @@ select:focus-visible {
   padding: 5px 8px 0;
   border-bottom: 1px solid #d0d5d7;
 }
-.panel-tabs button {
+.panel-tabs > span {
   padding: 7px 8px;
-  border: 0;
   border-bottom: 2px solid transparent;
   background: transparent;
   color: #5d686e;
@@ -287,27 +308,14 @@ select:focus-visible {
   margin-top: 1in;
   font-size: 12px;
 }
-.script-line {
+.script-body .ProseMirror {
+  outline: none;
+}
+.script-body [data-screenplay-block] {
   position: relative;
   margin-bottom: 13px;
 }
-.script-line p {
-  margin: 0;
-  white-space: pre-wrap;
-}
-.scene-heading p,
-.character p {
-  font-weight: 700;
-}
-.character p {
-  margin-left: 2.25in;
-}
-.dialogue p,
-.parenthetical p {
-  max-width: 3.35in;
-  margin-left: 1.65in;
-}
-.element-hint {
+.script-body [data-screenplay-block]::before {
   position: absolute;
   right: calc(100% + 18px);
   width: 82px;
@@ -317,6 +325,37 @@ select:focus-visible {
   font-weight: 600;
   text-align: right;
   letter-spacing: 0.04em;
+  content: attr(data-screenplay-element);
+  text-transform: uppercase;
+}
+.script-body [data-screenplay-block][data-screenplay-element='scene_heading'],
+.script-body [data-screenplay-block][data-screenplay-element='character'] {
+  font-weight: 700;
+}
+.script-body [data-screenplay-block][data-screenplay-element='character'] {
+  margin-left: 2.25in;
+}
+.script-body [data-screenplay-block][data-screenplay-element='dialogue'],
+.script-body [data-screenplay-block][data-screenplay-element='parenthetical'] {
+  max-width: 3.35in;
+  margin-left: 1.65in;
+}
+.script-body [data-screenplay-block][data-screenplay-element='transition'] {
+  text-align: right;
+}
+.script-body [data-screenplay-block].ProseMirror-selectednode {
+  background: #edf6f9;
+}
+.script-body [data-screenplay-block]:focus-within {
+  background: #f6fafb;
+  box-shadow: 0 0 0 1px #b6d4e2;
+}
+.script-body [data-screenplay-block]:empty::after {
+  color: #a6b0b5;
+  content: 'Type screenplay text';
+}
+.script-body [data-screenplay-block] {
+  white-space: pre-wrap;
 }
 .inspector-section {
   padding: 13px;
@@ -360,6 +399,12 @@ select:focus-visible {
   color: #7a858b;
   font-size: 11px;
   line-height: 1.45;
+}
+.inspector-value {
+  margin: 0 0 8px;
+  color: #263840;
+  font-size: 13px;
+  font-weight: 600;
 }
 .statusbar {
   display: flex;
@@ -431,6 +476,9 @@ select:focus-visible {
   border-color: #61727c;
   color: #e1e7e9;
 }
+.dark .element-selector select {
+  color: #e1e7e9;
+}
 .dark .editor-region {
   background: #1f282f;
 }
@@ -454,7 +502,7 @@ select:focus-visible {
   .editor-region {
     padding: 36px 14px;
   }
-  .element-hint {
+  .script-body [data-screenplay-block]::before {
     display: none;
   }
   .page {
@@ -495,6 +543,7 @@ select:focus-visible {
     width: 100%;
   }
   .brand > span:last-child,
+  .menubar > span:nth-child(n + 4),
   .menubar button:nth-child(n + 4) {
     display: none;
   }
