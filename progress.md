@@ -24,6 +24,24 @@ Risks/next: <known risks, blocker, or next handoff>
 
 ## Log
 
+### 2026-08-06 — Codex — bugfix-semantic-editor-label-overflow
+
+Status: verified
+Scope: Correct the semantic editor's overflowing element-type labels without changing screenplay behavior, document data, or pagination scope.
+Changes: Moved the element label from an absolute left-side gutter position that exceeded the page margin to a compact in-page line above each screenplay block. Added a production-browser assertion that the heading label anchors at the block's in-page top-left coordinate.
+Verification: Passed `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `PLAYWRIGHT_CHANNEL=chrome pnpm test:system`, and `git diff --check`.
+Review: Focused implementation and production-browser regression verification passed.
+Risks/next: This is a verified, uncommitted CSS and system-test correction. The Vite editor-bundle warning remains the separately documented performance follow-up; this fix does not change it. The user must review, stage, commit, and merge the branch.
+
+### 2026-08-06 — Codex — bugfix-semantic-editor-label-overflow
+
+Status: started
+Scope: Correct the semantic editor's overflowing element-type labels without changing screenplay behavior, document data, or pagination scope.
+Changes: Identified the layout cause: the 82 px label plus 18 px gap is positioned outside a 0.8 inch page gutter. Created an isolated bugfix branch from user-committed editor revision `bb8886c`.
+Verification: Pending CSS change and browser regression test.
+Review: A small layout correction will receive focused verification before handoff.
+Risks/next: Preserve the desktop editor visual hierarchy while keeping labels within the page. Do not change editor semantics or stage, commit, or merge.
+
 ### 2026-08-06 — Codex and independent editor reviewer — feature/phase-1-semantic-editor
 
 Status: verified

@@ -314,17 +314,18 @@ select:focus-visible,
 .script-body [data-screenplay-block] {
   position: relative;
   margin-bottom: 13px;
+  padding-top: 12px;
 }
 .script-body [data-screenplay-block]::before {
   position: absolute;
-  right: calc(100% + 18px);
-  width: 82px;
+  top: 0;
+  left: 0;
   color: #9aa3a8;
   font-family: 'IBM Plex Sans', sans-serif;
   font-size: 8px;
   font-weight: 600;
-  text-align: right;
   letter-spacing: 0.04em;
+  line-height: 1;
   content: attr(data-screenplay-element);
   text-transform: uppercase;
 }

@@ -7,6 +7,15 @@ test('writer can work with the production workspace shell', async ({ page }) => 
   await expect(healthResponse.json()).resolves.toEqual({ status: 'ok' });
   await expect(page.getByText('Finaler Draft')).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Screenplay editing canvas' })).toBeVisible();
+  const heading = page.locator('[data-block-id="2175a1b6-8d05-4e6e-bac7-e471e8df33a1"]');
+  await expect
+    .poll(() =>
+      heading.evaluate((element) => {
+        const label = getComputedStyle(element, '::before');
+        return { left: label.left, top: label.top };
+      }),
+    )
+    .toEqual({ left: '0px', top: '0px' });
   await page.getByRole('button', { name: /1\. INT\. APARTMENT/i }).click();
   await page.getByRole('combobox', { name: 'Active screenplay element' }).selectOption('shot');
   await expect(

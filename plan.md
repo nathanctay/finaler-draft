@@ -1,6 +1,6 @@
 # Finaler Draft Product and Delivery Plan
 
-**Status:** The Phase 0 foundation slice was committed by the user as `7e4b9f4`; the first Phase 1 schema slice was committed as `5423afe`. The local semantic-editor slice is verified on `feature/phase-1-semantic-editor` and awaits the user's review, commit, and merge; pagination, FDX, and export work remain separate deliveries.
+**Status:** The Phase 0 foundation slice was committed by the user as `7e4b9f4`; the first Phase 1 schema slice was committed as `5423afe`; and the local semantic editor was committed as `bb8886c`. A verified semantic-editor label-overflow correction awaits the user's review and commit on `bugfix-semantic-editor-label-overflow`; pagination, FDX, and export work remain separate deliveries.
 
 This is the source of truth for product scope, architecture, delivery order, quality gates, and operating rules. Update it deliberately when a decision changes. `progress.md` is the append-only record of work actually performed.
 
@@ -238,7 +238,7 @@ No agent may silently broaden scope, replace this plan, create a partial product
 
 ## Immediate next action
 
-Review, commit, and merge the verified local semantic-editor slice on `feature/phase-1-semantic-editor`. The next feature branch will establish deterministic pagination and print-preview fixtures; FDX/PDF/DOCX work follows the renderer foundation. Authentication, database persistence, and collaboration remain separately planned Phase 0 work and must be sequenced before private documents are usable beyond local development.
+Review and commit the verified semantic-editor label-overflow correction on `bugfix-semantic-editor-label-overflow`. The next feature branch will establish deterministic pagination and print-preview fixtures; FDX/PDF/DOCX work follows the renderer foundation. Authentication, database persistence, and collaboration remain separately planned Phase 0 work and must be sequenced before private documents are usable beyond local development.
 
 ## Research basis
 
