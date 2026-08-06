@@ -14,7 +14,8 @@ export default defineConfig({
     trace: 'on-first-retry',
   },
   webServer: {
-    command: 'NODE_ENV=production PORT=4173 pnpm --filter @finaler-draft/api start',
+    command:
+      'FINALER_SYSTEM_TEST=true NODE_ENV=production PORT=4173 pnpm --filter @finaler-draft/api start',
     url: 'http://127.0.0.1:4173',
     reuseExistingServer: !process.env.CI,
   },

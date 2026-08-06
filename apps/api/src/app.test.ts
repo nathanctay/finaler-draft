@@ -1,5 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
-import { buildApp } from './app.js';
+import { buildApp, MAX_SCREENPLAY_REQUEST_BODY_BYTES } from './app.js';
+import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
+import type { ProjectStore } from './projects.js';
 
 const app = await buildApp();
 
@@ -71,3 +73,255 @@ describe('logging', () => {
     }
   });
 });
+
+describe('persisted project API', () => {
+  let createScreenplayResult: { id: string; version: number } | 'forbidden' = {
+    id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
+    version: 1,
+  };
+  let updateResult: Awaited<ReturnType<ProjectStore['updateScreenplay']>> = 'conflict';
+  const store: ProjectStore = {
+    listProjects: async () => [
+      {
+        id: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+        title: 'Project',
+        updatedAt: '2026-08-06T00:00:00Z',
+        role: 'owner',
+      },
+    ],
+    createProject: async (_actorId, title) => ({
+      id: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+      title,
+    }),
+    listScreenplays: async () => [],
+    createScreenplay: async () => {
+      if (createScreenplayResult === 'forbidden')
+        throw new (await import('./projects.js')).ForbiddenError();
+      return createScreenplayResult;
+    },
+    updateScreenplay: async () => updateResult,
+  };
+  const auth = {
+    baseUrl: 'https://app.example.test',
+    handler: async () =>
+      new Response('auth', { headers: { 'set-cookie': 'session=test; HttpOnly' } }),
+    getActorId: async (headers: Headers) =>
+      headers.get('cookie') === 'session=test' ? 'actor-1' : null,
+  };
+  it('forwards cookies through auth and rejects unauthenticated project access', async () => {
+    const app = await buildApp({ auth, projects: store });
+    try {
+      const authResponse = await app.inject({
+        method: 'POST',
+        url: '/api/auth/sign-in/email',
+        payload: { email: 'writer@example.test' },
+      });
+      expect(authResponse.headers['set-cookie']).toContain('session=test');
+      expect((await app.inject({ method: 'GET', url: '/api/projects' })).statusCode).toBe(401);
+      const projects = await app.inject({
+        method: 'GET',
+        url: '/api/projects',
+        headers: { cookie: 'session=test' },
+      });
+      expect(projects.statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+  });
+  it('validates canonical autosave input and returns optimistic conflicts', async () => {
+    const app = await buildApp({ auth, projects: store });
+    try {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
+        headers: { cookie: 'session=test' },
+        payload: { expectedVersion: 1, screenplay: screenplayFixture },
+      });
+      expect(response.statusCode).toBe(409);
+      const invalid = await app.inject({
+        method: 'PUT',
+        url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
+        headers: { cookie: 'session=test' },
+        payload: { expectedVersion: 1, screenplay: { schemaVersion: 1 } },
+      });
+      expect(invalid.statusCode).toBe(400);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('exposes every protected project operation and maps authorization outcomes', async () => {
+    const app = await buildApp({ auth, projects: store });
+    try {
+      const headers = { cookie: 'session=test' };
+      expect(
+        (
+          await app.inject({
+            method: 'POST',
+            url: '/api/projects',
+            headers,
+            payload: { title: 'New' },
+          })
+        ).statusCode,
+      ).toBe(201);
+      expect(
+        (
+          await app.inject({
+            method: 'GET',
+            url: '/api/projects/5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f/screenplays',
+            headers,
+          })
+        ).statusCode,
+      ).toBe(200);
+      expect(
+        (
+          await app.inject({
+            method: 'POST',
+            url: '/api/projects/5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f/screenplays',
+            headers,
+            payload: { title: 'Draft', screenplay: screenplayFixture },
+          })
+        ).statusCode,
+      ).toBe(201);
+      createScreenplayResult = 'forbidden';
+      expect(
+        (
+          await app.inject({
+            method: 'POST',
+            url: '/api/projects/5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f/screenplays',
+            headers,
+            payload: { title: 'Draft', screenplay: screenplayFixture },
+          })
+        ).statusCode,
+      ).toBe(403);
+      createScreenplayResult = { id: 'ecf1118c-3a2e-4656-84e6-fce75c461710', version: 1 };
+      updateResult = 'missing';
+      expect(
+        (
+          await app.inject({
+            method: 'PUT',
+            url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
+            headers,
+            payload: { expectedVersion: 1, screenplay: screenplayFixture },
+          })
+        ).statusCode,
+      ).toBe(404);
+      updateResult = 'forbidden';
+      expect(
+        (
+          await app.inject({
+            method: 'PUT',
+            url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
+            headers,
+            payload: { expectedVersion: 1, screenplay: screenplayFixture },
+          })
+        ).statusCode,
+      ).toBe(403);
+      updateResult = { version: 2 };
+      expect(
+        (
+          await app.inject({
+            method: 'PUT',
+            url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
+            headers,
+            payload: { expectedVersion: 1, screenplay: screenplayFixture },
+          })
+        ).json(),
+      ).toEqual({ version: 2 });
+      expect(
+        (await app.inject({ method: 'GET', url: '/api/projects/not-a-uuid/screenplays', headers }))
+          .statusCode,
+      ).toBe(400);
+    } finally {
+      updateResult = 'conflict';
+      await app.close();
+    }
+  });
+
+  it('accepts the full canonical worst-case wire body and rejects oversized bodies', async () => {
+    const app = await buildApp({ auth, projects: store });
+    try {
+      const headers = { cookie: 'session=test' };
+      updateResult = { version: 2 };
+      const payload = JSON.stringify({ expectedVersion: 1, screenplay: maximumWireScreenplay() });
+      expect(Buffer.byteLength(payload)).toBeGreaterThan(10 * 1024 * 1024);
+      expect(Buffer.byteLength(payload)).toBeLessThanOrEqual(MAX_SCREENPLAY_REQUEST_BODY_BYTES);
+      const valid = await app.inject({
+        method: 'PUT',
+        url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
+        headers: { ...headers, 'content-type': 'application/json' },
+        payload,
+      });
+      expect(valid.statusCode).toBe(200);
+      const tooLarge = await app.inject({
+        method: 'PUT',
+        url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
+        headers: { ...headers, 'content-type': 'application/json' },
+        payload: `"${'x'.repeat(MAX_SCREENPLAY_REQUEST_BODY_BYTES)}"`,
+      });
+      expect(tooLarge.statusCode).toBe(413);
+      expect(tooLarge.json()).toEqual({ error: 'Request too large' });
+    } finally {
+      updateResult = 'conflict';
+      await app.close();
+    }
+  });
+
+  it('returns a safe response when the auth transport fails', async () => {
+    const app = await buildApp({
+      projects: store,
+      auth: {
+        ...auth,
+        handler: async () => {
+          throw new Error('transport down');
+        },
+      },
+    });
+    try {
+      expect(
+        (await app.inject({ method: 'POST', url: '/api/auth/sign-in/email' })).statusCode,
+      ).toBe(500);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+function maximumWireScreenplay() {
+  const dualDialogueCount = 3571;
+  const textSlots = dualDialogueCount * 4;
+  let nextId = 1;
+  let remainingText = 1_500_000 - 1;
+  let remainingSlots = textSlots;
+  const id = () => `00000000-0000-4000-8000-${String(nextId++).padStart(12, '0')}`;
+  const text = () => {
+    const length = Math.floor(remainingText / remainingSlots--);
+    remainingText -= length;
+    return '\u0000'.repeat(length);
+  };
+  return {
+    schemaVersion: 1 as const,
+    id: id(),
+    title: 'T',
+    titlePages: [],
+    blocks: Array.from({ length: dualDialogueCount }, () => ({
+      id: id(),
+      type: 'dual_dialogue' as const,
+      left: {
+        id: id(),
+        blocks: [
+          { id: id(), type: 'character' as const, text: text() },
+          { id: id(), type: 'dialogue' as const, text: text() },
+        ],
+      },
+      right: {
+        id: id(),
+        blocks: [
+          { id: id(), type: 'character' as const, text: text() },
+          { id: id(), type: 'dialogue' as const, text: text() },
+        ],
+      },
+    })),
+    annotations: [],
+  };
+}

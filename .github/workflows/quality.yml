@@ -11,6 +11,18 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -24,6 +36,8 @@ jobs:
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
+      - run: TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres pnpm test:integration
+      - run: DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres pnpm --filter @finaler-draft/database db:generate && git diff --exit-code
       - run: pnpm test:coverage
       - run: pnpm exec playwright install --with-deps chromium chromium-headless-shell
       - run: pnpm build

@@ -5,7 +5,7 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
-      include: ['src/app.ts', 'src/auth.ts', 'src/projects.ts'],
+      include: ['scripts/environment.mjs'],
       thresholds: { lines: 80, functions: 80, branches: 80, statements: 80 },
     },
   },

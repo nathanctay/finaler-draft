@@ -2,7 +2,7 @@
 
 Finaler Draft is an original, web-based professional screenwriting application. It is being designed around the writing, collaboration, revision-history, and production workflows screenwriters expect from professional screenplay software, while remaining independent of Final Draft's branding, visual design, and trade dress.
 
-The project is in its engineering-foundation phase. It currently includes a tested workspace-shell prototype and API health endpoint; screenplay editing, persistence, authentication, imports/exports, and collaboration are not yet implemented.
+The project is in its engineering-foundation phase. It includes a tested workspace shell and local semantic screenplay editor. PostgreSQL persistence and Better Auth are being implemented on a dedicated branch and remain subject to real-database integration verification; imports/exports and collaboration are not yet implemented.
 
 ## Product direction
 
@@ -56,7 +56,7 @@ The Phase 0 workspace is configured. Its prerequisites are:
 - A modern browser for Playwright system tests.
 - Railway account and project configuration only when deployment work is explicitly underway.
 
-Install dependencies with `pnpm install`, copy `.env.example` to `.env` if local overrides are needed, and run `pnpm dev`. Build and launch the same-origin production service with `pnpm build` followed by `pnpm start`. Install the Chromium test runtime with `pnpm exec playwright install chromium chromium-headless-shell`, then run `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, and `pnpm test:system` before handoff. Railway uses the checked-in `railway.toml` to build, launch, and health-check the service. Never commit `.env` files, credentials, tokens, or real production configuration.
+Install dependencies with `pnpm install`, then copy the root `.env.example` to the root `.env` and set the local persistence values before running `pnpm dev`. The API and Drizzle commands load only that root file when `NODE_ENV` is unset or `development`; do not create `apps/api/.env`, `apps/web/.env`, or `packages/database/.env` files. Test and production Drizzle commands require injected `DATABASE_URL` and never read a local file. Before considering that file, commands read process-injected variables first: shell, Railway, and CI values take precedence, and Railway predeploy works with injected variables alone. The API loads a local file only when `NODE_ENV` is unset or `development`, never in test, production, or browser-system-test mode. Run `pnpm --filter @finaler-draft/database db:migrate` after configuring a new local database; use `pnpm --filter @finaler-draft/database db:generate` only when intentionally generating a reviewed migration from schema changes. Build and launch the same-origin production service with `pnpm build` followed by `pnpm start`. Install the Chromium test runtime with `pnpm exec playwright install chromium chromium-headless-shell`, then run `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, and `pnpm test:system` before handoff. Railway uses the checked-in `railway.toml` to build, launch, and health-check the service. Never commit `.env` files, credentials, tokens, or real production configuration.
 
 ## Source of truth and working record
 

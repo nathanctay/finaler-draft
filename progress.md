@@ -24,6 +24,60 @@ Risks/next: <known risks, blocker, or next handoff>
 
 ## Log
 
+### 2026-08-06 — persistence foundation environment follow-up — feature/persistence-foundation
+
+Status: ready-for-review
+Scope: Make Drizzle generation and migration commands use the repository-root local environment file without package-level environment files or production configuration regressions.
+Changes: Added a Node launcher and testable environment policy for `db:migrate` and `db:generate`. The launcher invokes Drizzle with Node's non-overriding `--env-file-if-exists` option pointed at the repository root only when `NODE_ENV` is unset or `development`; test and production omit that option and require injected configuration. Updated the developer guide and lint configuration for the launcher. No credentials, local environment values, staging, commit, or merge were recorded.
+Verification: Passed policy coverage at 100% for statements, branches, functions, and lines; full workspace formatting, lint, strict typecheck, and coverage; production generation with an injected non-secret database URL; and `git diff --check`. Verified a production command without injected `DATABASE_URL` rejects configuration despite a root local file. Earlier local migration execution could not establish a connection to the local PostgreSQL endpoint from this worktree environment.
+Review: Pending focused review.
+Risks/next: Shell, Railway, and CI variables retain precedence because Node's environment-file loader does not replace existing variables. Re-run `pnpm --filter @finaler-draft/database db:migrate` once the Docker endpoint is reachable from this environment, then run the real integration suite.
+
+### 2026-08-06 — persistence foundation final verification — feature/persistence-foundation
+
+Status: verified
+Scope: Complete all required gates after final security and request-bound corrections.
+Changes: None beyond the final-review corrections recorded below.
+Verification: Passed `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, `pnpm build`, `PLAYWRIGHT_CHANNEL=chrome pnpm test:system`, `TEST_DATABASE_URL=<transient reachable URL> pnpm --filter @finaler-draft/api test:integration`, and `git diff --check`. Real PostgreSQL integration passed all 3 tests. The dedicated integration command also correctly fails without `TEST_DATABASE_URL`; compiled production startup correctly fails without persistence configuration, while the explicitly named browser-system-test mode starts only for the static-shell test. The 16 MiB request-bound test validates a >10 MiB, 24,997-node, 1.5-million-control-character canonical payload and an oversized 413 response.
+Review: Awaiting independent final review; no commit/merge/staging occurred.
+Risks/next: The Vite editor bundle warning remains documented and intentionally unsuppressed. User-controlled review, staging, commit, and merge are still required.
+
+### 2026-08-06 — persistence foundation final-review corrections — feature/persistence-foundation
+
+Status: ready-for-review
+Scope: Resolve final review findings on authorization locking, true canonical wire bounds, project timestamps, explicit integration invocation, and secure production startup.
+Changes: Replaced membership `FOR KEY SHARE` locks with `FOR UPDATE` locks so editor-to-reviewer downgrade and revocation serialize against an in-flight save. Screenplay creation now advances its parent project timestamp inside the same transaction. Set and documented a 16 MiB API bound derived from canonical resource caps; added a full 1.5 million control-character / 24,997-node wire-payload acceptance test and over-limit 413 test. The dedicated integration command now fails immediately when `TEST_DATABASE_URL` is absent. Production startup now fails without persistence configuration; only the explicitly named browser-system-test environment can serve the compiled static shell without it.
+Verification: Passed focused API typecheck and coverage (16 tests; 97.22% statements/lines, 86.48% branches, 100% functions). Passed real disposable PostgreSQL integration after local service availability: 3 tests covering migrations/drift invariants, Better Auth sign-up/sign-in/session/API authorization, same-version saves, revocation race, and role-downgrade race. Verified the explicit integration command fails without `TEST_DATABASE_URL`. Full workspace gates and final independent review remain pending after these final corrections.
+Review: Awaiting independent re-review.
+Risks/next: No staging, commit, or merge occurred. The production/static startup distinction is intentionally tested by the browser-system environment; deployment must set complete persistence configuration.
+
+### 2026-08-06 — persistence foundation final local gates — feature/persistence-foundation
+
+Status: blocked
+Scope: Re-run all local quality gates after remediation and confirm migration metadata has no further schema drift.
+Changes: None beyond the verification-remediation entry below.
+Verification: Passed `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, `pnpm build`, `PLAYWRIGHT_CHANNEL=chrome pnpm test:system`, `DATABASE_URL=<disposable URL> pnpm --filter @finaler-draft/database db:generate`, and `git diff --check`. Config coverage is 100% in every metric; screenplay coverage is 100%; API coverage is 97.20% statements/lines, 86.48% branches, and 100% functions across `app.ts`, `auth.ts`, and `projects.ts`; web per-file coverage remains above 80%. The browser system test passed against the compiled production service with no persistence credentials. The existing Vite 500 kB editor-chunk warning remains intentionally unsuppressed and is separately planned for route-level code splitting.
+Review: Pending independent final review.
+Risks/next: The real PostgreSQL integration suite remains an unpassed gate because the transient local endpoint refused connections; it safely created no database. Do not merge until it passes against a reachable endpoint and an independent reviewer approves the complete diff.
+
+### 2026-08-06 — persistence foundation verification remediation — feature/persistence-foundation
+
+Status: blocked
+Scope: Close the persistence foundation's remaining test, coverage, migration-drift, server-startup, and concurrency gaps without expanding product scope.
+Changes: Added a disposable-PostgreSQL integration harness that creates and drops only a UUID-named `finaler_draft_test_*` database from `TEST_DATABASE_URL`, runs Drizzle migrations twice, verifies the migration schema and single-owner partial index, and exercises real Better Auth sign-up, sign-in, session, project/screenplay authorization, same-version save serialization, and revocation-versus-save behavior. Reworked save/create authorization to lock the membership row inside the write transaction, preventing a revocation race; added a schema-declared/generated migration for the single-owner index so Drizzle metadata and SQL no longer drift. Added valid near-maximum canonical-body and over-limit 413 coverage; the API's size limit is 2 MiB. The production server can now serve health/static system-test traffic with no persistence variables, while partial persistence configuration still fails validation and configured persistence remains protected. CI provisions PostgreSQL and runs migration integration plus generation/diff verification.
+Verification: Passed API unit coverage with 16 tests (97.18% statements/lines, 86.48% branches, 100% functions across app/auth/projects) before final workspace rerun. The real integration command was invoked with a transient, user-supplied `TEST_DATABASE_URL` and made no database changes because the configured local PostgreSQL endpoint refused connections; cleanup is guarded so it does not issue cleanup queries after failed setup. Full workspace formatting/lint/typecheck/coverage/build/system rerun remains pending after the final documentation and config-test correction. No secret was written, logged, or staged.
+Review: Independent final review remains required after real database availability and all gates pass.
+Risks/next: This branch is not merge-ready. Start the local PostgreSQL service or supply a reachable disposable-test endpoint, rerun the integration command, then rerun full quality and browser-system gates. Email verification, reset, transactional email, rate limiting, sharing, collaboration, revision history, FDX, PDF, and DOCX remain out of scope.
+
+### 2026-08-06 — persistence foundation agent — feature/persistence-foundation
+
+Status: in progress
+Scope: Establish the bounded PostgreSQL/Drizzle, Better Auth, and authorized project/screenplay persistence foundation required before autosave can connect the local editor to private documents.
+Changes: Added a database workspace package and generated reviewed SQL migration for Better Auth's core tables plus projects, membership roles (`owner`, `editor`, `reviewer`), and screenplays. Added DI-composed Fastify auth transport and protected project/screenplay routes, canonical-screenplay validation, a 2 MiB request limit, SHA-256 snapshot hashes, and optimistic version-conflict responses. The project owner is represented exclusively by a membership row; no duplicate owner field can drift.
+Verification: In progress. Focused API tests cover auth cookie forwarding, protected-route rejection, canonical validation, and save conflict behavior. A real disposable PostgreSQL integration test remains required before handoff.
+Review: Pending independent review.
+Risks/next: Email verification, password reset, transactional delivery, and public-launch hardening cannot be completed until the project selects an email provider/domain. They are deliberately not simulated or represented as complete. No staging, commit, or merge occurred.
+
 ### 2026-08-06 — Codex and independent editor reviewer — feature/transition-next-scene-heading
 
 Status: verified
@@ -266,3 +320,30 @@ Changes: Exported and enforced `MAX_CANONICAL_NODES` at 25,000, counting each ro
 Verification: Passed focused `pnpm --filter @finaler-draft/screenplay test:coverage` (21 tests; 100% statements, branches, functions, and lines) and `pnpm --filter @finaler-draft/screenplay typecheck`. Passed workspace `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, `pnpm build`, and `git diff --check`.
 Review: The independent reviewer must re-review this correction before this feature slice is marked verified.
 Risks/next: No staging, commit, or merge has occurred. Retain the individual resource and text limits alongside the aggregate node budget.
+
+### 2026-08-06 — Codex environment-loading correction — feature/persistence-foundation
+
+Status: ready-for-review
+Scope: Correct root local-environment loading for the persistent API without creating per-application environment files.
+Changes: Added an API startup environment loader that resolves the repository-root `.env` from the server module location, loads it only when present for local startup, and runs before strict configuration validation. It intentionally bypasses local files in injected production and browser-system-test modes. Node preserves values injected by the shell or Railway, so deployment configuration takes precedence and startup remains compatible with no local file. Documented the single-root-file rule and added isolated non-secret tests for startup policy, absent-file handling, local loading, and injected-value precedence.
+Verification: Pending focused API and workspace quality gates.
+Review: Pending independent review.
+Risks/next: Do not inspect, print, stage, or commit any local `.env` file. The existing root ignore rules cover `.env` and `.env.*` while preserving `.env.example`.
+
+### 2026-08-06 — Codex environment-loading correction verification — feature/persistence-foundation
+
+Status: verified
+Scope: Complete verification after correcting the production/browser-system startup policy for root local environment loading.
+Changes: The loader now runs only for local startup. Injected production and browser-system-test processes bypass the local file, preserving production fail-closed behavior and allowing the static system server to start independently of local development configuration.
+Verification: Passed focused API tests (19 unit tests; 3 integration tests skipped outside the explicit integration command), API typecheck, workspace formatting, lint, coverage, build, disposable PostgreSQL integration (3 tests), browser system test, and `git diff --check`. The existing unsuppressed Vite editor-chunk warning remains unchanged.
+Review: Pending independent review.
+Risks/next: No local `.env` contents were inspected, printed, staged, or committed. The earlier attempt to launch an integration command through a nonexistent worktree-local pnpm module was a tooling invocation error only; it made no database changes and was replaced by the standard verified integration command.
+
+### 2026-08-06 — Codex environment-loading policy correction — feature/persistence-foundation
+
+Status: ready-for-review
+Scope: Tighten the local root-environment loader so test processes cannot read developer configuration.
+Changes: The loader now runs only when process `NODE_ENV` is unset or `development`; it never runs for `test`, `production`, or browser-system-test processes. Added the test-environment regression case and clarified that the injected process environment determines this policy before a root file is considered.
+Verification: Pending focused gates.
+Review: Pending independent review.
+Risks/next: No local `.env` contents were inspected, printed, staged, or committed.
