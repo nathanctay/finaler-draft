@@ -1,4 +1,4 @@
-# Finaler Progress Log
+# Finaler Draft Progress Log
 
 This is the append-only operational record for the project. It complements `plan.md`, which is the source of truth for decisions and scope.
 
@@ -23,6 +23,14 @@ Risks/next: <known risks, blocker, or next handoff>
 ```
 
 ## Log
+
+### 2026-08-06 — Codex — main bootstrap workspace
+Status: verified
+Scope: Correct product name in source-of-truth documentation.
+Changes: Updated README, plan, and progress-log headings and product references to the full product name, Finaler Draft. The existing directory path remains unchanged.
+Verification: Searched all root documentation and confirmed no standalone product-name references to the prior abbreviated form remain.
+Review: Not required; documentation-only naming correction.
+Risks/next: None.
 
 ### 2026-08-06 — Codex — main bootstrap workspace
 Status: started

@@ -1,12 +1,12 @@
-# Finaler
+# Finaler Draft
 
-Finaler is an original, web-based professional screenwriting application. It is being designed around the writing, collaboration, revision-history, and production workflows screenwriters expect from professional screenplay software, while remaining independent of Final Draft's branding, visual design, and trade dress.
+Finaler Draft is an original, web-based professional screenwriting application. It is being designed around the writing, collaboration, revision-history, and production workflows screenwriters expect from professional screenplay software, while remaining independent of Final Draft's branding, visual design, and trade dress.
 
 The project is currently in its engineering-foundation phase. No application functionality has been implemented yet.
 
 ## Product direction
 
-Finaler will provide a structured screenplay editor rather than a generic rich-text editor. Screenplay elements, scene and block identifiers, keyboard-first authoring, deterministic pagination, FDX interchange, and PDF export are foundational requirements.
+Finaler Draft will provide a structured screenplay editor rather than a generic rich-text editor. Screenplay elements, scene and block identifiers, keyboard-first authoring, deterministic pagination, FDX interchange, and PDF export are foundational requirements.
 
 Planned major capabilities include:
 

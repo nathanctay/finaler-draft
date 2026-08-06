@@ -1,4 +1,4 @@
-# Finaler Product and Delivery Plan
+# Finaler Draft Product and Delivery Plan
 
 **Status:** Phase 0 bootstrap authorized; implementation has not started beyond documentation and repository hygiene.
 
@@ -6,7 +6,7 @@ This is the source of truth for product scope, architecture, delivery order, qua
 
 ## Product boundaries
 
-Finaler is an original, web-based professional screenwriting application. It will deliver functional compatibility with the workflows writers expect from Final Draft, without copying its branding, visual design, content, or trade dress.
+Finaler Draft is an original, web-based professional screenwriting application. It will deliver functional compatibility with the workflows writers expect from Final Draft, without copying its branding, visual design, content, or trade dress.
 
 Final Draft is not a single parity target: its desktop product includes extensive production workflows while its web Writer is intentionally narrower. The product will therefore deliver the durable core first, then review, planning, and production features in order.
 
