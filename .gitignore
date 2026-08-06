@@ -1,0 +1,44 @@
+# Dependencies and package-manager state
+node_modules/
+.pnp.*
+
+# Build output and local tooling caches
+dist/
+build/
+.vite/
+.turbo/
+.cache/
+.eslintcache
+*.tsbuildinfo
+
+# Test, coverage, and browser automation artifacts
+coverage/
+playwright-report/
+test-results/
+blob-report/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local environment configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local development data; never ignore tracked import/export fixtures
+local-storage/
+*.db
+*.sqlite
+*.sqlite3
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
