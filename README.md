@@ -13,6 +13,7 @@ Planned major capabilities include:
 - Professional screenplay authoring with projects, title pages, navigation, and SmartType-style completion.
 - Authenticated sharing and real-time collaboration with offline recovery.
 - Durable version history, named revisions, screenplay-aware diffs, and a safe restore-as-current workflow.
+- FDX interchange plus downloadable, print-faithful PDFs and Word-compatible `.docx` files.
 - Review tools, including comments and Track Changes.
 - Planning and production workflows, followed by a collaborative storyboard and visual-planning board in Version 2.
 
@@ -23,18 +24,22 @@ The interface will feel like desktop authoring software: dense and keyboard-firs
 | Area            | Planned technology                                              |
 | --------------- | --------------------------------------------------------------- |
 | Web application | React, TypeScript (strict mode), Vite                           |
+| Routing         | TanStack Router with Zod-validated route/search state           |
 | API             | Fastify on Node.js LTS                                          |
 | Authentication  | Better Auth with PostgreSQL                                     |
 | Editor          | Tiptap core / ProseMirror with custom screenplay extensions     |
 | Collaboration   | Yjs over WebSockets, served by self-hosted Hocuspocus           |
 | Data            | PostgreSQL and Drizzle migrations                               |
-| File storage    | Railway object storage or compatible S3 storage                 |
+| File storage    | Private Railway object storage or compatible S3 storage         |
+| Exports         | Canonical renderer, headless Chromium PDF, OOXML `.docx`        |
 | Testing         | Vitest, integration tests against real services, and Playwright |
 | Deployment      | Railway                                                         |
 
 Yjs is the collaboration model, not a replacement for WebSockets. WebSockets transport updates; Yjs resolves concurrent and offline changes safely. Hocuspocus provides the self-hosted WebSocket protocol, persistence, and authorization integration.
 
 The planned libraries are open source and self-hosted; they do not require a software subscription. Railway hosting, PostgreSQL, object storage, transactional email, domains, and any optional OAuth providers can incur operating costs.
+
+Screenplays are stored as canonical semantic data and revision snapshots in PostgreSQL, not as PDF or Word files. PDFs and `.docx` files are generated from a hash-identified snapshot; a private object bucket holds user assets, imports, and only short-lived asynchronous export results.
 
 ## Status and roadmap
 

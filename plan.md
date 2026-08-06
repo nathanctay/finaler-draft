@@ -1,6 +1,6 @@
 # Finaler Draft Product and Delivery Plan
 
-**Status:** The Phase 0 foundation slice is verified on `feature/phase-0-foundation-workspace` and awaits the user's review, commit, and merge.
+**Status:** The Phase 0 foundation slice was committed by the user as `7e4b9f4`. The next delivery is canonical screenplay authoring, including the FDX/PDF fixture suite and document exports.
 
 This is the source of truth for product scope, architecture, delivery order, quality gates, and operating rules. Update it deliberately when a decision changes. `progress.md` is the append-only record of work actually performed.
 
@@ -18,13 +18,15 @@ Screenplays are sensitive creative work. Documents are private by default; shari
 | ------------------------------ | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Application stack              | TypeScript end-to-end                                         | The hard parts of this product—structured editing, browser offline support, and real-time collaboration—have the best-maintained ecosystem in TypeScript. A Go API plus a Node collaboration sidecar would add an authorization boundary and two language stacks without a current benefit. |
 | Frontend                       | React, TypeScript strict mode, Vite                           | A fast SPA with no full-stack framework requirement.                                                                                                                                                                                                                                        |
+| Routing                        | TanStack Router, file-based routes with Zod validation        | Type-safe paths and addressable UI state suit a document application. Use TanStack Router only, not TanStack Start or SSR.                                                                                                                                                                  |
 | API                            | Fastify running on Node LTS                                   | Typed REST API, same-origin session handling, and a clean place for authorization, exports, and collaboration token/session checks.                                                                                                                                                         |
 | Authentication                 | Better Auth with PostgreSQL                                   | Self-hosted email/password sessions for v1. Do not implement password handling ourselves. Add verified-email, reset, rate-limiting, and transactional email before public launch.                                                                                                           |
 | Editor                         | Tiptap core / ProseMirror, custom screenplay extensions       | The document is structured screenplay data, not HTML or generic rich text. Use only open-source core features; do not depend on Tiptap Cloud or paid extensions.                                                                                                                            |
 | Collaboration                  | Yjs via self-hosted Hocuspocus over WebSockets                | Yjs handles concurrent/offline document merging; Hocuspocus is the WebSocket server and persistence/auth integration.                                                                                                                                                                       |
 | Primary data                   | PostgreSQL                                                    | Durable relational metadata, permissions, Yjs binary updates/checkpoints, revision projections, comments, and audit data.                                                                                                                                                                   |
-| Files                          | Railway object storage or S3-compatible storage               | Imported files, PDFs, images, and storyboard assets. Do not put large assets in PostgreSQL.                                                                                                                                                                                                 |
-| Deployment                     | Railway                                                       | One app service and PostgreSQL initially. Serve the Vite build from the Fastify application so web and API share an origin. Add a worker service for expensive exports when measurements justify it.                                                                                        |
+| Files                          | Private Railway object storage or compatible S3 storage       | Imported files, image/storyboard assets, and short-lived asynchronous export artifacts. Canonical screenplay data stays in PostgreSQL.                                                                                                                                                      |
+| Exports                        | Canonical renderer, headless Chromium PDF, and OOXML `.docx`  | Derive downloads from a hash-identified screenplay snapshot; do not make PDFs or Word files the source of truth.                                                                                                                                                                            |
+| Deployment                     | Railway                                                       | One web/API service and PostgreSQL initially. Serve the Vite build from Fastify so web and API share an origin. Add a dedicated export worker with the export feature; it must not block web requests.                                                                                      |
 | Horizontal collaboration scale | Redis pub/sub, introduced before adding a second app instance | Connected users on separate instances must receive the same Yjs updates.                                                                                                                                                                                                                    |
 
 ### Why Yjs is used with WebSockets
@@ -52,6 +54,26 @@ There will still be operating costs:
 - Do not adopt Tiptap Cloud, a managed collaboration provider, or paid editor extensions without an explicit plan change.
 
 At scaffold time, pin dependency versions and add license/dependency vulnerability checks. Re-check every third-party license before introducing a package.
+
+### Routing and client data boundaries
+
+Use TanStack Router with its Vite plugin and a file-based route tree. It is the right choice for this React SPA: document, project, and revision identifiers are checked at compile time; Zod validates route parameters and search state; and navigation state is shareable without a parallel URL-state implementation. TanStack Query is the companion cache for REST metadata and mutations.
+
+The router is a user-experience boundary, never an authorization boundary. Route loaders may redirect an unauthenticated user and prefetch permitted metadata, but every API and collaboration request must independently authenticate and authorize the actor.
+
+- Routes will cover authentication, project lists, project detail, individual screenplay editors, revision history, shared-document entry points, and settings.
+- Only safe, addressable UI state belongs in the URL: selected scene, outline/revision panel, and view mode. Validate it with Zod. Never put screenplay text, collaboration updates, permissions, session data, or presigned asset URLs in a route or search parameter.
+- The active editor document and Yjs synchronization remain editor-owned state, not TanStack Query cache data. TanStack Query is for REST resources such as projects, document metadata, revisions, comments, and export-job status.
+
+### Export architecture
+
+PDF export is a required Phase 1 capability, not a late optional feature. The server creates an immutable canonical screenplay snapshot (and records its hash/revision), renders the same deterministic paginated screenplay layout used for print preview, and uses headless Chromium to produce PDF. The client polls or subscribes to an export job and downloads a short-lived, authorized result.
+
+Provide `.docx` export in Phase 1 from the same canonical snapshot using an OOXML generator. It should preserve the screenplay's content, element semantics, page breaks, and basic page layout, but PDF is the fidelity contract for exact screenplay pagination. Do not support legacy binary `.doc` initially: `.docx` is the modern interoperable format, while reliable `.doc` generation would add a disproportionate compatibility burden.
+
+Exports are derived artifacts, not stored screenplays. PostgreSQL holds the semantic screenplay, revisions, permissions, job metadata, and content hashes. Private object storage holds original imports, user assets, and only temporary export results needed by asynchronous workers; apply a lifecycle expiry and delete a result once it expires. Do not retain an export permanently unless a user explicitly requests an archival copy.
+
+Export correctness requires fixture-driven tests: canonical screenplay to print-preview/page-count assertions, PDF text and page-image regression tests, DOCX package/semantic tests, authorization and expiry checks, and a test that an export made from a historical revision exactly identifies that revision rather than the mutable current document.
 
 ## Canonical screenplay model
 
@@ -94,6 +116,10 @@ document_yjs_checkpoints
 document_revisions
   id, document_id, source_epoch, kind, label, authored_by, created_at,
   canonical_screenplay JSONB, canonical_hash, rendered_text, preview_metadata
+
+document_exports
+  id, document_id, source_revision_id, canonical_hash, format, state, object_key,
+  byte_size, expires_at, requested_by, created_at, completed_at
 ```
 
 Persist authenticated Yjs updates append-only, compact them into checkpoints, and create application-level revisions for named milestones, meaningful idle sessions, major structural changes, and exports. Retain named revisions indefinitely; document the retention policy for automatic revisions. Cursors and presence are transient and never belong in history. Browser IndexedDB stores a local offline copy.
@@ -137,7 +163,7 @@ Before the main editor implementation, create and review a clickable shell/desig
 
 - Projects, screenplay creation, semantic elements, keyboard element switching, title pages, autosave, and scene/character navigation.
 - Deterministic pagination foundation and accessible editor behavior.
-- FDX import/export compatibility fixtures plus PDF export; add Fountain/plain-text interchange where it does not compromise FDX quality.
+- FDX import/export compatibility fixtures; deterministic PDF export through the server-side canonical renderer; and Word-compatible `.docx` export. Add Fountain/plain-text interchange where it does not compromise FDX quality.
 - SmartType-style completion from document data.
 
 ### Phase 2 — Collaboration and durable version history
@@ -193,7 +219,7 @@ No agent may silently broaden scope, replace this plan, create a partial product
 
 ## Immediate next action
 
-Review, commit, and merge the verified Phase 0 foundation slice from `feature/phase-0-foundation-workspace`. Then create the next feature branch for semantic screenplay editing and the FDX/PDF fixture suite; authentication, database persistence, and collaboration remain separately planned Phase 0 work.
+Create the next feature branch for the canonical screenplay model, semantic editor, deterministic pagination foundation, and FDX/PDF/DOCX fixture suite. Authentication, database persistence, and collaboration remain separately planned Phase 0 work and must be sequenced before private documents are usable beyond local development.
 
 ## Research basis
 
@@ -202,4 +228,7 @@ Review, commit, and merge the verified Phase 0 foundation slice from `feature/ph
 - Yjs architecture and document updates: <https://docs.yjs.dev/> and <https://docs.yjs.dev/api/document-updates>
 - Google Docs version-history UX: <https://support.google.com/docs/answer/190843>
 - Railway PostgreSQL and WebSocket guidance: <https://docs.railway.com/databases/postgresql> and <https://docs.railway.com/guides/socketio>
+- Railway private, S3-compatible object storage and export-worker patterns: <https://docs.railway.com/storage-buckets> and <https://docs.railway.com/guides/storage-buckets-guide>
+- TanStack Router type-safe routes and validated search parameters: <https://tanstack.com/router/latest/docs/guide/type-safety> and <https://tanstack.com/router/latest/docs/guide/search-params>
+- Playwright server-side PDF generation: <https://playwright.dev/docs/api/class-page#page-pdf>
 - Final Draft image-capable Beat Board: <https://kb.finaldraft.com/hc/en-us/articles/15575274173716-Is-there-any-way-to-integrate-storyboards-into-Final-Draft>

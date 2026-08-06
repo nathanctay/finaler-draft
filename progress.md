@@ -24,6 +24,15 @@ Risks/next: <known risks, blocker, or next handoff>
 
 ## Log
 
+### 2026-08-06 — Codex — main
+
+Status: verified
+Scope: Record approved architecture decisions for routing and document export.
+Changes: Updated `plan.md` and `README.md` to select TanStack Router with Zod-validated URL state and TanStack Query for REST resources; to make server-generated PDF and `.docx` downloads required Phase 1 work; and to define canonical PostgreSQL storage with temporary private object-storage export artifacts.
+Verification: Checked the current TanStack Router, Playwright, and Railway documentation. The decisions introduce no implementation code or dependencies.
+Review: The lead selected the design after evaluating the project boundaries and deployment model.
+Risks/next: PDF/DOCX generation needs a dedicated feature branch, dependency/license review, fixture suite, and worker deployment before implementation. Legacy `.doc` is intentionally not planned.
+
 ### 2026-08-06 — Codex and Phase 0 agents — feature/phase-0-foundation-workspace
 
 Status: ready-for-review
