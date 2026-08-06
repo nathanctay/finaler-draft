@@ -38,7 +38,7 @@ const nextElementOnEnter: Record<ScreenplayElementType, ScreenplayElementType> =
   character: 'dialogue',
   dialogue: 'action',
   parenthetical: 'dialogue',
-  transition: 'action',
+  transition: 'scene_heading',
   shot: 'action',
 };
 

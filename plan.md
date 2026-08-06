@@ -1,6 +1,6 @@
 # Finaler Draft Product and Delivery Plan
 
-**Status:** The Phase 0 foundation slice was committed by the user as `7e4b9f4`; the first Phase 1 schema slice was committed as `5423afe`; and the local semantic editor was committed as `bb8886c`. A verified semantic-editor label-overflow correction awaits the user's review and commit on `bugfix-semantic-editor-label-overflow`; pagination, FDX, and export work remain separate deliveries.
+**Status:** The Phase 0 foundation slice was committed by the user as `7e4b9f4`; the first Phase 1 schema slice was committed as `5423afe`; the local semantic editor was committed as `bb8886c`; and its label-overflow correction was committed as `6b4d534`. The Transition-to-Scene-Heading keyboard-flow correction is verified on `feature/transition-next-scene-heading` and awaits the user's review, commit, and merge; pagination, FDX, and export work remain separate deliveries.
 
 This is the source of truth for product scope, architecture, delivery order, quality gates, and operating rules. Update it deliberately when a decision changes. `progress.md` is the append-only record of work actually performed.
 
@@ -102,7 +102,7 @@ Notes are non-printing annotations, not screenplay blocks. They must remain anch
 
 The first editor implementation uses the open-source Tiptap core and React bindings with custom screenplay nodes; it does not use a generic rich-text starter schema or a paid Tiptap service. It edits a local canonical screenplay projection only. Persistence, authentication, collaboration, FDX conversion, title-page editing, and deterministic paginated print layout are deliberately separate slices.
 
-The initial keyboard defaults mirror the core Final Draft writing flow: Enter after a scene heading creates action, after action creates action, after character or parenthetical creates dialogue, and after dialogue creates action. Tab from action creates character; Tab from dialogue creates parenthetical. The toolbar element selector changes the active block's screenplay element. Each transformation must preserve the block's stable identity where the schema permits it, and the UI must show the active element and derive Navigator scenes from the shared schema. Local undo/redo is required; it must not be presented as collaboration history.
+The initial keyboard defaults mirror the core Final Draft writing flow: Enter after a scene heading creates action, after action creates action, after character or parenthetical creates dialogue, after dialogue creates action, and after transition creates a scene heading. Tab from action creates character; Tab from dialogue creates parenthetical. The toolbar element selector changes the active block's screenplay element. Each transformation must preserve the block's stable identity where the schema permits it, and the UI must show the active element and derive Navigator scenes from the shared schema. Local undo/redo is required; it must not be presented as collaboration history.
 
 The semantic-editor production bundle currently measures about 177 kB gzip and triggers Vite's default 500 kB uncompressed-chunk warning. Do not suppress that warning. When the TanStack Router route tree is introduced, lazy-load the editor route and establish a documented bundle budget before adding further authoring extensions.
 
@@ -238,7 +238,7 @@ No agent may silently broaden scope, replace this plan, create a partial product
 
 ## Immediate next action
 
-Review and commit the verified semantic-editor label-overflow correction on `bugfix-semantic-editor-label-overflow`. The next feature branch will establish deterministic pagination and print-preview fixtures; FDX/PDF/DOCX work follows the renderer foundation. Authentication, database persistence, and collaboration remain separately planned Phase 0 work and must be sequenced before private documents are usable beyond local development.
+Review, commit, and merge the verified Transition-to-Scene-Heading keyboard-flow correction on `feature/transition-next-scene-heading`. The next feature branch will establish deterministic pagination and print-preview fixtures; FDX/PDF/DOCX work follows the renderer foundation. Authentication, database persistence, and collaboration remain separately planned Phase 0 work and must be sequenced before private documents are usable beyond local development.
 
 ## Research basis
 

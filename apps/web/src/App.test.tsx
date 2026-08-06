@@ -15,6 +15,7 @@ import {
 
 const firstActionId = 'ba53c2dc-10a6-46d7-a409-9aabbff7cf5d';
 const firstSceneId = '2175a1b6-8d05-4e6e-bac7-e471e8df33a1';
+const transitionId = 'd01faf47-64e7-4f7c-853a-3c6ace1464ad';
 
 function getBlock(canvas: HTMLElement, id: string): HTMLElement {
   const block = canvas.querySelector<HTMLElement>(`[data-block-id="${id}"]`);
@@ -155,6 +156,38 @@ describe('local semantic screenplay editor', () => {
 
     expect(editor.state.doc.child(1).textContent).toBe('Sun');
     expect(editor.state.doc.child(2).textContent).toMatch(/^ settles across/u);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('creates a scene heading after a transition', () => {
+    const mount = document.createElement('div');
+    document.body.append(mount);
+    const editor = new Editor({
+      content: initialScreenplayContent,
+      element: mount,
+      extensions: screenplayExtensions,
+    });
+    const transitionPosition = findScreenplayBlockPosition(editor, transitionId);
+    if (transitionPosition === undefined) {
+      throw new Error('Initial transition block was not found.');
+    }
+    const transition = editor.state.doc.nodeAt(transitionPosition);
+    if (transition === null) {
+      throw new Error('Initial transition node was not found.');
+    }
+
+    editor.view.dispatch(
+      editor.state.tr.setSelection(
+        TextSelection.create(editor.state.doc, transitionPosition + transition.nodeSize - 1),
+      ),
+    );
+    fireEvent.keyDown(editor.view.dom, { key: 'Enter' });
+
+    const insertedHeading = editor.state.doc.child(5);
+    expect(insertedHeading.attrs.element).toBe('scene_heading');
+    expect(insertedHeading.textContent).toBe('');
+    expect(insertedHeading.attrs.id).not.toBe(transitionId);
     editor.destroy();
     mount.remove();
   });

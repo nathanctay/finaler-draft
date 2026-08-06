@@ -24,6 +24,24 @@ Risks/next: <known risks, blocker, or next handoff>
 
 ## Log
 
+### 2026-08-06 — Codex and independent editor reviewer — feature/transition-next-scene-heading
+
+Status: verified
+Scope: Final review and verification of the Transition-to-Scene-Heading keyboard-flow correction.
+Changes: Changed only the local editor's Transition Enter mapping from Action to Scene Heading, with a regression test that inserts at the end of a Transition and confirms an empty Scene Heading with a fresh stable ID.
+Verification: Passed `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, `PLAYWRIGHT_CHANNEL=chrome pnpm test:system`, and `git diff --check`. The web suite contains 10 tests and retains enforced per-file coverage above 80%.
+Review: Focused independent review approved the mapping, cursor position, documentation, and limited scope with no actionable findings.
+Risks/next: This is a verified, uncommitted behavior correction. The user must review, stage, commit, and merge it. The Vite editor-bundle warning remains the separately documented performance follow-up.
+
+### 2026-08-06 — Codex — feature/transition-next-scene-heading
+
+Status: started
+Scope: Change the local semantic editor's Enter transition from a Transition block to a Scene Heading block.
+Changes: Created an isolated feature branch from user-committed semantic-editor label fix `6b4d534`. Updated `plan.md` to define this screenwriting-flow default.
+Verification: Pending focused keyboard regression coverage and relevant quality gates.
+Review: Pending focused review.
+Risks/next: This is a local editor behavior adjustment only; it must preserve stable IDs, shared-schema validity, and the existing scope exclusions. No agent will stage, commit, or merge.
+
 ### 2026-08-06 — Codex — bugfix-semantic-editor-label-overflow
 
 Status: verified
