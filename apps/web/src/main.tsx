@@ -11,8 +11,10 @@ import { createRouter } from '@tanstack/react-router';
 import { routeTree } from './routeTree.gen.js';
 import './styles.css';
 
+const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+const router = createRouter({ context: { queryClient }, defaultPreload: 'intent', routeTree });
+
 const root = document.getElementById('root');
-const router = createRouter({ defaultPreload: 'intent', routeTree });
 
 if (!root) {
   throw new Error('Application root was not found.');
@@ -20,9 +22,7 @@ if (!root) {
 
 createRoot(root).render(
   <StrictMode>
-    <QueryClientProvider
-      client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
-    >
+    <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
     </QueryClientProvider>
   </StrictMode>,

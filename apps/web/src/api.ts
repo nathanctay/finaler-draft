@@ -20,6 +20,12 @@ const screenplayResponseSchema = z.object({
   title: z.string(),
   version: z.number().int().positive(),
 });
+const sessionUserSchema = z.object({
+  email: z.string(),
+  id: z.string(),
+  name: z.string(),
+});
+const sessionResponseSchema = z.object({ user: sessionUserSchema }).nullable();
 
 async function request(path: string, init?: RequestInit): Promise<Response> {
   const headers = init?.body
@@ -97,8 +103,20 @@ export class AuthApiError extends ApiError {
   }
 }
 
+/**
+ * `GET /api/auth/get-session` returns HTTP 200 with a body of literally `null` when
+ * signed out, not an error. Resolve that to `null` rather than throwing; still reject
+ * a non-OK status and a body that is neither `null` nor a valid session.
+ */
+async function session(): Promise<SessionUser | null> {
+  const response = await request('/api/auth/get-session');
+  if (!response.ok) throw new ApiError(response.status);
+  const body = sessionResponseSchema.parse(await response.json());
+  return body?.user ?? null;
+}
+
 export const api = {
-  session: () => json('/api/auth/get-session', z.object({ user: z.object({ id: z.string() }) })),
+  session,
   signIn: (email: string, password: string) =>
     authenticationJson('/api/auth/sign-in/email', z.unknown(), {
       body: JSON.stringify({ email, password }),
@@ -137,6 +155,7 @@ export const api = {
 
 export type Project = z.infer<typeof projectSchema>;
 export type ScreenplaySummary = z.infer<typeof screenplaySummarySchema>;
+export type SessionUser = z.infer<typeof sessionUserSchema>;
 export type PersistedScreenplay = {
   id: string;
   projectId: string;

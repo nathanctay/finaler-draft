@@ -1,12 +1,20 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { createFileRoute, Link } from '@tanstack/react-router';
+import { createFileRoute, Link, redirect, useNavigate } from '@tanstack/react-router';
 import { api } from '../../api.js';
+import { guardSessionUser } from '../../session.js';
 
-export const Route = createFileRoute('/projects/')({ component: ProjectsPage });
+export const Route = createFileRoute('/projects/')({
+  beforeLoad: async ({ context }) => {
+    const user = await guardSessionUser(context.queryClient);
+    if (!user) throw redirect({ to: '/sign-in' });
+  },
+  component: ProjectsPage,
+});
 
 function ProjectsPage() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [title, setTitle] = useState('');
   const projects = useQuery({ queryKey: ['projects'], queryFn: api.projects });
   const create = useMutation({
@@ -16,6 +24,15 @@ function ProjectsPage() {
       return queryClient.invalidateQueries({ queryKey: ['projects'] });
     },
   });
+  const signOut = useMutation({
+    mutationFn: api.signOut,
+    onSuccess: () => {
+      // Clearing the whole cache, not just ['session'], keeps the next person to sign
+      // in on this browser from seeing this user's project and screenplay titles.
+      queryClient.clear();
+      return navigate({ to: '/sign-in' });
+    },
+  });
   return (
     <main className="project-screen">
       <header className="project-header">
@@ -23,8 +40,20 @@ function ProjectsPage() {
           <span className="brand-mark">F</span>
           <span>Finaler Draft</span>
         </div>
-        <Link to="/sign-in">Account</Link>
+        <button
+          className="sign-out-button"
+          disabled={signOut.isPending}
+          onClick={() => signOut.mutate()}
+          type="button"
+        >
+          {signOut.isPending ? 'Signing out…' : 'Sign out'}
+        </button>
       </header>
+      {signOut.isError && (
+        <p className="sign-out-error" role="alert">
+          Sign out failed. Try again.
+        </p>
+      )}
       <section className="project-list">
         <p className="eyebrow">PRIVATE PROJECTS</p>
         <h1>Your writing desk</h1>

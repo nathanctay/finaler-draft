@@ -1,10 +1,17 @@
 import { useId, useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
-import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { createFileRoute, redirect, useNavigate } from '@tanstack/react-router';
 import { PASSWORD_MIN_LENGTH, PASSWORD_REQUIREMENTS_MESSAGE } from '@finaler-draft/config';
 import { api } from '../api.js';
+import { guardSessionUser, sessionQueryOptions } from '../session.js';
 
-export const Route = createFileRoute('/sign-in')({ component: SignInPage });
+export const Route = createFileRoute('/sign-in')({
+  beforeLoad: async ({ context }) => {
+    const user = await guardSessionUser(context.queryClient);
+    if (user) throw redirect({ to: '/projects' });
+  },
+  component: SignInPage,
+});
 
 function EyeIcon() {
   return (
@@ -70,6 +77,7 @@ function PasswordVisibilityToggle({
 
 function SignInPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const nameId = useId();
   const emailId = useId();
   const passwordId = useId();
@@ -90,7 +98,15 @@ function SignInPage() {
   const authentication = useMutation({
     mutationFn: () =>
       mode === 'sign-in' ? api.signIn(email, password) : api.signUp(name, email, password),
-    onSuccess: () => void navigate({ to: '/projects' }),
+    onSuccess: () => {
+      // A prior visit to this page may have cached a signed-out `null` under ['session'].
+      // `ensureQueryData` returns cached data whenever an entry exists at all, even
+      // `null`, so the /projects guard would otherwise see that stale answer and bounce
+      // straight back here. Removing the entry, rather than just invalidating it, is what
+      // forces the next `ensureQueryData` call to actually fetch the now-signed-in session.
+      queryClient.removeQueries({ queryKey: sessionQueryOptions.queryKey });
+      return navigate({ to: '/projects' });
+    },
   });
 
   const passwordsMismatch = mode === 'sign-up' && password !== confirmPassword;

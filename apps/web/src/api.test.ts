@@ -19,7 +19,9 @@ describe('API client', () => {
 
   it('sends authenticated JSON requests for every supported operation', async () => {
     fetchMock
-      .mockResolvedValueOnce(response({ user: { id: 'writer-1' } }))
+      .mockResolvedValueOnce(
+        response({ user: { email: 'writer@example.com', id: 'writer-1', name: 'Writer' } }),
+      )
       .mockResolvedValueOnce(response({}))
       .mockResolvedValueOnce(response({}))
       .mockResolvedValueOnce(response({}))
@@ -42,7 +44,11 @@ describe('API client', () => {
       )
       .mockResolvedValueOnce(response({ version: 2 }));
 
-    await expect(api.session()).resolves.toEqual({ user: { id: 'writer-1' } });
+    await expect(api.session()).resolves.toEqual({
+      email: 'writer@example.com',
+      id: 'writer-1',
+      name: 'Writer',
+    });
     await api.signIn('writer@example.com', 'a secure passphrase');
     await api.signUp('Writer', 'writer@example.com', 'a secure passphrase');
     await api.signOut();
@@ -125,6 +131,34 @@ describe('API client', () => {
   it('rejects malformed successful responses', async () => {
     fetchMock.mockResolvedValue(response({ user: { id: 3 } }));
     await expect(api.session()).rejects.toThrow();
+  });
+
+  describe('api.session', () => {
+    it('resolves to the signed-in user for a valid session body', async () => {
+      fetchMock.mockResolvedValue(
+        response({ user: { email: 'writer@example.com', id: 'writer-1', name: 'Writer' } }),
+      );
+      await expect(api.session()).resolves.toEqual({
+        email: 'writer@example.com',
+        id: 'writer-1',
+        name: 'Writer',
+      });
+    });
+
+    it('resolves to null for a literal null body, distinguishing signed-out from a failed request', async () => {
+      fetchMock.mockResolvedValue(response(null));
+      await expect(api.session()).resolves.toBeNull();
+    });
+
+    it('rejects on a non-OK status rather than collapsing it into signed-out', async () => {
+      fetchMock.mockResolvedValue(response({ error: 'unavailable' }, false, 500));
+      await expect(api.session()).rejects.toEqual(new ApiError(500));
+    });
+
+    it('rejects a body that is neither null nor a valid session shape', async () => {
+      fetchMock.mockResolvedValue(response({ user: { email: 'writer@example.com' } }));
+      await expect(api.session()).rejects.toThrow();
+    });
   });
 
   it('sets a content-type header only on requests that carry a body', async () => {

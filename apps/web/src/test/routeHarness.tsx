@@ -27,9 +27,12 @@ export const routeState: {
 
 export const fetchMock = vi.fn<typeof fetch>();
 export const invalidateQueries = vi.fn();
+export const clearQueryCache = vi.fn();
+export const removeQueries = vi.fn();
 
 export function reactQueryMock(): Record<string, unknown> {
   return {
+    queryOptions: (options: unknown) => options,
     useMutation: (options: {
       mutationFn: () => Promise<unknown>;
       onSuccess?: (value: never) => unknown;
@@ -47,7 +50,7 @@ export function reactQueryMock(): Record<string, unknown> {
       void Promise.resolve(options.queryFn?.()).catch(() => undefined);
       return routeState.query;
     },
-    useQueryClient: () => ({ invalidateQueries }),
+    useQueryClient: () => ({ clear: clearQueryCache, invalidateQueries, removeQueries }),
   };
 }
 
@@ -90,6 +93,8 @@ export function resetRouteHarness() {
   routeState.query = { data: undefined, isError: false, isLoading: false };
   routeState.screenplayId = screenplayId;
   invalidateQueries.mockReset();
+  clearQueryCache.mockReset();
+  removeQueries.mockReset();
   fetchMock.mockReset();
   vi.stubGlobal('fetch', fetchMock);
   fetchMock.mockImplementation(

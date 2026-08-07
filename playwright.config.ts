@@ -4,7 +4,9 @@ const browserChannel = process.env.PLAYWRIGHT_CHANNEL;
 
 export default defineConfig({
   testDir: './apps/web/e2e',
-  testIgnore: '**/persistence.spec.ts',
+  // These specs create real accounts and require a real (disposable, per-run) database;
+  // they run through test:system:persistence instead. See playwright.persistence.config.ts.
+  testIgnore: ['**/persistence.spec.ts', '**/session-routing.spec.ts'],
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,

@@ -2,7 +2,8 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PASSWORD_REQUIREMENTS_MESSAGE } from '@finaler-draft/config';
-import { fetchMock, resetRouteHarness, routeState } from '../test/routeHarness.js';
+import type { SessionUser } from '../api.js';
+import { fetchMock, removeQueries, resetRouteHarness, routeState } from '../test/routeHarness.js';
 
 vi.mock('@tanstack/react-query', async () =>
   (await import('../test/routeHarness.js')).reactQueryMock(),
@@ -13,9 +14,47 @@ vi.mock('@tanstack/react-router', async (importOriginal) =>
 
 const { Route } = await import('./sign-in.js');
 const SignInPage = Route.options.component!;
+const user: SessionUser = { email: 'writer@example.com', id: 'writer-1', name: 'Writer' };
+
+function contextWithSession(sessionUser: SessionUser | null) {
+  return { context: { queryClient: { ensureQueryData: vi.fn().mockResolvedValue(sessionUser) } } };
+}
 
 describe('sign-in page', () => {
   beforeEach(resetRouteHarness);
+
+  it('redirects a signed-in visitor to /projects instead of rendering', async () => {
+    const beforeLoad = Route.options.beforeLoad as
+      | ((opts: ReturnType<typeof contextWithSession>) => Promise<void>)
+      | undefined;
+    expect(beforeLoad).toBeDefined();
+    if (!beforeLoad) throw new Error('Sign-in beforeLoad is missing.');
+    await expect(beforeLoad(contextWithSession(user))).rejects.toMatchObject({
+      options: { to: '/projects' },
+    });
+  });
+
+  it('renders for a signed-out visitor rather than redirecting', async () => {
+    const beforeLoad = Route.options.beforeLoad as
+      | ((opts: ReturnType<typeof contextWithSession>) => Promise<void>)
+      | undefined;
+    expect(beforeLoad).toBeDefined();
+    if (!beforeLoad) throw new Error('Sign-in beforeLoad is missing.');
+    await expect(beforeLoad(contextWithSession(null))).resolves.toBeUndefined();
+  });
+
+  it('removes the cached session on a successful sign-in, so the /projects guard cannot reuse a stale signed-out answer', async () => {
+    // Regression: visiting /sign-in caches ['session'] = null. `ensureQueryData` returns
+    // cached data whenever an entry exists, even null, so unless sign-in removes that
+    // entry, the /projects guard bounces a freshly signed-in visitor straight back here.
+    const user = userEvent.setup();
+    render(<SignInPage />);
+    await user.type(screen.getByLabelText('Email'), 'writer@example.com');
+    await user.type(screen.getByLabelText('Password'), 'a secure passphrase');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+    await vi.waitFor(() => expect(removeQueries).toHaveBeenCalledWith({ queryKey: ['session'] }));
+    expect(routeState.navigate).toHaveBeenCalledWith({ to: '/projects' });
+  });
 
   it('signs in, creates an account, and communicates auth failures', async () => {
     const user = userEvent.setup();

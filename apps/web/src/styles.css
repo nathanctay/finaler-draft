@@ -545,6 +545,29 @@ select:focus-visible,
 .project-header a {
   color: #1d4f43;
 }
+.sign-out-button {
+  background: transparent;
+  border: 1px solid #89938b;
+  border-radius: 1px;
+  color: #26302a;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 12px;
+}
+.sign-out-button:hover {
+  background: #edf0e9;
+}
+.sign-out-button:disabled {
+  color: #9aa39c;
+  cursor: default;
+}
+.sign-out-error {
+  color: #202722;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0;
+  padding: 12px 34px 0;
+}
 .project-list {
   margin: 64px auto;
   width: min(760px, calc(100vw - 40px));
