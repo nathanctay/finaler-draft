@@ -22,10 +22,13 @@ const screenplayResponseSchema = z.object({
 });
 
 async function request(path: string, init?: RequestInit): Promise<Response> {
+  const headers = init?.body
+    ? { 'content-type': 'application/json', ...(init.headers ?? {}) }
+    : init?.headers;
   const response = await fetch(path, {
     credentials: 'include',
-    headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
     ...init,
+    ...(headers ? { headers } : {}),
   });
   return response;
 }
@@ -85,7 +88,10 @@ export class ApiError extends Error {
 export class AuthApiError extends ApiError {
   readonly safeMessage: string;
 
-  constructor(status: number, readonly code: AuthValidationErrorCode) {
+  constructor(
+    status: number,
+    readonly code: AuthValidationErrorCode,
+  ) {
     super(status);
     this.safeMessage = authErrorMessages[code];
   }

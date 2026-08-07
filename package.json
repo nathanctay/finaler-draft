@@ -11,13 +11,13 @@
     }
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": "24.x"
   },
   "scripts": {
     "dev": "pnpm --parallel --stream --filter @finaler-draft/api --filter @finaler-draft/web dev",
     "start": "pnpm --filter @finaler-draft/api start",
     "build": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/screenplay build && pnpm --filter @finaler-draft/database build && pnpm --filter @finaler-draft/web build && pnpm --filter @finaler-draft/api build",
-    "typecheck": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/screenplay typecheck && pnpm --filter @finaler-draft/database typecheck && pnpm --filter @finaler-draft/web typecheck && pnpm --filter @finaler-draft/api typecheck",
+    "typecheck": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/screenplay build && pnpm --filter @finaler-draft/database build && pnpm --filter @finaler-draft/web typecheck && pnpm --filter @finaler-draft/api typecheck",
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

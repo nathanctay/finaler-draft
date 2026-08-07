@@ -102,9 +102,17 @@ describe('API client', () => {
   it('keeps unknown and malformed authentication errors generic without exposing server messages', async () => {
     fetchMock
       .mockResolvedValueOnce(
-        response({ code: 'DATABASE_CONNECTION_LEAKED', message: 'sensitive server detail' }, false, 500),
+        response(
+          { code: 'DATABASE_CONNECTION_LEAKED', message: 'sensitive server detail' },
+          false,
+          500,
+        ),
       )
-      .mockResolvedValueOnce({ json: vi.fn().mockRejectedValue(new SyntaxError('Unexpected token')), ok: false, status: 502 } as unknown as Response);
+      .mockResolvedValueOnce({
+        json: vi.fn().mockRejectedValue(new SyntaxError('Unexpected token')),
+        ok: false,
+        status: 502,
+      } as unknown as Response);
 
     await expect(api.signUp('Writer', 'writer@example.com', 'a secure passphrase')).rejects.toEqual(
       new ApiError(500),
@@ -117,5 +125,19 @@ describe('API client', () => {
   it('rejects malformed successful responses', async () => {
     fetchMock.mockResolvedValue(response({ user: { id: 3 } }));
     await expect(api.session()).rejects.toThrow();
+  });
+
+  it('sets a content-type header only on requests that carry a body', async () => {
+    fetchMock
+      .mockResolvedValueOnce(response({}))
+      .mockResolvedValueOnce(response({ id: projectId, title: 'Feature' }));
+
+    await api.signOut();
+    await api.createProject('Feature');
+
+    expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty('headers');
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      headers: { 'content-type': 'application/json' },
+    });
   });
 });

@@ -38,6 +38,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
     if (error.statusCode === 413) return reply.code(413).send({ error: 'Request too large' });
     if (error instanceof z.ZodError || (error instanceof Error && error.name === 'ZodError'))
       return reply.code(400).send({ error: 'Invalid request' });
+    if (error.statusCode !== undefined && error.statusCode >= 400 && error.statusCode < 500)
+      return reply.code(error.statusCode).send({ error: 'Invalid request' });
     request.log.error(
       { err: error instanceof Error ? error.name : 'UnknownError' },
       'Request failed',

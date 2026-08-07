@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { buildApp, MAX_SCREENPLAY_REQUEST_BODY_BYTES } from './app.js';
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import type { ProjectStore } from './projects.js';
@@ -308,6 +308,63 @@ describe('persisted project API', () => {
       expect(
         (await app.inject({ method: 'POST', url: '/api/auth/sign-in/email' })).statusCode,
       ).toBe(500);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('does not 5xx when a bodyless auth request carries a JSON content-type', async () => {
+    const app = await buildApp({ auth, projects: store });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/auth/sign-out',
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(response.statusCode).toBeLessThan(500);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 400 rather than 500 for malformed JSON request bodies', async () => {
+    const app = await buildApp({ auth, projects: store });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/projects',
+        headers: { 'content-type': 'application/json' },
+        payload: '{not valid json',
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({ error: 'Invalid request' });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('logs only the error name for an unmapped internal error and returns the generic body', async () => {
+    const secretDetail = 'do-not-leak-connection-string';
+    const failingStore: ProjectStore = {
+      ...store,
+      listProjects: async () => {
+        throw new Error(secretDetail);
+      },
+    };
+    const app = await buildApp({ auth, projects: failingStore });
+    let errorSpy: ReturnType<typeof vi.spyOn> | undefined;
+    app.addHook('onRequest', async (request) => {
+      errorSpy = vi.spyOn(request.log, 'error');
+    });
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/projects',
+        headers: { cookie: 'session=test' },
+      });
+      expect(response.statusCode).toBe(500);
+      expect(response.json()).toEqual({ error: 'Internal server error' });
+      expect(errorSpy).toHaveBeenCalledWith({ err: 'Error' }, 'Request failed');
     } finally {
       await app.close();
     }
