@@ -3,7 +3,18 @@ import { tanstackRouter } from '@tanstack/router-plugin/vite';
 import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
-  plugins: [tanstackRouter({ autoCodeSplitting: true, target: 'react' }), react()],
+  plugins: [
+    // Colocated tests live beside their route modules, so the generator must not treat
+    // them as routes. Automatic code splitting moves each route's component into a lazy
+    // chunk, which leaves `Route.options.component` unrenderable under test; it stays on
+    // for real builds and off under Vitest so tests exercise the component directly.
+    tanstackRouter({
+      autoCodeSplitting: !process.env.VITEST,
+      routeFileIgnorePattern: '\\.(test|spec)\\.[jt]sx?$',
+      target: 'react',
+    }),
+    react(),
+  ],
   server: { proxy: { '/api': 'http://localhost:3001' } },
   test: {
     environment: 'jsdom',

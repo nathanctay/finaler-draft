@@ -1,4 +1,7 @@
-import { createFileRoute } from '@tanstack/react-router';
-import { SignInPage } from '../WorkspaceApp.js';
+import { createFileRoute, redirect } from '@tanstack/react-router';
 
-export const Route = createFileRoute('/')({ component: SignInPage });
+export const Route = createFileRoute('/')({
+  beforeLoad: () => {
+    throw redirect({ to: '/sign-in' });
+  },
+});

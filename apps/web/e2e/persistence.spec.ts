@@ -8,7 +8,9 @@ test('a writer can create, autosave, and reload a private screenplay', async ({ 
   await page.getByRole('button', { name: 'Create an account' }).click();
   await page.getByLabel('Name').fill('Writer');
   await page.getByLabel('Email').fill(email);
-  await page.getByLabel('Password').fill(password);
+  // Exact matching keeps this from also resolving the "Confirm password" field.
+  await page.getByLabel('Password', { exact: true }).fill(password);
+  await page.getByLabel('Confirm password').fill(password);
   await page.getByRole('button', { name: 'Create account' }).click();
   await expect(page.getByRole('heading', { name: 'Your writing desk' })).toBeVisible();
   await page.getByLabel('New project title').fill('Persistence project');
