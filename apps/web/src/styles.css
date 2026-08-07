@@ -462,11 +462,13 @@ select:focus-visible,
   gap: 16px;
 }
 .entry-card label {
-  display: grid;
-  gap: 6px;
   color: #4b544d;
   font-size: 13px;
   font-weight: 600;
+}
+.entry-field {
+  display: grid;
+  gap: 6px;
 }
 .entry-card input,
 .create-row input {
@@ -475,6 +477,42 @@ select:focus-visible,
   background: #fff;
   font: inherit;
   padding: 10px;
+}
+.password-field {
+  position: relative;
+  display: flex;
+}
+.password-field input {
+  flex: 1;
+  padding-right: 38px;
+}
+.password-toggle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 34px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 1px;
+  background: transparent;
+  color: #4b544d;
+}
+.password-toggle:hover {
+  background: #edf0e9;
+}
+.field-hint {
+  margin: 0;
+  color: #697268;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.field-error {
+  margin: 0;
+  color: #202722;
+  font-size: 12px;
+  font-weight: 600;
 }
 .primary-button {
   border: 1px solid #1d4f43;
