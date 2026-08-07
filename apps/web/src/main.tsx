@@ -5,10 +5,14 @@ import '@fontsource/ibm-plex-sans/latin-500.css';
 import '@fontsource/ibm-plex-sans/latin-600.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { App } from './App.js';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { RouterProvider } from '@tanstack/react-router';
+import { createRouter } from '@tanstack/react-router';
+import { routeTree } from './routeTree.gen.js';
 import './styles.css';
 
 const root = document.getElementById('root');
+const router = createRouter({ defaultPreload: 'intent', routeTree });
 
 if (!root) {
   throw new Error('Application root was not found.');
@@ -16,6 +20,16 @@ if (!root) {
 
 createRoot(root).render(
   <StrictMode>
-    <App />
+    <QueryClientProvider
+      client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+    >
+      <RouterProvider router={router} />
+    </QueryClientProvider>
   </StrictMode>,
 );
+
+declare module '@tanstack/react-router' {
+  interface Register {
+    router: typeof router;
+  }
+}

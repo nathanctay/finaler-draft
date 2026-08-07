@@ -29,11 +29,18 @@ export interface ProjectStore {
     projectId: string,
     input: CreateScreenplayInput,
   ): Promise<{ id: string; version: number }>;
+  getScreenplay(
+    actorId: string,
+    screenplayId: string,
+  ): Promise<
+    | { id: string; projectId: string; title: string; version: number; screenplay: Screenplay }
+    | 'missing'
+  >;
   updateScreenplay(
     actorId: string,
     screenplayId: string,
     input: UpdateScreenplayInput,
-  ): Promise<{ version: number } | 'forbidden' | 'conflict' | 'missing'>;
+  ): Promise<{ version: number } | 'forbidden' | 'conflict' | 'invalid' | 'missing'>;
 }
 
 export function parseCreateScreenplayInput(input: unknown): CreateScreenplayInput {
@@ -103,14 +110,18 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
           [projectId, actorId],
         );
         if (!canEdit(membership.rows[0]?.role)) throw new ForbiddenError();
+        // The database primary key is also the canonical document identity.  Do not
+        // trust a client-provided root id when creating a persisted screenplay.
+        const screenplayId = randomUUID();
+        const screenplay = { ...input.screenplay, id: screenplayId };
         const result = await client.query(
           'insert into screenplays (id, project_id, title, canonical_screenplay, canonical_hash) values ($1, $2, $3, $4::jsonb, $5) returning id, version',
           [
-            randomUUID(),
+            screenplayId,
             projectId,
             input.title,
-            JSON.stringify(input.screenplay),
-            screenplayHash(input.screenplay),
+            JSON.stringify(screenplay),
+            screenplayHash(screenplay),
           ],
         );
         await client.query('update projects set updated_at = now() where id = $1', [projectId]);
@@ -122,6 +133,31 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
       } finally {
         client.release();
       }
+    },
+    async getScreenplay(actorId, screenplayId) {
+      const result = await pool.query(
+        `select s.id, s.project_id as "projectId", s.title, s.version,
+                s.canonical_screenplay as screenplay
+           from screenplays s
+           join project_members m on m.project_id = s.project_id
+          where s.id = $1 and m.user_id = $2`,
+        [screenplayId, actorId],
+      );
+      if (result.rowCount !== 1) return 'missing';
+      const row = result.rows[0] as {
+        id: string;
+        projectId: string;
+        screenplay: unknown;
+        title: string;
+        version: number;
+      };
+      return {
+        id: row.id,
+        projectId: row.projectId,
+        title: row.title,
+        version: row.version,
+        screenplay: screenplaySchema.parse(row.screenplay),
+      };
     },
     async updateScreenplay(actorId, screenplayId, input) {
       const client = await pool.connect();
@@ -147,6 +183,10 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
         if (!canEdit(membership.rows[0]?.role)) {
           await client.query('rollback');
           return 'forbidden';
+        }
+        if (input.screenplay.id !== screenplayId) {
+          await client.query('rollback');
+          return 'invalid';
         }
         if (row.version !== input.expectedVersion) {
           await client.query('rollback');

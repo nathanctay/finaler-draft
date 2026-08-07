@@ -99,6 +99,13 @@ describe('persisted project API', () => {
         throw new (await import('./projects.js')).ForbiddenError();
       return createScreenplayResult;
     },
+    getScreenplay: async () => ({
+      id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
+      projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+      title: 'Draft',
+      version: 1,
+      screenplay: screenplayFixture,
+    }),
     updateScreenplay: async () => updateResult,
   };
   const auth = {
@@ -176,6 +183,15 @@ describe('persisted project API', () => {
       expect(
         (
           await app.inject({
+            method: 'GET',
+            url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
+            headers,
+          })
+        ).json(),
+      ).toMatchObject({ title: 'Draft', version: 1, screenplay: screenplayFixture });
+      expect(
+        (
+          await app.inject({
             method: 'POST',
             url: '/api/projects/5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f/screenplays',
             headers,
@@ -217,6 +233,17 @@ describe('persisted project API', () => {
           })
         ).statusCode,
       ).toBe(403);
+      updateResult = 'invalid';
+      const invalidIdentity = await app.inject({
+        method: 'PUT',
+        url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
+        headers,
+        payload: { expectedVersion: 1, screenplay: screenplayFixture },
+      });
+      expect(invalidIdentity.statusCode).toBe(400);
+      expect(invalidIdentity.json()).toEqual({
+        error: 'Screenplay identity must match request path',
+      });
       updateResult = { version: 2 };
       expect(
         (

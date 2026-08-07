@@ -2,12 +2,15 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import { Editor } from '@tiptap/core';
 import { AllSelection, TextSelection } from '@tiptap/pm/state';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import { App } from './App.js';
+import { ApiError, api, type PersistedScreenplay } from './api.js';
 import {
   findScreenplayBlockPosition,
   getActiveScreenplayBlock,
   initialScreenplayContent,
+  editorContentFromScreenplay,
   isScreenplayElementType,
   projectLocalScreenplay,
   screenplayExtensions,
@@ -25,7 +28,117 @@ function getBlock(canvas: HTMLElement, id: string): HTMLElement {
   return block;
 }
 
+function persistedScreenplay(id: string, title: string, text: string): PersistedScreenplay {
+  return {
+    id,
+    projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+    screenplay: {
+      annotations: [],
+      blocks: [
+        {
+          id: `${id.slice(0, 8)}-8d05-4e6e-bac7-e471e8df33a1`,
+          type: 'scene_heading',
+          text,
+        },
+      ],
+      id,
+      schemaVersion: 1,
+      title,
+      titlePages: [],
+    },
+    title,
+    version: 1,
+  };
+}
+
 describe('local semantic screenplay editor', () => {
+  it('fails closed for canonical features the text-block editor cannot preserve', () => {
+    expect(() => editorContentFromScreenplay(screenplayFixture)).toThrow(/not editable/i);
+  });
+
+  it('preserves local edits and visibly locks automatic saves after a conflict', async () => {
+    const save = vi.spyOn(api, 'saveScreenplay').mockRejectedValue(new ApiError(409));
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'shot',
+    );
+    expect(await screen.findByText(/Save conflict/)).toBeVisible();
+    expect(save).toHaveBeenCalledOnce();
+    save.mockRestore();
+  });
+
+  it('reports saving and a retryable non-conflict failure without discarding the editor', async () => {
+    const save = vi
+      .spyOn(api, 'saveScreenplay')
+      .mockImplementationOnce(
+        () => new Promise(() => undefined) as ReturnType<typeof api.saveScreenplay>,
+      );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'action',
+    );
+    expect(await screen.findByText('Saving…')).toBeVisible();
+    save.mockRestore();
+  });
+
+  it('renders unsupported persisted snapshots as read-only', async () => {
+    render(
+      <App
+        initial={{
+          id: screenplayFixture.id,
+          projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+          screenplay: screenplayFixture,
+          title: screenplayFixture.title,
+          version: 1,
+        }}
+      />,
+    );
+    expect(
+      await screen.findByText(/contains title pages, notes, dual dialogue, or page breaks/i),
+    ).toBeVisible();
+    expect(screen.getByRole('textbox', { name: 'Screenplay editing canvas' })).not.toHaveAttribute(
+      'contenteditable',
+      'true',
+    );
+    expect(screen.getByText('Text editing is unavailable for this screenplay')).toBeVisible();
+    expect(screen.queryByText('INT. APARTMENT - MORNING')).not.toBeInTheDocument();
+  });
+
+  it('discards the prior editor instance when a route opens a different screenplay', async () => {
+    const first = persistedScreenplay(
+      '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
+      'First screenplay',
+      'First route content.',
+    );
+    const second = persistedScreenplay(
+      '8c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
+      'Second screenplay',
+      'Second route content.',
+    );
+    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
+    const user = userEvent.setup();
+    const { rerender } = render(<App initial={first} key={first.id} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    await user.click(screen.getByRole('button', { name: /1\. First route content/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'action',
+    );
+    rerender(<App initial={second} key={second.id} />);
+
+    const secondCanvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    expect(secondCanvas).toHaveTextContent('Second route content.');
+    expect(secondCanvas).not.toHaveTextContent('First route content.');
+    await new Promise((resolve) => window.setTimeout(resolve, 700));
+    expect(save).not.toHaveBeenCalled();
+    save.mockRestore();
+  });
   it('derives Navigator scenes and keeps the local draft status accurate', async () => {
     const user = userEvent.setup();
     render(<App />);

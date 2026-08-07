@@ -4,6 +4,7 @@ const browserChannel = process.env.PLAYWRIGHT_CHANNEL;
 
 export default defineConfig({
   testDir: './apps/web/e2e',
+  testIgnore: '**/persistence.spec.ts',
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,

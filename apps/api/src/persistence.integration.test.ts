@@ -122,6 +122,32 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     expect(screenplay.statusCode).toBe(201);
     const screenplayId = screenplay.json<{ id: string }>().id;
 
+    const loadedByOwner = await app!.inject({
+      method: 'GET',
+      url: `/api/screenplays/${screenplayId}`,
+      headers: { cookie: ownerSession },
+    });
+    expect(loadedByOwner.statusCode).toBe(200);
+    expect(loadedByOwner.json()).toMatchObject({
+      id: screenplayId,
+      screenplay: { id: screenplayId },
+    });
+    const ownerScreenplay = loadedByOwner.json<{ screenplay: typeof screenplayFixture }>()
+      .screenplay;
+    const invalidIdentity = await app!.inject({
+      method: 'PUT',
+      url: `/api/screenplays/${screenplayId}`,
+      headers: { cookie: ownerSession },
+      payload: {
+        expectedVersion: 1,
+        screenplay: { ...ownerScreenplay, id: randomUUID() },
+      },
+    });
+    expect(invalidIdentity.statusCode).toBe(400);
+    expect(invalidIdentity.json()).toEqual({
+      error: 'Screenplay identity must match request path',
+    });
+
     const other = await signUp('other@example.test');
     const deniedCreate = await app!.inject({
       method: 'POST',
@@ -130,6 +156,18 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       payload: { title: 'Unauthorized', screenplay: screenplayFixture },
     });
     expect(deniedCreate.statusCode).toBe(403);
+    const deniedRead = await app!.inject({
+      method: 'GET',
+      url: `/api/screenplays/${screenplayId}`,
+      headers: { cookie: other.cookie },
+    });
+    const unknownRead = await app!.inject({
+      method: 'GET',
+      url: `/api/screenplays/${randomUUID()}`,
+      headers: { cookie: other.cookie },
+    });
+    expect(deniedRead.statusCode).toBe(404);
+    expect(deniedRead.json()).toEqual(unknownRead.json());
     const deniedUpdate = await app!.inject({
       method: 'PUT',
       url: `/api/screenplays/${screenplayId}`,
@@ -142,7 +180,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       method: 'PUT',
       url: `/api/screenplays/${screenplayId}`,
       headers: { cookie: ownerSession },
-      payload: { expectedVersion: 1, screenplay: screenplayFixture },
+      payload: { expectedVersion: 1, screenplay: ownerScreenplay },
     });
     expect(saved.statusCode).toBe(200);
     expect(saved.json()).toEqual({ version: 2 });
@@ -164,11 +202,11 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     });
     const first = store!.updateScreenplay(editorId, screenplay.id, {
       expectedVersion: 1,
-      screenplay: screenplayFixture,
+      screenplay: screenplayFor(screenplay.id),
     });
     const second = store!.updateScreenplay(editorId, screenplay.id, {
       expectedVersion: 1,
-      screenplay: screenplayFixture,
+      screenplay: screenplayFor(screenplay.id),
     });
     const saves = await Promise.all([first, second]);
     expect(saves).toContainEqual({ version: 2 });
@@ -183,7 +221,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       ]);
       const saveAfterRevocation = store!.updateScreenplay(editorId, screenplay.id, {
         expectedVersion: 2,
-        screenplay: screenplayFixture,
+        screenplay: screenplayFor(screenplay.id),
       });
       await revoker.query('commit');
       expect(await saveAfterRevocation).toBe('missing');
@@ -209,7 +247,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       );
       const saveAfterDowngrade = store!.updateScreenplay(editorId, downgradeScreenplay.id, {
         expectedVersion: 1,
-        screenplay: screenplayFixture,
+        screenplay: screenplayFor(downgradeScreenplay.id),
       });
       await downgrader.query('commit');
       expect(await saveAfterDowngrade).toBe('forbidden');
@@ -244,6 +282,10 @@ function sessionCookie(value: string | string[] | undefined) {
   const cookie = Array.isArray(value) ? value[0] : value;
   expect(cookie).toBeTypeOf('string');
   return cookie!.split(';', 1)[0]!;
+}
+
+function screenplayFor(id: string) {
+  return { ...screenplayFixture, id };
 }
 
 async function userIdFor(email: string) {

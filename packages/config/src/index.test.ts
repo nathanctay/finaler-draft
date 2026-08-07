@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
   findPersistenceEnvironment,
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  PASSWORD_REQUIREMENTS_MESSAGE,
   parseServerEnvironment,
   requirePersistenceEnvironment,
 } from './index.js';
 
 describe('parseServerEnvironment', () => {
+  it('publishes the shared password policy for auth clients and the server', () => {
+    expect(PASSWORD_MIN_LENGTH).toBe(12);
+    expect(PASSWORD_MAX_LENGTH).toBe(128);
+    expect(PASSWORD_REQUIREMENTS_MESSAGE).toBe('Password must be 12–128 characters.');
+  });
+
   it('uses safe development defaults', () => {
     expect(parseServerEnvironment({})).toEqual({ NODE_ENV: 'development', PORT: 3001 });
   });
@@ -49,5 +58,18 @@ describe('parseServerEnvironment', () => {
       BETTER_AUTH_URL: 'https://app.example.test',
       CLIENT_ORIGIN: 'https://writer.example.test',
     });
+  });
+
+  it('permits loopback HTTP only outside the production environment', () => {
+    expect(
+      requirePersistenceEnvironment(
+        parseServerEnvironment({
+          NODE_ENV: 'test',
+          DATABASE_URL: 'postgresql://localhost/finaler',
+          BETTER_AUTH_SECRET: 'x'.repeat(32),
+          BETTER_AUTH_URL: 'http://127.0.0.1:4174',
+        }),
+      ),
+    ).toMatchObject({ BETTER_AUTH_URL: 'http://127.0.0.1:4174' });
   });
 });

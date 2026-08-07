@@ -23,6 +23,7 @@
     "format:check": "prettier --check .",
     "test": "pnpm -r test",
     "test:system": "pnpm build && playwright test",
+    "test:system:persistence": "node scripts/test-system-persistence.mjs",
     "test:integration": "pnpm --filter @finaler-draft/api test:integration",
     "test:coverage": "pnpm -r test:coverage"
   },

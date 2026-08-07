@@ -113,6 +113,14 @@ export async function buildApp(options: BuildAppOptions = {}) {
         throw error;
       }
     });
+    app.get('/api/screenplays/:id', async (request, reply) => {
+      const screenplay = await options.projects!.getScreenplay(
+        request.actorId!,
+        idParam.parse(request.params).id,
+      );
+      if (screenplay === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
+      return screenplay;
+    });
     app.put('/api/screenplays/:id', async (request, reply) => {
       const result = await options.projects!.updateScreenplay(
         request.actorId!,
@@ -122,6 +130,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
       if (result === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
       if (result === 'forbidden')
         return reply.code(403).send({ error: 'Screenplay editor access required' });
+      if (result === 'invalid')
+        return reply.code(400).send({ error: 'Screenplay identity must match request path' });
       if (result === 'conflict')
         return reply.code(409).send({ error: 'Screenplay changed; reload before saving' });
       return result;

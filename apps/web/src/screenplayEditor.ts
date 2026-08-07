@@ -32,6 +32,15 @@ export type LocalScreenplayProjection =
   | { screenplay: Screenplay; valid: true }
   | { issues: readonly string[]; valid: false };
 
+export type EditorContent = {
+  content: Array<{
+    attrs: { element: ScreenplayElementType; id: string };
+    content?: Array<{ text: string; type: 'text' }>;
+    type: 'screenplayBlock';
+  }>;
+  type: 'screenplayDocument';
+};
+
 const nextElementOnEnter: Record<ScreenplayElementType, ScreenplayElementType> = {
   scene_heading: 'action',
   action: 'action',
@@ -164,7 +173,11 @@ function mapBlock(node: {
   return { id, type: element, text: node.textContent };
 }
 
-export function projectLocalScreenplay(editor: Editor): LocalScreenplayProjection {
+export function projectEditorScreenplay(
+  editor: Editor,
+  id = '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
+  title = 'The Long Way Home',
+): LocalScreenplayProjection {
   const blocks: ScreenplayBlock[] = [];
   let unsupportedNode: string | undefined;
 
@@ -189,9 +202,9 @@ export function projectLocalScreenplay(editor: Editor): LocalScreenplayProjectio
   const result = safeParseScreenplay({
     annotations: [],
     blocks,
-    id: '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
+    id,
     schemaVersion: SCREENPLAY_SCHEMA_VERSION,
-    title: 'The Long Way Home',
+    title,
     titlePages: [],
   });
 
@@ -199,7 +212,40 @@ export function projectLocalScreenplay(editor: Editor): LocalScreenplayProjectio
     return { screenplay: result.data, valid: true };
   }
 
-  return { valid: false, issues: result.error.issues.map((issue) => issue.message) };
+  return {
+    valid: false,
+    issues: result.error.issues.map((issue: { message: string }) => issue.message),
+  };
+}
+
+export const projectLocalScreenplay = projectEditorScreenplay;
+
+/** The text-block editor deliberately rejects canonical features it cannot faithfully preserve. */
+export function editorContentFromScreenplay(screenplay: Screenplay): EditorContent {
+  if (
+    screenplay.titlePages.length > 0 ||
+    screenplay.annotations.length > 0 ||
+    screenplay.blocks.some(
+      (block: ScreenplayBlock) => block.type === 'dual_dialogue' || block.type === 'page_break',
+    )
+  ) {
+    throw new Error(
+      'This screenplay contains features that are not editable in the text-block editor.',
+    );
+  }
+  return {
+    type: 'screenplayDocument',
+    content: screenplay.blocks.map((block: ScreenplayBlock) => {
+      if (!isScreenplayElementType(block.type) || !('text' in block)) {
+        throw new Error(`Unsupported screenplay block: ${block.type}.`);
+      }
+      return {
+        type: 'screenplayBlock',
+        attrs: { element: block.type, id: block.id },
+        ...(block.text === '' ? {} : { content: [{ type: 'text' as const, text: block.text }] }),
+      };
+    }),
+  };
 }
 
 export function findScreenplayBlockPosition(editor: Editor, id: string): number | undefined {

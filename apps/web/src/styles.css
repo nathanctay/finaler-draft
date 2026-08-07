@@ -416,6 +416,137 @@ select:focus-visible,
   color: #56636a;
   font-size: 11px;
 }
+
+.entry-screen,
+.project-screen,
+.loading-screen {
+  min-height: 100vh;
+  background: #e7e8e3;
+  color: #202722;
+  font-family: 'IBM Plex Sans', sans-serif;
+}
+
+.entry-screen {
+  display: grid;
+  place-items: center;
+  background-image:
+    linear-gradient(90deg, rgba(39, 56, 45, 0.08) 1px, transparent 1px),
+    linear-gradient(rgba(39, 56, 45, 0.08) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.entry-card,
+.project-list {
+  width: min(540px, calc(100vw - 40px));
+  border: 1px solid #a7afa7;
+  border-radius: 2px;
+  background: #fbfbf7;
+  box-shadow: 12px 12px 0 rgba(38, 53, 42, 0.12);
+  padding: 42px;
+}
+
+.entry-card h1,
+.project-list h1 {
+  margin: 8px 0 28px;
+  font-size: 28px;
+  letter-spacing: -0.04em;
+}
+.eyebrow {
+  color: #697268;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+}
+.entry-card form {
+  display: grid;
+  gap: 16px;
+}
+.entry-card label {
+  display: grid;
+  gap: 6px;
+  color: #4b544d;
+  font-size: 13px;
+  font-weight: 600;
+}
+.entry-card input,
+.create-row input {
+  border: 1px solid #89938b;
+  border-radius: 1px;
+  background: #fff;
+  font: inherit;
+  padding: 10px;
+}
+.primary-button {
+  border: 1px solid #1d4f43;
+  border-radius: 1px;
+  background: #276252;
+  color: #fff;
+  font:
+    600 13px 'IBM Plex Sans',
+    sans-serif;
+  padding: 11px 16px;
+}
+.primary-button:hover {
+  background: #1d4f43;
+}
+.text-button {
+  border: 0;
+  background: transparent;
+  color: #1d4f43;
+  margin-top: 18px;
+  padding: 0;
+  text-decoration: underline;
+}
+.project-header {
+  align-items: center;
+  border-bottom: 1px solid #bbc1b9;
+  display: flex;
+  justify-content: space-between;
+  padding: 18px 34px;
+}
+.project-header a {
+  color: #1d4f43;
+}
+.project-list {
+  margin: 64px auto;
+  width: min(760px, calc(100vw - 40px));
+}
+.create-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 28px;
+}
+.create-row input {
+  flex: 1;
+}
+.project-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.project-list li {
+  border-top: 1px solid #d5d9d2;
+}
+.project-list li a {
+  align-items: center;
+  color: #26302a;
+  display: flex;
+  justify-content: space-between;
+  padding: 16px 4px;
+  text-decoration: none;
+}
+.project-list li a:hover {
+  background: #edf0e9;
+}
+.project-list li span {
+  color: #697268;
+  font-size: 12px;
+  text-transform: capitalize;
+}
+.loading-screen {
+  display: grid;
+  place-items: center;
+}
 .status-center {
   flex: 1;
   text-align: center;

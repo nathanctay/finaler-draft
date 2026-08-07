@@ -1,6 +1,6 @@
 # Finaler Draft Product and Delivery Plan
 
-**Status:** The Phase 0 foundation slice was committed by the user as `7e4b9f4`; the first Phase 1 schema slice was committed as `5423afe`; the local semantic editor was committed as `bb8886c`; its label-overflow correction was committed as `6b4d534`; and the Transition-to-Scene-Heading keyboard-flow correction was committed as `58bb4ee`. PostgreSQL, Better Auth, and authorized project/screenplay persistence are in progress on a separate foundation branch; pagination, FDX, and export work remain separate deliveries.
+**Status:** The Phase 0 foundation slice was committed by the user as `7e4b9f4`; the first Phase 1 schema slice was committed as `5423afe`; the local semantic editor was committed as `bb8886c`; its label-overflow correction was committed as `6b4d534`; the Transition-to-Scene-Heading keyboard-flow correction was committed as `58bb4ee`; and PostgreSQL, Better Auth, and authorized project/screenplay persistence were committed as `bb2ce06`. The persisted-editor workflow is being rebuilt on an isolated branch after its prior uncommitted worktree was externally removed; this branch and this plan are the only source of truth for the rebuilt work. Pagination, FDX, and export work remain separate deliveries.
 
 This is the source of truth for product scope, architecture, delivery order, quality gates, and operating rules. Update it deliberately when a decision changes. `progress.md` is the append-only record of work actually performed.
 

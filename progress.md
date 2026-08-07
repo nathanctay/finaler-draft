@@ -24,6 +24,15 @@ Risks/next: <known risks, blocker, or next handoff>
 
 ## Log
 
+### 2026-08-06 16:56 MDT — api identity/authorization review — feature/persisted-editor-workflow-rebuild
+
+Status: verified
+Scope: Correct persisted screenplay root-identity creation invariant and verify protected screenplay reads do not enumerate private documents.
+Changes: `createScreenplay` now creates one UUID, rewrites the canonical root `screenplay.id` to it, and uses that same immutable snapshot for the row primary key, JSON payload, and SHA-256 hash within the existing transaction. Added store-level assertion of the insert payload and real disposable-PostgreSQL Better Auth coverage for owner retrieval, canonical/root ID equality, and identical 404 responses for unauthorized versus unknown screenplay reads.
+Verification: Passed `pnpm --filter @finaler-draft/api typecheck`, `pnpm --filter @finaler-draft/api test:coverage` (19 unit tests; 92.97% statements, 85.52% branches, 92.85% functions/lines), `TEST_DATABASE_URL=<local disposable-test endpoint> pnpm --filter @finaler-draft/api test:integration` (3 integration tests), and `git diff --check`. Formatting was also verified with `pnpm format:check`.
+Review: Scoped implementation review complete; no staging, commit, merge, or secret exposure.
+Risks/next: Existing screenplay-update callers must continue to submit the persisted root ID; broader update-time identity enforcement is outside this narrow creation/GET review correction and should be considered with the next canonical-write contract review.
+
 ### 2026-08-06 — persistence foundation environment follow-up — feature/persistence-foundation
 
 Status: ready-for-review
@@ -347,3 +356,57 @@ Changes: The loader now runs only when process `NODE_ENV` is unset or `developme
 Verification: Pending focused gates.
 Review: Pending independent review.
 Risks/next: No local `.env` contents were inspected, printed, staged, or committed.
+
+### 2026-08-06 — Codex persisted editor workflow rebuild — feature/persisted-editor-workflow-rebuild
+
+Status: in progress
+Scope: Rebuild the authenticated project, screenplay-opening, and autosave workflow from committed persistence foundations after the prior uncommitted feature worktree was externally removed.
+Changes: Added protected screenplay retrieval, project and screenplay entry views, TanStack Router route modules with UUID validation, TanStack Query REST resource use, a lazily imported editor module, and canonical editor conversion that fails closed for unsupported title pages, annotations, dual dialogue, and page breaks. The editor preserves its route snapshot after opening and has a debounced, single-flight optimistic autosave design with terminal conflict behavior.
+Verification: Focused API and editor unit suites are passing during rebuild. Full workspace verification, disposable-database browser testing, coverage, formatting, linting, build, and independent review remain required before this entry can become ready for review.
+Review: Not started.
+Risks/next: Do not rely on the removed worktree or its uncommitted contents. The rebuilt slice must prove private persistence in a real browser against a UUID-named disposable database and must not be staged, committed, or merged by an agent.
+
+### 2026-08-06 — Codex persisted editor workflow rebuild — authentication test transport and authoring correction
+
+Status: in progress
+Scope: Keep production authentication transport policy intact while allowing the disposable local browser harness to exercise the persisted workflow; correct first-edit behavior for a newly created empty screenplay.
+Changes: The disposable browser harness and its server run with `NODE_ENV=test` plus the explicit system-test flag, so loopback HTTP is test-only; production continues to reject a non-HTTPS `BETTER_AUTH_URL`. Configuration tests cover both paths. The editor now supplies one unsaved blank action block when an otherwise-valid route snapshot has no blocks, which lets a writer begin typing without changing the database until an actual edit occurs. The persisted Playwright test now waits for the PUT response before reloading and uses the create-screenplay redirect rather than looking for a link that no longer exists after navigation.
+Verification: Passed config coverage (6 tests; 100% measured coverage), API integration against the supplied local PostgreSQL server (3 tests), and `TEST_DATABASE_URL=… PLAYWRIGHT_CHANNEL=chrome pnpm test:system:persistence` (1 passed). The browser test creates an account, private project, screenplay, saves an edit, reloads it from PostgreSQL, and verifies terminal 409 conflict behavior preserves local text. Focused web unit tests pass (26 tests).
+Review: Full workspace gates and independent review remain required.
+Risks/next: The normal Vite build reports an unsuppressed >500 kB entry chunk warning; lazy editor chunking is present, but bundle-budget work remains separate. Do not stage, commit, or merge this work on an agent's behalf.
+
+### 2026-08-06 — Codex persisted editor workflow rebuild — verification update
+
+Status: ready-for-review
+Scope: Complete the implementation-side quality gates for the persisted editor workflow rebuild.
+Changes: Removed an unused autosave failure ref discovered during final inspection; no behavior changed.
+Verification: Passed `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage` (all workspace packages; web 94.77% statements and 86.34% branches), supplied-PostgreSQL API integration (3 tests), ordinary production-build Playwright system test (1 passed), disposable-PostgreSQL persisted Playwright workflow (1 passed), and `git diff --check`.
+Review: Implementation verification is complete; independent review is now required before user-controlled staging, commit, or merge.
+Risks/next: Do not treat the ordinary system test as persistence coverage; the separate disposable-database browser test provides that evidence. The Vite >500 kB entry warning remains visible and intentionally unsuppressed.
+
+### 2026-08-06 — Codex persisted editor workflow rebuild — independent-review correction
+
+Status: ready-for-review
+Scope: Resolve every blocker from the independent persisted-workflow review.
+Changes: The route editor is keyed by screenplay route ID, so navigation remounts all editor state, refs, timers, version state, and autosave closures. Unsupported canonical snapshots now receive an empty, disabled editor document and an explicit unavailable status instead of the unrelated legacy example content. Creation rewrites canonical root identity to the generated database UUID within the existing transaction. The persisted browser workflow counts conflict PUTs and proves typing after a 409 cannot issue another write.
+Verification: Added route A-to-B remount and cancelled-autosave regression coverage, unsupported-snapshot no-fallback coverage, canonical-creation identity coverage, and owner/unauthorized/unknown GET coverage. Passed `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage` (web: 95.38% statements, 87.23% branches), supplied-PostgreSQL API integration (3 tests), ordinary production-build browser system test (1 passed), disposable-PostgreSQL persisted browser workflow (1 passed), and `git diff --check`.
+Review: The previous review findings are implemented and verified. A re-review is required before user-controlled staging, commit, or merge.
+Risks/next: Existing update clients must preserve the persisted canonical root ID; broader update-time canonical identity enforcement belongs to the next write-contract review. The Vite >500 kB warning in the persistence harness remains visible and unsuppressed.
+
+### 2026-08-06 — Codex persisted editor workflow rebuild — canonical update-identity correction
+
+Status: ready-for-review
+Scope: Resolve the re-review finding that a valid canonical PUT could diverge from its persisted screenplay identity.
+Changes: After protected screenplay lookup and editor-role validation, `updateScreenplay` now rejects a canonical root ID different from the route/database screenplay ID, rolls back the transaction, and returns a clear 400 response. It intentionally does not rewrite update payloads. Unit coverage exercises the store rollback and API response; real PostgreSQL integration creates a rewritten canonical document, proves an owner mismatch is rejected, then proves a matching-root update succeeds.
+Verification: Passed formatting, API strict typecheck, API coverage (19 tests; 93.10% statements and 86.25% branches), supplied-PostgreSQL integration (3 tests), and `git diff --check`.
+Review: The re-review finding is implemented; request re-review before user-controlled staging, commit, or merge.
+Risks/next: The identity guard is deliberately after non-enumerating existence/membership checks, so unauthorized callers still receive the established 404 behavior.
+
+### 2026-08-06 — Codex persisted editor workflow rebuild — final re-review and user-commit handoff
+
+Status: ready-for-user-commit
+Scope: Record final independent re-review approval and complete verification for the persisted editor workflow rebuild.
+Changes: No implementation changes after final re-review. The completed slice includes authenticated private projects and screenplays, protected canonical retrieval, file-based TanStack routing, route-isolated lazy editor state, fail-closed unsupported canonical snapshots, canonical root-ID enforcement on both create and update, debounced single-flight autosave, terminal conflict locking, and real browser persistence coverage.
+Verification: The lead reran and passed `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, `pnpm build`, supplied-PostgreSQL API integration, ordinary production-build Playwright system testing, disposable-PostgreSQL persisted Playwright system testing, and `git diff --check`. The persisted browser workflow covers account/project/screenplay creation, autosave and reload, terminal 409 handling with local-text preservation and no subsequent PUT; integration covers canonical identity and non-enumerating protected reads.
+Review: Final independent re-review passed. No remaining findings.
+Risks/next: User may now inspect, stage, commit, and merge the feature branch. No agent staged, committed, merged, or exposed local environment values.

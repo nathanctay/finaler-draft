@@ -10,6 +10,7 @@ export default tseslint.config(
       '**/dist/**',
       '**/coverage/**',
       '**/node_modules/**',
+      '**/routeTree.gen.ts',
       'playwright-report/**',
       'test-results/**',
     ],
@@ -17,7 +18,7 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ['apps/api/scripts/**/*.mjs', 'packages/database/scripts/**/*.mjs'],
+    files: ['apps/api/scripts/**/*.mjs', 'packages/database/scripts/**/*.mjs', 'scripts/**/*.mjs'],
     languageOptions: { globals: globals.node },
   },
   {

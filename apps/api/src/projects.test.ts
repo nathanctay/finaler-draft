@@ -88,6 +88,15 @@ describe('PostgreSQL project store', () => {
         screenplay: screenplayFixture,
       }),
     ).resolves.toEqual({ id: screenplayId, version: 1 });
+    const insertCall = client.query.mock.calls.find(
+      ([query]) => typeof query === 'string' && query.startsWith('insert into screenplays'),
+    );
+    expect(insertCall).toBeDefined();
+    const insertParameters = insertCall?.[1] as unknown[];
+    expect(insertParameters[0]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(JSON.parse(insertParameters[3] as string)).toMatchObject({ id: insertParameters[0] });
     expect(client.query).toHaveBeenCalledWith(
       'update projects set updated_at = now() where id = $1',
       [projectId],
@@ -107,7 +116,7 @@ describe('PostgreSQL project store', () => {
     expect(deniedClient.query).toHaveBeenCalledWith('rollback');
   });
 
-  it('reports missing, forbidden, stale, and successful saves without leaving transactions open', async () => {
+  it('reports missing, forbidden, identity mismatch, stale, and successful saves without leaving transactions open', async () => {
     const missingClient = fakeClient([empty(), empty()]);
     await expect(
       createPostgresProjectStore(fakePool([], missingClient)).updateScreenplay(
@@ -145,6 +154,24 @@ describe('PostgreSQL project store', () => {
       ),
     ).resolves.toBe('forbidden');
 
+    const identityMismatchClient = fakeClient([
+      empty(),
+      rows([{ project_id: projectId, version: 1 }]),
+      rows([{ role: 'owner' }]),
+      empty(),
+    ]);
+    await expect(
+      createPostgresProjectStore(fakePool([], identityMismatchClient)).updateScreenplay(
+        actorId,
+        screenplayId,
+        {
+          expectedVersion: 1,
+          screenplay: { ...screenplayFixture, id: 'f6b92413-4aa4-413c-8d0a-dd86d09fc326' },
+        },
+      ),
+    ).resolves.toBe('invalid');
+    expect(identityMismatchClient.query).toHaveBeenCalledWith('rollback');
+
     const staleClient = fakeClient([
       empty(),
       rows([{ project_id: projectId, version: 2 }]),
@@ -179,6 +206,7 @@ describe('PostgreSQL project store', () => {
       missingClient,
       noMemberClient,
       reviewerClient,
+      identityMismatchClient,
       staleClient,
       savedClient,
     ]) {
@@ -188,7 +216,7 @@ describe('PostgreSQL project store', () => {
 });
 
 function updateInput() {
-  return { expectedVersion: 1, screenplay: screenplayFixture };
+  return { expectedVersion: 1, screenplay: { ...screenplayFixture, id: screenplayId } };
 }
 
 function rows(values: Record<string, unknown>[]) {
@@ -201,7 +229,10 @@ function empty() {
 
 function fakeClient(results: Array<{ rowCount: number; rows: Record<string, unknown>[] }>) {
   return {
-    query: vi.fn(async () => results.shift() ?? empty()),
+    query: vi.fn(async (...args: unknown[]) => {
+      void args;
+      return results.shift() ?? empty();
+    }),
     release: vi.fn(),
   };
 }
@@ -211,7 +242,10 @@ function fakePool(
   client = fakeClient([]),
 ) {
   return {
-    query: vi.fn(async () => results.shift() ?? empty()),
+    query: vi.fn(async (...args: unknown[]) => {
+      void args;
+      return results.shift() ?? empty();
+    }),
     connect: vi.fn(async () => client),
   } as never;
 }
