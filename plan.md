@@ -1,8 +1,8 @@
 # Finaler Draft Product and Delivery Plan
 
-**Status:** The Phase 0 foundation slice was committed by the user as `7e4b9f4`; the first Phase 1 schema slice was committed as `5423afe`; the local semantic editor was committed as `bb8886c`; its label-overflow correction was committed as `6b4d534`; the Transition-to-Scene-Heading keyboard-flow correction was committed as `58bb4ee`; and PostgreSQL, Better Auth, and authorized project/screenplay persistence were committed as `bb2ce06`. The persisted-editor workflow is being rebuilt on an isolated branch after its prior uncommitted worktree was externally removed; this branch and this plan are the only source of truth for the rebuilt work. Pagination, FDX, and export work remain separate deliveries.
+**Status:** Phase 0 foundation was committed as `7e4b9f4`; the canonical schema slice as `5423afe`; the local semantic editor as `bb8886c`, with corrections `6b4d534` and `58bb4ee`; the authenticated database and API foundation as `bb2ce06`; and the persisted editor workflow as `1bce6d3`. An August 2026 audit of `1bce6d3` found the CI quality workflow cannot pass and recorded several defects; see the immediate next action. Pagination, FDX, export, collaboration, and billing remain separate deliveries.
 
-This is the source of truth for product scope, architecture, delivery order, quality gates, and operating rules. Update it deliberately when a decision changes. `progress.md` is the append-only record of work actually performed.
+This is the source of truth for product scope, architecture, delivery order, quality gates, and operating rules. Update it deliberately when a decision changes. Each delivery scope keeps its own append-only record at `progress/<scope>.md`; the root `progress.md` holds the historical record from before that convention.
 
 ## Product boundaries
 
@@ -19,14 +19,16 @@ Screenplays are sensitive creative work. Documents are private by default; shari
 | Application stack              | TypeScript end-to-end                                         | The hard parts of this product—structured editing, browser offline support, and real-time collaboration—have the best-maintained ecosystem in TypeScript. A Go API plus a Node collaboration sidecar would add an authorization boundary and two language stacks without a current benefit. |
 | Frontend                       | React, TypeScript strict mode, Vite                           | A fast SPA with no full-stack framework requirement.                                                                                                                                                                                                                                        |
 | Routing                        | TanStack Router, file-based routes with Zod validation        | Type-safe paths and addressable UI state suit a document application. Use TanStack Router only, not TanStack Start or SSR.                                                                                                                                                                  |
-| API                            | Fastify running on Node LTS                                   | Typed REST API, same-origin session handling, and a clean place for authorization, exports, and collaboration token/session checks.                                                                                                                                                         |
-| Authentication                 | Better Auth with PostgreSQL                                   | Self-hosted email/password sessions for v1. Do not implement password handling ourselves. Add verified-email, reset, rate-limiting, and transactional email before public launch.                                                                                                           |
+| API                            | Fastify on Node 24 (Active LTS)                               | Typed REST API served from the same origin as the web client, and a clean place for authorization, exports, billing webhooks, and collaboration session checks. Pin Node 24 in `engines`, `.nvmrc`, CI, and Railway.                                                                        |
+| Authentication                 | Better Auth with PostgreSQL                                   | Self-hosted email/password sessions for v1. Do not implement password handling ourselves. Sessions are same-origin, so no cross-site cookie relaxation is needed. Add verified-email, reset, and rate limiting before public launch.                                                        |
+| Transactional email            | Resend                                                        | Required for email verification, password reset, and billing notices. Until it exists, a user who forgets a password has no recovery path and anyone can register an address they do not control.                                                                                           |
 | Editor                         | Tiptap core / ProseMirror, custom screenplay extensions       | The document is structured screenplay data, not HTML or generic rich text. Use only open-source core features; do not depend on Tiptap Cloud or paid extensions.                                                                                                                            |
 | Collaboration                  | Yjs via self-hosted Hocuspocus over WebSockets                | Yjs handles concurrent/offline document merging; Hocuspocus is the WebSocket server and persistence/auth integration.                                                                                                                                                                       |
 | Primary data                   | PostgreSQL                                                    | Durable relational metadata, permissions, Yjs binary updates/checkpoints, revision projections, comments, and audit data.                                                                                                                                                                   |
 | Files                          | Private Railway object storage or compatible S3 storage       | Imported files, image/storyboard assets, and short-lived asynchronous export artifacts. Canonical screenplay data stays in PostgreSQL.                                                                                                                                                      |
 | Exports                        | Canonical renderer, headless Chromium PDF, and OOXML `.docx`  | Derive downloads from a hash-identified screenplay snapshot; do not make PDFs or Word files the source of truth.                                                                                                                                                                            |
-| Deployment                     | Railway                                                       | One web/API service and PostgreSQL initially. Serve the Vite build from Fastify so web and API share an origin. Add a dedicated export worker with the export feature; it must not block web requests.                                                                                      |
+| Deployment                     | Railway, single origin                                        | Fastify serves the Vite build and the API from one origin with Railway's CDN enabled. Hocuspocus, the export worker, and PostgreSQL are separate Railway services. Do not split the frontend to a second provider; see the deployment topology section.                                     |
+| Billing                        | Stripe Billing, hosted Checkout and Customer Portal           | Recurring subscriptions with no card data reaching our servers. Entitlements derive from verified webhooks, never from a client redirect.                                                                                                                                                   |
 | Horizontal collaboration scale | Redis pub/sub, introduced before adding a second app instance | Connected users on separate instances must receive the same Yjs updates.                                                                                                                                                                                                                    |
 
 ### Why Yjs is used with WebSockets
@@ -65,15 +67,124 @@ The router is a user-experience boundary, never an authorization boundary. Route
 - Only safe, addressable UI state belongs in the URL: selected scene, outline/revision panel, and view mode. Validate it with Zod. Never put screenplay text, collaboration updates, permissions, session data, or presigned asset URLs in a route or search parameter.
 - The active editor document and Yjs synchronization remain editor-owned state, not TanStack Query cache data. TanStack Query is for REST resources such as projects, document metadata, revisions, comments, and export-job status.
 
+### Deployment topology and origin policy
+
+Everything runs on Railway. The web client and the API share one origin: Fastify serves the Vite build alongside `/api`. This is a deliberate decision, revisited and reaffirmed in August 2026 after evaluating a Cloudflare-frontend/Railway-API split.
+
+```text
+app.example.com   Railway service: Fastify serves the Vite build + REST API.  CDN enabled.
+ws.example.com    Railway service: Hocuspocus.  Deploys independently.  Not proxied.
+                  Railway service: export worker (headless Chromium).
+                  Railway service: PostgreSQL.
+```
+
+Why single origin rather than a split frontend:
+
+- The cost case does not survive arithmetic. Railway egress is $0.05/GB with no included allowance, and a cold visitor transfers about 320 kB. Even with the CDN disabled and every visitor cold, static egress is roughly $1.60/month at 100,000 monthly visitors, against a compute floor of $25–40/month that is identical either way. Railway's CDN, which is free on all plans and serves cache hits without incurring egress, removes nearly all of that.
+- Railway's edge is no longer a weakness. Anycast BGP already terminated TLS at the nearest point of presence before the CDN existed, and Railway shipped its own multi-point-of-presence CDN in 2026.
+- A split creates an entire class of bug this project does not currently have: credentialed CORS, preflight on every JSON mutation, an absolute API base URL per environment, and a second deploy pipeline for a pnpm workspace build.
+- Preview environments are the specific trap. Provider preview hostnames sit under different registrable domains, so they are genuinely cross-site and `SameSite=Lax` sessions do not work there. Previews would need a different cookie configuration from production and would therefore stop testing the real one. Single-origin previews reproduce production exactly.
+- Railway exempts WebSocket connections from request timeouts and keeps them open indefinitely while idle. Proxying them through a general-purpose CDN would inherit an undocumented idle timeout and provider-side disconnects.
+
+Hocuspocus is a separate service on its own subdomain so that API deploys do not drop live editing sessions. That subdomain must not be proxied through a third-party CDN.
+
+Consequences that must be honored:
+
+- Because the SPA and API share an origin, `@fastify/cors` is not required for the web client. Do not add permissive CORS speculatively. If a genuine cross-origin consumer ever appears, add an explicit environment-configured allow-list of exact origins with `credentials: true`, never `Access-Control-Allow-Origin: *`, never reflected arbitrary origins, and integration tests for allowed, rejected, preflight, and credentialed cases.
+- Session cookies are `Secure`, `HttpOnly`, and `SameSite=Lax`, set explicitly rather than left to library defaults, and covered by tests.
+- The Hocuspocus WebSocket handshake is cross-origin but same-site. CORS does not apply to WebSockets and browsers perform no preflight, so **the server must validate the `Origin` header itself**. Because Hocuspocus authenticates from a cookie the browser attaches automatically, an unvalidated `Origin` is a cross-site WebSocket hijacking vulnerability.
+- Static assets must be served with correct caching. Vite emits content-hashed filenames, which require `public, max-age=31536000, immutable`; `index.html` requires `no-cache`. `@fastify/static` currently emits `Cache-Control: public, max-age=0` on every asset because no `maxAge` is configured, which is a freshness directive that overrides any CDN default and forces revalidation on every request.
+- Every authenticated API response must carry `Cache-Control: private, no-store` explicitly rather than relying on a CDN's content-type heuristics. Railway's CDN cross-served authenticated responses during a 52-minute misconfiguration incident in March 2026; defense in depth is warranted for unpublished screenplays.
+
+Origin policy does not authenticate anything. Every REST, export, asset, and collaboration endpoint must independently verify the Better Auth session and document/project authorization server-side.
+
 ### Export architecture
 
-PDF export is a required Phase 1 capability, not a late optional feature. The server creates an immutable canonical screenplay snapshot (and records its hash/revision), renders the same deterministic paginated screenplay layout used for print preview, and uses headless Chromium to produce PDF. The client polls or subscribes to an export job and downloads a short-lived, authorized result.
+**Pagination is a pure function, not a browser layout result.** A dedicated `@finaler-draft/layout` package takes a canonical screenplay and returns a deterministic page-and-line model. It measures against the known metrics of the embedded monospaced screenplay face rather than delegating to a layout engine. Both the in-browser print preview and the server-side PDF renderer consume that precomputed model; Chromium only paints it.
+
+This is deliberate. If the preview and the export each derive their own page breaks from a layout engine, they depend on Chromium version parity between an arbitrary user's browser and the server, and they will diverge. Page count is contractual in this industry, and a script that previews at 112 pages must not export at 113. A monospaced screenplay face reduces to a fixed character-and-line grid with fixed per-element indents, which makes an exact implementation both tractable and far easier to test than browser layout: page counts become unit-testable assertions against FDX fixtures with no browser involved.
+
+PDF export is a required Phase 1 capability, not a late optional feature. The server creates an immutable canonical screenplay snapshot, records its hash and revision, runs the layout function, and uses headless Chromium to paint the resulting page model to PDF. The client polls or subscribes to an export job and downloads a short-lived, authorized result. The export worker will likely need its own Dockerfile, because headless Chromium requires system libraries a buildpack will not reliably provide.
 
 Provide `.docx` export in Phase 1 from the same canonical snapshot using an OOXML generator. It should preserve the screenplay's content, element semantics, page breaks, and basic page layout, but PDF is the fidelity contract for exact screenplay pagination. Do not support legacy binary `.doc` initially: `.docx` is the modern interoperable format, while reliable `.doc` generation would add a disproportionate compatibility burden.
 
 Exports are derived artifacts, not stored screenplays. PostgreSQL holds the semantic screenplay, revisions, permissions, job metadata, and content hashes. Private object storage holds original imports, user assets, and only temporary export results needed by asynchronous workers; apply a lifecycle expiry and delete a result once it expires. Do not retain an export permanently unless a user explicitly requests an archival copy.
 
 Export correctness requires fixture-driven tests: canonical screenplay to print-preview/page-count assertions, PDF text and page-image regression tests, DOCX package/semantic tests, authorization and expiry checks, and a test that an export made from a historical revision exactly identifies that revision rather than the mutable current document.
+
+## Subscription and billing architecture
+
+Finaler Draft will be a paid product. Billing uses Stripe Billing with hosted Stripe Checkout and the Stripe Customer Portal. This is not usage-based billing, so Metronome and the Billing Meters API are both out of scope; do not introduce metered pricing without an explicit plan change.
+
+### Integration shape
+
+- **Checkout Sessions in `mode: 'subscription'`** for purchase. Hosted Checkout handles Strong Customer Authentication, wallets, localization, and proration, and keeps us at the lowest PCI scope because no card data reaches our servers or our frontend.
+- **Customer Portal** for upgrades, downgrades, cancellation, and payment-method updates. Do not hand-build subscription management UI; the Portal replaces a large amount of surface we would otherwise own and test.
+- **Never pass `payment_method_types`.** Omitting it enables dynamic payment methods configured from the Dashboard. Hardcoding `['card']` silently disables every other method and costs conversion.
+- **Model one Stripe Product per plan tier.** Attach multiple Prices to a Product only for variants of the same plan, such as monthly versus annual or alternate currencies. Checkout and invoice line items display the Product name, so tiers sharing one Product are indistinguishable to the customer. Never use the deprecated `plan` object.
+- **Production runs on a restricted API key (`rk_`), not an unrestricted secret key (`sk_`).** Both are real Stripe credentials and the secret key is what the Dashboard issues by default, but Stripe's documented recommendation is to prefer restricted keys for server-side integrations, and they are drop-in replacements requiring no code change. Build in a sandbox with a test key, catalogue the calls from the key's request logs, then create a restricted key with matching permissions. For this integration that is expected to mean read and write on Customers, Subscriptions, Prices, Products, Invoices, Checkout Sessions, and Events; confirm against the actual logs rather than against this list. Keys live in Railway environment configuration, never in source, never in a committed environment file, and never in logs, error messages, or analytics. Add a pre-commit hook rejecting strings matching `sk_live_` and `rk_live_`.
+
+### Entitlements derive from webhooks, never from the client
+
+The Checkout success redirect is not proof of payment. A user can navigate to the success URL directly. Granting access on redirect is the single most common way subscription integrations leak paid features.
+
+The authoritative flow is:
+
+```text
+Stripe webhook -> signature verification -> event dedupe -> subscriptions table -> API authorization check
+```
+
+Requirements:
+
+- **Verify the webhook signature on every event** using the signing secret, before parsing or acting on anything. Treat the signing secret with the same care as an API key. Allowlist Stripe's published IP ranges on the webhook route for defense in depth.
+- **The webhook route needs the raw request body.** Fastify's JSON parser will consume and re-serialize the body, which invalidates the signature. Register a raw-body content type parser scoped to that route only; do not disable JSON parsing globally.
+- **Events are duplicated and arrive out of order.** Persist `event.id` and reject events already processed. Reconcile state from the event's subscription object rather than assuming ordered arrival, and treat `customer.subscription.*` and `invoice.*` as the state source.
+- **Entitlement is a server-side authorization check**, evaluated in the same layer as project and screenplay authorization. It is never a client-side flag, never a route guard, and never inferred from a TanStack Query cache entry.
+- Persist a `subscriptions` projection in PostgreSQL keyed to the Better Auth user, holding the Stripe customer id, subscription id, price id, status, current period end, and cancellation state. Stripe remains the source of truth; this table is a queryable cache that the webhook keeps current.
+
+### The free tier
+
+**The free tier is one fully editable screenplay.** Not a read-only preview, not a time-limited trial: a real, writable screenplay with the complete authoring feature set, so a writer can evaluate the actual product by using it for actual work.
+
+A free account can: create and edit one screenplay, use every element, keyboard flow, and Navigator feature, and export to PDF, FDX, and DOCX. It cannot: create a second screenplay, or use collaboration and sharing.
+
+Export is available on the free tier deliberately. A writer who cannot get their work out of a product has not been given a free tier, they have been given a hostage situation.
+
+### What happens when a subscription lapses
+
+**A writer must never lose access to their own work.** A lapsed or cancelled subscription drops the account to the free tier. It never deletes a screenplay, never hides one behind a paywall, and never removes export.
+
+Concretely, a lapsed account retains: reading every screenplay it has, exporting every screenplay to PDF, FDX, and DOCX, editing one screenplay of the user's choosing, and account and billing management. It loses: creating new screenplays beyond that one, editing the others, and collaboration.
+
+**A lapsed account with several screenplays must be asked which one stays editable.** The system must never pick on the user's behalf, and it must never fall back to the oldest, the newest, or the largest. Until the user chooses, all screenplays are readable and exportable and none is editable. This is the one place where the free tier and the lapse path differ, and getting it wrong silently is worse than prompting.
+
+This is a product boundary, not an implementation detail. Unpublished creative work held hostage to a billing state is both a support burden and a serious reputational risk, and export must keep working precisely when a user is most likely to want their data out.
+
+### Tax
+
+Stripe Tax handles sales tax, VAT, and GST calculation for subscriptions, but it is not automatic and the failure mode is silent.
+
+- **`automatic_tax: { enabled: true }` collects nothing, and returns no error, in any jurisdiction without an active registration.** The account appears configured while collecting zero tax. This is the most common Stripe Tax mistake and it cannot be corrected retroactively.
+- Setup order is: set the head office address in Tax Settings, add a registration for each jurisdiction where there is an obligation, then enable `automatic_tax`.
+- The product tax code goes on the Product and `tax_behavior` on the Price. Take the code from Stripe's canonical tax code list; never invent or hardcode one from memory, and do not default to the generic electronically-supplied-services code for US sales.
+- Registrations recorded in Stripe only tell Stripe where we are already registered. They do not register us with any tax authority.
+- Sandbox transactions contribute nothing to nexus threshold monitoring; the obligation clock starts at the first live transaction.
+- **Which jurisdictions require registration is a legal determination for a tax advisor, not an engineering decision.** Do not add or expire a registration without explicit owner confirmation.
+
+### Testing
+
+- Use a Stripe sandbox and the Stripe CLI for local webhook forwarding. Test keys never go in source.
+- Use **test clocks** to exercise the subscription lifecycle: renewal, trial expiry, dunning and failed payment, cancellation at period end, and immediate cancellation. Lifecycle bugs are otherwise undiscoverable before they happen to a real customer.
+- Required coverage: signature rejection of a forged webhook, duplicate event delivery producing one state change, out-of-order delivery converging correctly, entitlement denial for an unpaid actor on every gated endpoint, and lapsed-account export remaining available.
+- Tax registrations and settings are per-sandbox and must be recreated in live mode before the first real transaction.
+
+### Open commercial decisions
+
+Settled: the free tier is one fully editable screenplay with export, and a lapsed subscription drops to that tier rather than to read-only.
+
+Still needing an owner decision before implementation: the price points, whether there is more than one paid tier and what distinguishes them, whether billing is flat per-user or per-seat on shared projects, and whether to offer a trial on top of the free tier. Seat-based pricing interacts with the Phase 2 sharing model and should not be chosen casually; flat per-user pricing with collaboration requiring the project owner to be subscribed is the simpler starting point.
+
+Note that a free tier defined by screenplay count makes soft-delete a billing-relevant behavior: a soft-deleted screenplay must not count against the free limit, or a user can be locked out by work they already discarded. Purge or exclusion rules must be settled alongside the entitlement check.
 
 ## Canonical screenplay model
 
@@ -106,7 +217,15 @@ The first editor implementation uses the open-source Tiptap core and React bindi
 
 The initial keyboard defaults mirror the core Final Draft writing flow: Enter after a scene heading creates action, after action creates action, after character or parenthetical creates dialogue, after dialogue creates action, and after transition creates a scene heading. Tab from action creates character; Tab from dialogue creates parenthetical. The toolbar element selector changes the active block's screenplay element. Each transformation must preserve the block's stable identity where the schema permits it, and the UI must show the active element and derive Navigator scenes from the shared schema. Local undo/redo is required; it must not be presented as collaboration history.
 
-The semantic-editor production bundle currently measures about 177 kB gzip and triggers Vite's default 500 kB uncompressed-chunk warning. Do not suppress that warning. When the TanStack Router route tree is introduced, lazy-load the editor route and establish a documented bundle budget before adding further authoring extensions.
+The editor route is lazy-loaded behind the TanStack Router route tree. The documented bundle budget, enforced in CI as a build step that fails on regression, is:
+
+| Artifact          | Budget (gzip) |
+| ----------------- | ------------- |
+| Entry chunk       | 120 kB        |
+| Lazy editor chunk | 200 kB        |
+| CSS               | 20 kB         |
+
+The editor allowance carries deliberate headroom for Yjs, `y-prosemirror`, and the Hocuspocus provider. Do not suppress Vite's default 500 kB uncompressed-chunk warning.
 
 Formatting, keyboard behavior, pagination, and PDF export are product-critical. Do not start Final Draft-style locked pages, colored production revisions, or scene-number insertion rules until deterministic pagination and a robust FDX fixture suite exist.
 
@@ -178,14 +297,23 @@ Before the main editor implementation, create and review a clickable shell/desig
 
 - Create monorepo, root `README.md`, standard Node `.gitignore`, strict TypeScript, environment validation, structured error handling, migrations, seeded local development, CI, and Railway configuration.
 - Integrate Better Auth with secure cookie/session settings, password reset/email verification pathways, authorization roles, audit logging, and no secret/PII logging.
+- Registration must visibly state every password requirement beneath the password field, require a confirm-password field with an inline match error before submission, and surface safe server-side validation feedback. Sign-in and registration password fields must offer an accessible, opt-in visibility toggle that preserves the entered value and exposes its state to assistive technology.
+- Define and test the single-origin deployment, cookie, and static-caching policy before public deployment. Do not add speculative CORS; see the deployment topology section.
+- Apply rate limiting to authentication endpoints and a global request cap. This is foundation work, not pre-launch work: credential stuffing is live the moment the service is reachable.
 - Establish product shell/design tokens, test fixtures, database backup/PITR checklist, dependency/license policy, and observability redaction policy.
+
+The design-token system is a prerequisite for further interface work, not a parallel task. Without it, each contributor picks values by eye and the interface drifts toward a generic component-library appearance.
 
 ### Phase 1 — Canonical screenplay authoring
 
 - Projects, screenplay creation, semantic elements, keyboard element switching, title pages, autosave, and scene/character navigation.
-- Deterministic pagination foundation and accessible editor behavior.
-- FDX import/export compatibility fixtures; deterministic PDF export through the server-side canonical renderer; and Word-compatible `.docx` export. Add Fountain/plain-text interchange where it does not compromise FDX quality.
-- SmartType-style completion from document data.
+- Rename and soft-delete for projects and screenplays. Deletion is always soft; screenplays are the asset a user least wants a stray click to destroy.
+- The deterministic pagination layout package and accessible editor behavior.
+- FDX import/export compatibility fixtures; deterministic PDF export painted from the layout package; and Word-compatible `.docx` export. Add Fountain/plain-text interchange where it does not compromise FDX quality.
+- A canonical round-trip test asserting that screenplay to editor projection and back is the identity function. This becomes load-bearing once FDX import exists.
+- SmartType-style, context-aware completion. Scene-heading input must suggest screenplay prefixes such as `INT.`, `EXT.`, `INT./EXT.`, and `I/E.`, then reuse locations and times already authored in the document; character input must suggest previously authored characters. Suggestions must be keyboard-operable, never replace text without an explicit accept action, and stay local to the screenplay unless a future user-controlled project dictionary is designed.
+
+Collaboration transport moved forward into this phase. The interim autosave sends the entire canonical screenplay on every debounced save, which at feature length is several hundred kilobytes per save and does not scale. That autosave is explicitly scaffolding: when Yjs lands, the Yjs document becomes the source of truth, the canonical JSON column becomes a projection, and the version column, whole-document `PUT`, and terminal 409 conflict handling are removed. Do not invest further in conflict-recovery interface work, because a CRDT has no conflicts to recover from.
 
 ### Phase 2 — Collaboration and durable version history
 
@@ -213,6 +341,18 @@ Add a collaborative, freeform board of image and text cards for beats, reference
 
 This deliberately provides a better version of Final Draft's image-capable Beat Board workflow, while excluding timed animatics, drawing tools, and production shot-list scheduling from V2. A later presentation/read-through mode may show storyboard frames as a toggleable side-by-side or full-screen script view; it must not affect screenplay pagination.
 
+### Launch readiness
+
+Public launch is gated on a workstream that runs alongside the feature phases rather than inside one of them. None of it is optional, and none of it should be discovered late:
+
+- Transactional email through Resend, with verified-email and password-reset flows. Until this exists there is no account recovery path at all.
+- Rate limiting on authentication and a global request cap.
+- Stripe Billing, entitlement gating, and the Customer Portal, with the commercial decisions in the billing section settled.
+- Stripe Tax registrations confirmed with a tax advisor before the first live transaction.
+- Terms of service, privacy policy, and a documented data-retention and account-deletion path.
+- Database backup and point-in-time-recovery verified by an actual restore rehearsal, not by the existence of a backup setting.
+- Dependency vulnerability and license review.
+
 ## Quality and security gates
 
 Every feature is incomplete until all applicable gates pass:
@@ -230,8 +370,8 @@ The repository was initialized by the user with baseline commit `ccf12db`. Proje
 
 For each approved feature:
 
-1. The lead records the task, acceptance criteria, owner, and intended branch in `progress.md` before implementation.
-2. The assigned implementation agent works in an isolated `feature/<scope>` branch/worktree, changes only the agreed scope, and updates that branch's `progress.md` as work and verification progress.
+1. The lead records the task, acceptance criteria, owner, and intended branch in `progress/<scope>.md` before implementation, including an explicit out-of-scope list. The lead advises; it does not implement.
+2. The assigned implementation agent works in an isolated branch and worktree, changes only the agreed scope, and updates `progress/<scope>.md` as work and verification progress. Worktrees live at `~/Documents/finaler-draft-worktrees/<scope>`, never under a temporary directory: agents never commit, so a worktree always holds uncommitted work, and a temp sweep has already destroyed a slice of this project once.
 3. The agent does not commit, merge, force-push, or stage unrelated files. It hands off a commit-ready diff with exact verification commands/results and known risks.
 4. An independent review agent reviews the diff and updates `progress.md` with findings and disposition. The implementation agent resolves findings, then reruns every relevant gate.
 5. Only after review, linting, type checks, unit tests, integration tests, and system tests pass may the user create the commit and merge the feature branch. The merge record and test evidence are appended to `progress.md`.
@@ -240,7 +380,18 @@ No agent may silently broaden scope, replace this plan, create a partial product
 
 ## Immediate next action
 
-Complete and independently review the PostgreSQL, Better Auth, and authorized project/screenplay persistence foundation on `feature/persistence-foundation`, including the required real PostgreSQL integration gate. The next feature branch will establish deterministic pagination and print-preview fixtures; FDX/PDF/DOCX work follows the renderer foundation. Collaboration remains separately planned Phase 0 work and private documents must not be represented as launch-ready until the persistence foundation clears its integration gate.
+An audit of `main` at `1bce6d3` found that the CI workflow cannot pass: `pnpm typecheck` fails on a clean checkout because leaf packages are typechecked rather than built and their declarations never exist, and `pnpm format:check` fails on files committed unformatted. It also found that `POST /api/auth/sign-out` returns 500, and that the API error handler converts every client error into a 500. Until those are fixed, no branch can produce trustworthy verification evidence, so the recorded gate results in earlier `progress.md` entries should not be relied on.
+
+The delivery order is therefore:
+
+1. `fix/ci-green` — make the gates trustworthy. In progress.
+2. `chore/design-tokens` — extract the token system from the 92 distinct color literals currently in `styles.css`. Unblocks all interface work.
+3. `feature/auth-hardening` — password requirements interface, shared validation-code allowlist, rate limiting, explicit cookie attributes, Resend for verification and reset.
+4. `chore/platform-hygiene` — unify on a single Zod major across the workspace, split server environment parsing out of the shared policy package, and adopt a typed Fastify route contract.
+5. `feature/project-screenplay-crud` — rename and soft-delete.
+6. `feature/pagination-engine` — the pure layout package, then the renderer.
+
+Yjs follows item 4 and may run alongside item 6. Billing follows the commercial decisions recorded in the billing section. Private documents must not be represented as launch-ready until the launch-readiness list is complete.
 
 ## Research basis
 
@@ -255,3 +406,7 @@ Complete and independently review the PostgreSQL, Better Auth, and authorized pr
 - Tiptap editor core license and extension model: <https://github.com/ueberdosis/tiptap> and <https://github.com/ueberdosis/tiptap/blob/main/LICENSE.md>
 - Final Draft element conversion and default Enter/Tab behavior: <https://kb.finaldraft.com/hc/en-us/articles/27648345770772-How-do-I-change-one-element-to-another-in-a-script> and <https://kb.finaldraft.com/hc/en-us/articles/27977488282644-What-keyboard-shortcuts-can-I-use-in-Final-Draft>
 - Final Draft image-capable Beat Board: <https://kb.finaldraft.com/hc/en-us/articles/15575274173716-Is-there-any-way-to-integrate-storyboards-into-Final-Draft>
+- Railway pricing, egress rates, and CDN: <https://docs.railway.com/pricing/plans>, <https://docs.railway.com/networking/cdn>, and <https://docs.railway.com/networking/edge-networking>
+- Stripe subscription integration design and Customer Portal: <https://docs.stripe.com/billing/subscriptions/design-an-integration>, <https://docs.stripe.com/saas>, and <https://docs.stripe.com/customer-management/integrate-customer-portal>
+- Stripe webhook signature verification and API key practice: <https://docs.stripe.com/webhooks> and <https://docs.stripe.com/keys/restricted-api-keys>
+- Stripe Tax setup and registration requirements: <https://docs.stripe.com/tax/set-up> and <https://docs.stripe.com/billing/taxes/collect-taxes>
