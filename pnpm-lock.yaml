@@ -199,6 +199,19 @@ importers:
         specifier: 3.2.4
         version: 3.2.4(@types/node@24.3.0)(jsdom@26.1.0)(tsx@4.23.9)
 
+  packages/layout:
+    dependencies:
+      '@finaler-draft/screenplay':
+        specifier: workspace:*
+        version: link:../screenplay
+    devDependencies:
+      '@vitest/coverage-v8':
+        specifier: 3.2.4
+        version: 3.2.4(vitest@3.2.4(@types/node@24.3.0)(jsdom@26.1.0)(tsx@4.23.9))
+      vitest:
+        specifier: 3.2.4
+        version: 3.2.4(@types/node@24.3.0)(jsdom@26.1.0)(tsx@4.23.9)
+
   packages/screenplay:
     dependencies:
       zod:
