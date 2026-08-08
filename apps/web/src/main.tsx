@@ -9,7 +9,13 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RouterProvider } from '@tanstack/react-router';
 import { createRouter } from '@tanstack/react-router';
 import { routeTree } from './routeTree.gen.js';
+import { applyPageGeometryCssVariables } from './pageGeometryCss.js';
 import './styles.css';
+
+// Must run before the first render: styles.css reads the page geometry exclusively through
+// these custom properties, and an unset `--fd-page-*` variable would compute as invalid,
+// leaving the affected property unset for that first paint.
+applyPageGeometryCssVariables();
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 const router = createRouter({ context: { queryClient }, defaultPreload: 'intent', routeTree });

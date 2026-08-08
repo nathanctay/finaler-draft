@@ -11,6 +11,10 @@
     "./fixtures": {
       "types": "./dist/fixtures.d.ts",
       "default": "./dist/fixtures.js"
+    },
+    "./pageFormat": {
+      "types": "./dist/pageFormat.d.ts",
+      "default": "./dist/pageFormat.js"
     }
   },
   "scripts": {

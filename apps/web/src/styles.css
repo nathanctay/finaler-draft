@@ -190,7 +190,7 @@ select:focus-visible,
   padding: 0 8px;
 }
 
-.menubar>span:not(.menubar-spacer),
+.menubar > span:not(.menubar-spacer),
 .menubar button {
   height: 30px;
   padding: 0 10px;
@@ -315,7 +315,7 @@ select:focus-visible,
   border-bottom: 1px solid var(--border-02);
 }
 
-.panel-tabs>span {
+.panel-tabs > span {
   padding: 7px 8px;
   border-bottom: 2px solid transparent;
   background: transparent;
@@ -396,21 +396,27 @@ select:focus-visible,
 
 .page {
   position: relative;
-  width: min(100%, 8.5in);
-  min-height: 11in;
-  padding: 0.65in 0.8in;
+  flex-shrink: 0;
+  width: var(--fd-page-width);
+  min-height: var(--fd-page-height);
+  padding: var(--fd-page-margin-top) var(--fd-page-margin-right) 0 var(--fd-page-margin-left);
   background: white;
   box-shadow: 0 1px 5px var(--shadow-02);
-  font-family: 'Courier Prime', monospace;
-  line-height: 1.35;
+  font-family: var(--fd-typeface);
+  /* The manuscript grid, not a page-level default: .page is the manuscript container, so any
+     content placed directly under it (not inside .script-body) should land on this grid rather
+     than silently inheriting an arbitrary value. The three decorations below (page number,
+     title, meta) are not manuscript content and set their own looser leading explicitly. */
+  line-height: var(--fd-line-height);
   transform-origin: top center;
 }
 
 .page-number {
   position: absolute;
-  top: 0.35in;
-  right: 0.5in;
+  top: var(--fd-page-number-top);
+  right: var(--fd-page-number-right);
   font-size: 10px;
+  line-height: 1.35;
 }
 
 .script-title {
@@ -418,17 +424,22 @@ select:focus-visible,
   text-align: center;
   font-size: 15px;
   font-weight: 700;
+  line-height: 1.35;
 }
 
 .script-meta {
   margin-top: 0.5in;
   text-align: center;
   font-size: 11px;
+  line-height: 1.35;
 }
 
 .script-body {
-  margin-top: 1in;
-  font-size: 12px;
+  /* No margin-top: .page's padding-top (--fd-page-margin-top) already places the content box
+     at exactly the 1.0in top margin the specification requires for the first line. */
+  margin-top: 0;
+  font-size: var(--fd-type-size);
+  line-height: var(--fd-line-height);
 }
 
 .script-body .ProseMirror {
@@ -460,17 +471,30 @@ select:focus-visible,
   font-weight: 700;
 }
 
+/*
+ * Every indent below is specified from the physical page edge (see
+ * `@finaler-draft/screenplay/pageFormat`), not from the script-body content box. The content
+ * box's own left/right edges already sit `--fd-page-margin-left` / `--fd-page-margin-right` in
+ * from the page edge, because that is what `.page`'s padding is. Each rule below therefore
+ * subtracts that margin with `calc()` rather than restating an already-offset number, so the
+ * page-edge figure in `pageFormat.ts` stays the only place the indent is written down.
+ */
 .script-body [data-screenplay-block][data-screenplay-element='character'] {
-  margin-left: 2.25in;
+  margin-left: calc(var(--fd-character-indent) - var(--fd-page-margin-left));
 }
 
-.script-body [data-screenplay-block][data-screenplay-element='dialogue'],
+.script-body [data-screenplay-block][data-screenplay-element='dialogue'] {
+  width: var(--fd-dialogue-width);
+  margin-left: calc(var(--fd-dialogue-indent) - var(--fd-page-margin-left));
+}
+
 .script-body [data-screenplay-block][data-screenplay-element='parenthetical'] {
-  max-width: 3.35in;
-  margin-left: 1.65in;
+  width: var(--fd-parenthetical-width);
+  margin-left: calc(var(--fd-parenthetical-indent) - var(--fd-page-margin-left));
 }
 
 .script-body [data-screenplay-block][data-screenplay-element='transition'] {
+  margin-right: calc(var(--fd-transition-indent) - var(--fd-page-margin-right));
   text-align: right;
 }
 
@@ -809,10 +833,6 @@ select:focus-visible,
     display: none;
   }
 
-  .page {
-    padding: 0.5in;
-  }
-
   .brand {
     min-width: auto;
   }
@@ -856,8 +876,8 @@ select:focus-visible,
     width: 100%;
   }
 
-  .brand>span:last-child,
-  .menubar>span:nth-child(n + 4),
+  .brand > span:last-child,
+  .menubar > span:nth-child(n + 4),
   .menubar button:nth-child(n + 4) {
     display: none;
   }
