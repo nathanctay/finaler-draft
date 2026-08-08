@@ -461,6 +461,23 @@ Zoom belongs in the toolbar, alongside the other controls that act on the docume
 
 The status bar carries the active scene, the word count, and the save state. Save state in particular must not be hidden below the fold: it is the writer's only signal that their work is persisted. If the status bar is ever removed, save state has to move somewhere permanently visible first.
 
+### Page presentation
+
+**Discrete separated pages are the default.** A writer sees individual 8.5 by 11 inch pages with visible boundaries between them, in the manner of Microsoft Word, because knowing where a page ends is the point of a screenplay editor.
+
+A **continuous scroll** toggle is offered for writers who prefer an unbroken column. It is view state, not document state, and it defaults to discrete pages.
+
+**The toggle changes presentation only. It never changes where pages break.** The layout package computes breaks from the canonical screenplay and the page format; both views render the same break positions. Page count is identical in either mode, and so is every rule below:
+
+- Space before is suppressed at the top of every page in both views. In continuous scroll this means the first element after a break still carries no leading blank line, even though no physical page edge is drawn there.
+- `(MORE)` and `CONT'D` appear in both views. They are consequences of a break, not decorations of a page edge.
+
+If the toggle ever changed the page count, the editor would report two different lengths for the same screenplay depending on a view preference, which is the same defect class as an editing affordance consuming grid space.
+
+**The current `:first-child` rule only approximates this.** Space-before suppression is presently implemented as "the first block of the body", which is exact while a single continuous page exists and becomes wrong the moment real page boundaries do. It must become "the first element on each page" as part of the pagination work, in both views.
+
+**The hard part is rendering, not computing.** ProseMirror manages one contiguous document; presenting it as discrete pages while keeping it a single editable document is the principal technical risk in this area. Computing breaks is pure arithmetic over line counts and is exhaustively testable without a browser. Those two problems should not be attempted in one slice: prove the layout package against fixtures first, then render its output.
+
 ### Zoom controls
 
 Not urgent, and not required for the layout package. Recorded so the design is settled before someone builds it piecemeal.
@@ -579,6 +596,9 @@ The design-token system is a prerequisite for further interface work, not a para
 - FDX import/export compatibility fixtures; deterministic PDF export painted from the layout package; and Word-compatible `.docx` export. Add Fountain/plain-text interchange where it does not compromise FDX quality.
 - A canonical round-trip test asserting that screenplay to editor projection and back is the identity function. This becomes load-bearing once FDX import exists.
 - SmartType-style, context-aware completion. Scene-heading input must suggest screenplay prefixes such as `INT.`, `EXT.`, `INT./EXT.`, and `I/E.`, then reuse locations and times already authored in the document; character input must suggest previously authored characters. Suggestions must be keyboard-operable, never replace text without an explicit accept action, and stay local to the screenplay unless a future user-controlled project dictionary is designed.
+- Zoom gestures and presets, as specified in the zoom controls section: pinch to zoom, a preset dropdown, and fit-page and fit-width modes. Deliberately last in the phase — it is a refinement of a control that already works, and it depends on the page presentation being settled first.
+
+The remaining Phase 1 order is: the layout package, then its rendering as discrete pages; project and screenplay rename and soft-delete; platform hygiene, meaning the Zod major unification, the `packages/config` split, and a typed route contract; title page, scene numbers, and document settings, all of which depend on pagination existing; FDX, PDF, and DOCX, which depend on the layout package; SmartType; and finally the zoom refinements.
 
 Collaboration transport moved forward into this phase. The interim autosave sends the entire canonical screenplay on every debounced save, which at feature length is several hundred kilobytes per save and does not scale. That autosave is explicitly scaffolding: when Yjs lands, the Yjs document becomes the source of truth, the canonical JSON column becomes a projection, and the version column, whole-document `PUT`, and terminal 409 conflict handling are removed. Do not invest further in conflict-recovery interface work, because a CRDT has no conflicts to recover from.
 
