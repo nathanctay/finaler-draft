@@ -379,6 +379,8 @@ Three of these need comment, because the owner's stated figures and the most com
 
 These are defaults, not constraints. Every one is exposed in document settings, so a writer who prefers a different house style can set it; the defaults only need to be right for someone who never opens that dialog.
 
+**Character and transition have no stated character budget because they are short by construction, not because they are unbounded.** Their limit is implied by the geometry and is exact rather than invented: an element may never cross the right margin. A character cue starts at 3.7 in and the right margin is at 7.5 in, giving 38 characters. A transition is right-aligned against the same margin and may extend left to 1.5 in, giving 60. Wrap at those implied budgets rather than allowing an over-long cue to run off the page, which would corrupt the PDF silently.
+
 Dual-dialogue column geometry is **not yet specified** and must be settled before dual dialogue can paginate or export.
 
 ### Why no text-measurement library
@@ -404,14 +406,60 @@ The layout package decides breaks. These rules are the specification:
 
 - **Space before is suppressed at the top of every page.** The first element on a page begins at the top margin with no leading blank line, and this applies to every page, not only the first. Otherwise each page break would push its page's content down one line and the page count would drift progressively as the script grows.
 
-- **A scene heading never ends a page.** It stays with the action that follows it; if both do not fit, the heading moves to the next page.
+- **A scene heading never ends a page.** It requires at least two lines of the following element on the same page; if that is not possible, the heading moves to the next page and takes them with it.
 - **A single orphaned line of dialogue moves to the next page** rather than sitting alone at a page foot.
+- **A character cue never ends a page.** If none of its dialogue fits below it, the whole speech moves to the next page. A lone character name at a page foot is the same failure the orphan rule exists to prevent, and the contiguous-speech rule already treats character, parenthetical and dialogue as one unit.
+- **A split leaves at least two dialogue lines at the foot of the first page, and at least one at the head of the continuation.** If neither is possible, do not split: move the whole speech.
+
+The asymmetry is deliberate. At a page foot, a cue, one line and `(MORE)` spends three rows to deliver one line of dialogue, and moving the speech is plainly better. At the head of a continuation the `CONT'D` cue is itself content and supplies the context a widow lacks, so a single line there reads as a complete unit rather than a stranded fragment. Requiring two at the top would force short speeches onto the next page for no gain: a three-line speech could never split at all, while under this rule it splits two and one.
+
+**The minimum counts dialogue lines across the whole speech, not within a single dialogue block.** A speech interrupted by a mid-speech parenthetical is still one speech, and a break may fall between its blocks:
+
+- Parentheticals do not count toward the two-and-one minimum. Only dialogue lines do.
+- A parenthetical never ends a page. It introduces the dialogue that follows, so it moves to the next page with it, exactly as a character cue does.
+- A parenthetical is never split across pages. At two lines wide at most, splitting one gains nothing and reads badly.
+
+Scoping splits to within a single dialogue block would be simpler but wastes space in a common case: a speech of character, dialogue, parenthetical, dialogue whose natural boundary falls between the first dialogue block and the parenthetical would move entirely to the next page, stranding lines that were legitimately usable.
+
+### Page fill and the bottom margin
+
+A page fills to **55 lines**, which leaves a 0.833 in bottom margin.
+
+Filling further is possible within the stated 0.5 to 1.5 in range — 57 lines reaches exactly 0.5 in — and is deliberately not done. Page count is contractual in this form and the one-page-per-minute heuristic is calibrated against roughly 55 lines. A 110-page script at 57 lines per page measures about 106, so routinely filling tighter would make every screenplay read as shorter than it is.
+
+**A page must not end above a 1.5 in bottom margin**, which means it must not contain fewer than 51 lines. Two exceptions: the last page of the screenplay, and a page ended by an author-inserted `page_break`, both of which end wherever the content does.
+
+That floor is not a coincidence of the other rules, and the arithmetic is worth keeping because it shows the rules are consistent rather than merely compatible:
+
+- A speech of three or more dialogue lines can always split under the two-and-one minimum, so it never forces a whole-speech move.
+- The largest whole-speech move that can therefore occur is a cue, two dialogue lines and the blank line before them: four lines. From a 55-line page that ends the page at 51 lines, exactly 1.5 in.
+
+Under a two-and-two minimum a three-line speech would also have to move, ending the page at 50 lines and breaching the floor. The asymmetric split rule is what keeps the fill rule satisfiable.
+
+The engine should assert the floor rather than assume it. If a fixture ever produces a page below 51 lines outside the two stated exceptions, that is a defect in the break rules and should fail loudly rather than render as an unusually short page.
+
 - **Long dialogue splits across the break.** When it does:
   - `(MORE)` is placed at the foot of the first part, at the character indent.
   - The continuation on the next page repeats the character name followed by `(CONT'D)`.
   - Both are generated automatically and **both must be deletable by the writer.** Automatic insertion that cannot be removed is a defect, not a feature.
 
 `(MORE)` was not in the owner's original list and is added here: without it the split reads as two separate speeches by the same character.
+
+**`(MORE)` and `CONT'D` are derived, never written into the canonical screenplay.** The layout package marks them as generated lines and the renderer draws them; they are not selectable, editable content.
+
+They exist only because a page boundary fell somewhere, which makes them renderer output, and the canonical model already forbids persisting renderer output in the semantic document. Materialising them would also break things that depend on the document being stable under layout:
+
+- `canonical_hash` identifies a screenplay for exports and revisions. If pagination mutates the document, the hash changes when nobody edited anything, and revision history fills with automatic commits.
+- Automatic insertions would enter the same undo history as the writer's own typing, so an undo after one keystroke has no coherent meaning.
+- Two collaborators computing the same break would each insert their own copy. Yjs would merge both faithfully; the input was wrong, not the CRDT.
+- FDX export would carry them as authored content, so a round-trip would produce duplicates on the next pagination.
+
+The writer keeps control through two mechanisms rather than through deletion:
+
+- A document setting to suppress automatic `(MORE)` and `CONT'D` entirely, added when document settings land. Default on.
+- A manual `page_break` block, already in the schema, for a writer who wants a particular speech kept whole. That is authorship and belongs in the document; the `CONT'D` that would otherwise result from it does not.
+
+Revisit only if user testing shows writers genuinely need to edit the text rather than remove it. An override mechanism is possible but carries its own staleness problem — an override keyed to a break becomes meaningless as soon as the break moves — so it needs evidence of a real need before it earns that cost.
 
 ### Character names and extensions
 
@@ -438,7 +486,7 @@ This is display only and belongs to Phase 1. It is distinct from the Phase 5 pro
 
 ### Document settings
 
-A dialog under the File menu. Adjustable: character indent, parenthetical indent and width, page-number position and numeral style, scene numbers on or off.
+A dialog under the File menu. Adjustable: character indent, parenthetical indent and width, page-number position and numeral style, scene numbers on or off, and automatic `(MORE)` and `CONT'D` on or off, defaulting to on.
 
 Not adjustable, ever: the typeface, the type size, the pitch.
 
