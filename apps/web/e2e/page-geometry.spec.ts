@@ -273,3 +273,220 @@ test('zoom scales the page visually without changing the character grid', async 
   expect(Math.abs(result.naturalWidthIn - 6.0)).toBeLessThan(TOLERANCE_IN);
   expect(Math.abs(result.visualWidthIn - 6.0 * 0.7)).toBeLessThan(TOLERANCE_IN);
 });
+
+// A pixel tolerance for the line-grid tests below, distinct from TOLERANCE_IN. These measure
+// getBoundingClientRect() top-edge deltas between sibling blocks, which -- unlike the margin and
+// indent checks above -- are whole multiples of a single 16px line box (12pt at line-height 1,
+// see LINE_HEIGHT_RATIO in pageFormat.ts) with no font-dependent horizontal component at all. A
+// real defect here is at minimum a dozen pixels (the old 25px inter-element gap this suite
+// replaces), so 0.5px is generous headroom for sub-pixel layout rounding while still failing
+// loudly on anything that would actually move a line off the six-per-inch grid.
+const LINE_TOLERANCE_PX = 0.5;
+const LINE_HEIGHT_PX = 16;
+
+test.describe('vertical spacing between elements is whole lines on the six-per-inch grid', () => {
+  test('a character block followed by dialogue occupies two consecutive line boxes with no gap', async ({
+    page,
+  }) => {
+    const result = await page.evaluate(() => {
+      function block(element: string, text: string): HTMLDivElement {
+        const el = document.createElement('div');
+        el.setAttribute('data-screenplay-block', '');
+        el.setAttribute('data-screenplay-element', element);
+        el.textContent = text;
+        return el;
+      }
+
+      const pageEl = document.createElement('article');
+      pageEl.className = 'page';
+      const body = document.createElement('div');
+      body.className = 'script-body';
+      const character = block('character', 'MARA');
+      const dialogue = block('dialogue', 'If the ending is true, it earns its way there.');
+      body.append(character, dialogue);
+      pageEl.appendChild(body);
+      document.body.appendChild(pageEl);
+
+      const out = {
+        characterTop: character.getBoundingClientRect().top,
+        characterHeight: character.getBoundingClientRect().height,
+        dialogueTop: dialogue.getBoundingClientRect().top,
+      };
+      document.body.removeChild(pageEl);
+      return out;
+    });
+
+    expect(Math.abs(result.characterHeight - LINE_HEIGHT_PX)).toBeLessThan(LINE_TOLERANCE_PX);
+    expect(
+      Math.abs(result.dialogueTop - (result.characterTop + result.characterHeight)),
+    ).toBeLessThan(LINE_TOLERANCE_PX);
+  });
+
+  test('character, parenthetical, and dialogue together occupy exactly three consecutive line boxes', async ({
+    page,
+  }) => {
+    const result = await page.evaluate(() => {
+      function block(element: string, text: string): HTMLDivElement {
+        const el = document.createElement('div');
+        el.setAttribute('data-screenplay-block', '');
+        el.setAttribute('data-screenplay-element', element);
+        el.textContent = text;
+        return el;
+      }
+
+      const pageEl = document.createElement('article');
+      pageEl.className = 'page';
+      const body = document.createElement('div');
+      body.className = 'script-body';
+      const character = block('character', 'MARA');
+      const parenthetical = block('parenthetical', '(quietly)');
+      const dialogue = block('dialogue', 'It has to earn its way there.');
+      body.append(character, parenthetical, dialogue);
+      pageEl.appendChild(body);
+      document.body.appendChild(pageEl);
+
+      const characterTop = character.getBoundingClientRect().top;
+      const dialogueRect = dialogue.getBoundingClientRect();
+      const out = {
+        totalHeight: dialogueRect.top + dialogueRect.height - characterTop,
+      };
+      document.body.removeChild(pageEl);
+      return out;
+    });
+
+    expect(Math.abs(result.totalHeight - LINE_HEIGHT_PX * 3)).toBeLessThan(LINE_TOLERANCE_PX);
+  });
+
+  test('an action block following dialogue is separated by exactly one blank line', async ({
+    page,
+  }) => {
+    const result = await page.evaluate(() => {
+      function block(element: string, text: string): HTMLDivElement {
+        const el = document.createElement('div');
+        el.setAttribute('data-screenplay-block', '');
+        el.setAttribute('data-screenplay-element', element);
+        el.textContent = text;
+        return el;
+      }
+
+      const pageEl = document.createElement('article');
+      pageEl.className = 'page';
+      const body = document.createElement('div');
+      body.className = 'script-body';
+      const dialogue = block('dialogue', 'It has to earn its way there.');
+      const action = block('action', 'She closes the script.');
+      body.append(dialogue, action);
+      pageEl.appendChild(body);
+      document.body.appendChild(pageEl);
+
+      const dialogueRect = dialogue.getBoundingClientRect();
+      const out = {
+        dialogueBottom: dialogueRect.top + dialogueRect.height,
+        actionTop: action.getBoundingClientRect().top,
+      };
+      document.body.removeChild(pageEl);
+      return out;
+    });
+
+    expect(Math.abs(result.actionTop - (result.dialogueBottom + LINE_HEIGHT_PX))).toBeLessThan(
+      LINE_TOLERANCE_PX,
+    );
+  });
+
+  test("every element's top edge falls on a six-per-inch boundary relative to the first line of the body", async ({
+    page,
+  }) => {
+    const offsets = await page.evaluate(() => {
+      function block(element: string, text: string): HTMLDivElement {
+        const el = document.createElement('div');
+        el.setAttribute('data-screenplay-block', '');
+        el.setAttribute('data-screenplay-element', element);
+        el.textContent = text;
+        return el;
+      }
+
+      const pageEl = document.createElement('article');
+      pageEl.className = 'page';
+      const body = document.createElement('div');
+      body.className = 'script-body';
+      const blocks = [
+        block('scene_heading', 'INT. APARTMENT - MORNING'),
+        block('action', 'Sunlight settles across a drafting table.'),
+        block('character', 'MARA'),
+        block('parenthetical', '(quietly)'),
+        block('dialogue', 'It has to earn its way there.'),
+        block('character', 'MARA'),
+        block('dialogue', 'Every page.'),
+        block('transition', 'CUT TO:'),
+        block('scene_heading', 'EXT. UNION STATION - CONTINUOUS'),
+        block('shot', 'CLOSE ON the arrival clock.'),
+      ];
+      body.append(...blocks);
+      pageEl.appendChild(body);
+      document.body.appendChild(pageEl);
+
+      const firstTop = blocks[0]?.getBoundingClientRect().top ?? 0;
+      const result = blocks.map((el) => el.getBoundingClientRect().top - firstTop);
+      document.body.removeChild(pageEl);
+      return result;
+    });
+
+    for (const offset of offsets) {
+      const remainder = ((offset % LINE_HEIGHT_PX) + LINE_HEIGHT_PX) % LINE_HEIGHT_PX;
+      const distanceFromBoundary = Math.min(remainder, LINE_HEIGHT_PX - remainder);
+      expect(distanceFromBoundary).toBeLessThan(LINE_TOLERANCE_PX);
+    }
+    // The first element itself carries no leading blank line: .page's top padding already
+    // places it at the 1.0in top margin.
+    expect(offsets[0]).toBe(0);
+  });
+
+  test('element positions on the line grid are identical with element-name labels on and off', async ({
+    page,
+  }) => {
+    const result = await page.evaluate(() => {
+      function block(element: string, text: string): HTMLDivElement {
+        const el = document.createElement('div');
+        el.setAttribute('data-screenplay-block', '');
+        el.setAttribute('data-screenplay-element', element);
+        el.textContent = text;
+        return el;
+      }
+
+      function buildAndMeasure(showLabels: boolean): number[] {
+        const pageEl = document.createElement('article');
+        pageEl.className = 'page';
+        const body = document.createElement('div');
+        body.className = showLabels ? 'script-body show-element-labels' : 'script-body';
+        const blocks = [
+          block('scene_heading', 'INT. APARTMENT - MORNING'),
+          block('action', 'Sunlight settles across a drafting table.'),
+          block('character', 'MARA'),
+          block('parenthetical', '(quietly)'),
+          block('dialogue', 'It has to earn its way there.'),
+          block('transition', 'CUT TO:'),
+        ];
+        body.append(...blocks);
+        pageEl.appendChild(body);
+        document.body.appendChild(pageEl);
+
+        const pageTop = pageEl.getBoundingClientRect().top;
+        const tops = blocks.map((el) => el.getBoundingClientRect().top - pageTop);
+        document.body.removeChild(pageEl);
+        return tops;
+      }
+
+      return {
+        labelsOff: buildAndMeasure(false),
+        labelsOn: buildAndMeasure(true),
+      };
+    });
+
+    expect(result.labelsOn).toHaveLength(result.labelsOff.length);
+    for (let i = 0; i < result.labelsOff.length; i += 1) {
+      expect(Math.abs((result.labelsOn[i] ?? 0) - (result.labelsOff[i] ?? 0))).toBeLessThan(
+        LINE_TOLERANCE_PX,
+      );
+    }
+  });
+});

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BLANK_LINES_BEFORE,
   BODY_HEIGHT_IN,
   BODY_WIDTH_CHARACTERS,
   BODY_WIDTH_IN,
@@ -140,5 +141,34 @@ describe('element indents', () => {
       PAGE_WIDTH_IN - (dialogue.leftIn ?? 0) - (dialogue.rightIn ?? 0),
       10,
     );
+  });
+});
+
+describe('blank lines before each element', () => {
+  it('matches the specification table exactly, as whole-line counts', () => {
+    expect(BLANK_LINES_BEFORE).toEqual({
+      scene_heading: 1,
+      action: 1,
+      character: 1,
+      dialogue: 0,
+      parenthetical: 0,
+      transition: 1,
+      shot: 1,
+    });
+  });
+
+  it('keeps every value an integer, never a fractional line', () => {
+    for (const lines of Object.values(BLANK_LINES_BEFORE)) {
+      expect(Number.isInteger(lines)).toBe(true);
+    }
+  });
+
+  it('makes a speech contiguous: zero blank lines before parenthetical and dialogue', () => {
+    // The blank line lives before `character`, the only entry point into a speech. Once inside,
+    // parenthetical and dialogue never introduce a blank line before themselves, so character,
+    // parenthetical, and dialogue run on consecutive lines in any order they appear.
+    expect(BLANK_LINES_BEFORE.parenthetical).toBe(0);
+    expect(BLANK_LINES_BEFORE.dialogue).toBe(0);
+    expect(BLANK_LINES_BEFORE.character).toBe(1);
   });
 });

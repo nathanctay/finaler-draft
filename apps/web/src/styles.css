@@ -108,7 +108,12 @@ select:focus-visible,
 }
 
 .application {
-  min-height: 100vh;
+  /* Fixed to the viewport, not a floor: min-height let the grid grow past the viewport instead
+     of constraining it, so nothing below ever needed to scroll except the whole page. A fixed
+     height is what makes the workspace row's minmax(0, 1fr) actually constrain that row's height
+     and hand scrolling to .editor-region, the only region that should scroll -- see "Application
+     shell" in plan.md. 100dvh over 100vh so mobile browser chrome doesn't clip the status bar. */
+  height: 100dvh;
   display: grid;
   grid-template-rows: 38px 31px 47px minmax(0, 1fr) 30px;
   color: var(--text-19);
@@ -260,6 +265,29 @@ select:focus-visible,
   color: var(--text-04);
 }
 
+.zoom-controls {
+  display: flex;
+  align-items: center;
+  height: 31px;
+  border: 1px solid var(--border-03);
+  border-radius: 2px;
+  background: white;
+}
+
+.zoom-controls button {
+  width: 25px;
+  height: 29px;
+  border: 0;
+  background: transparent;
+  color: var(--text-12);
+}
+
+.zoom-controls output {
+  min-width: 40px;
+  text-align: center;
+  font-size: 12px;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -280,6 +308,7 @@ select:focus-visible,
   width: 235px;
   flex: 0 0 235px;
   flex-direction: column;
+  overflow-y: auto;
   border-right: 1px solid var(--border-03);
   background: var(--surface-03);
 }
@@ -446,15 +475,72 @@ select:focus-visible,
   outline: none;
 }
 
+/*
+ * Vertical spacing between elements is a pagination input, not a styling choice -- see "Vertical
+ * spacing between elements" in plan.md. Every blank line consumes one of the 54 to 55 lines on
+ * the page, so the gap above each block is expressed as a whole-line margin-top derived from
+ * `--fd-blank-lines-before-*` (generated from `BLANK_LINES_BEFORE` in
+ * @finaler-draft/screenplay/pageFormat -- see pageGeometryCss.ts) and the line-height custom
+ * property already exposed for the type size. No pixel value appears in this calculation: the
+ * per-element selectors below only ever set the bare line-count custom property, never a length.
+ * `margin-top` alone (never `margin-bottom`) is the single source of the gap, so there is nothing
+ * for adjacent siblings to collapse against.
+ */
 .script-body [data-screenplay-block] {
   position: relative;
-  margin-bottom: 13px;
-  padding-top: 12px;
+  --fd-blank-lines-before: 0;
+  margin-top: calc(var(--fd-blank-lines-before) * var(--fd-type-size) * var(--fd-line-height));
+  padding-top: 0;
 }
 
+.script-body [data-screenplay-block]:first-child {
+  /* .page's padding-top (--fd-page-margin-top) already places the content box at the 1.0in top
+     margin the specification requires for the first line of the body. A blank line here would
+     push that first line down by one more line and misreport where the page starts, regardless
+     of which element opens the document. */
+  margin-top: 0;
+}
+
+.script-body [data-screenplay-block][data-screenplay-element='scene_heading'] {
+  --fd-blank-lines-before: var(--fd-blank-lines-before-scene-heading);
+}
+
+.script-body [data-screenplay-block][data-screenplay-element='action'] {
+  --fd-blank-lines-before: var(--fd-blank-lines-before-action);
+}
+
+.script-body [data-screenplay-block][data-screenplay-element='character'] {
+  --fd-blank-lines-before: var(--fd-blank-lines-before-character);
+}
+
+.script-body [data-screenplay-block][data-screenplay-element='parenthetical'] {
+  --fd-blank-lines-before: var(--fd-blank-lines-before-parenthetical);
+}
+
+.script-body [data-screenplay-block][data-screenplay-element='dialogue'] {
+  --fd-blank-lines-before: var(--fd-blank-lines-before-dialogue);
+}
+
+.script-body [data-screenplay-block][data-screenplay-element='transition'] {
+  --fd-blank-lines-before: var(--fd-blank-lines-before-transition);
+}
+
+.script-body [data-screenplay-block][data-screenplay-element='shot'] {
+  --fd-blank-lines-before: var(--fd-blank-lines-before-shot);
+}
+
+/*
+ * The element-name label is an editing affordance, not manuscript content, so per "No editing
+ * affordance may consume grid space" in plan.md it renders as a pure overlay: absolutely
+ * positioned, pointer-events: none, and zero layout space in either state of the label toggle
+ * (apps/web/src/App.tsx). The block above therefore carries padding-top: 0 permanently -- that
+ * padding is never reintroduced to make room for this. The ~9px top offset is a visual position
+ * chosen for a tight look above the block's own text, not a reserved space, so unlike every
+ * measurement above it is not required to land on the line grid: it never moves it.
+ */
 .script-body [data-screenplay-block]::before {
   position: absolute;
-  top: 0;
+  top: -9px;
   left: 0;
   color: var(--text-05);
   font-family: 'IBM Plex Sans', sans-serif;
@@ -462,8 +548,13 @@ select:focus-visible,
   font-weight: 600;
   letter-spacing: 0.04em;
   line-height: 1;
-  content: attr(data-screenplay-element);
+  content: '';
+  pointer-events: none;
   text-transform: uppercase;
+}
+
+.script-body.show-element-labels [data-screenplay-block]::before {
+  content: attr(data-screenplay-element);
 }
 
 .script-body [data-screenplay-block][data-screenplay-element='scene_heading'],
@@ -798,27 +889,6 @@ select:focus-visible,
   text-align: center;
 }
 
-.zoom-controls {
-  display: flex;
-  align-items: center;
-  height: 22px;
-  border: 1px solid var(--border-03);
-  background: white;
-}
-
-.zoom-controls button {
-  width: 25px;
-  height: 20px;
-  border: 0;
-  background: transparent;
-  color: var(--text-12);
-}
-
-.zoom-controls output {
-  min-width: 40px;
-  text-align: center;
-}
-
 @media (max-width: 820px) {
   .panel {
     width: 190px;
@@ -864,7 +934,7 @@ select:focus-visible,
   .panel {
     position: absolute;
     z-index: 2;
-    height: calc(100vh - 141px);
+    height: calc(100dvh - 141px);
     box-shadow: 2px 2px 8px var(--shadow-03);
   }
 

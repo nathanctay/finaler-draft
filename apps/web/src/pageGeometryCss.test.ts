@@ -22,6 +22,13 @@ describe('pageGeometryCssVariables', () => {
     expect(variables['--fd-parenthetical-indent']).toBe('3.1in');
     expect(variables['--fd-parenthetical-width']).toBe('2in');
     expect(variables['--fd-transition-indent']).toBe('1in');
+    expect(variables['--fd-blank-lines-before-scene-heading']).toBe('1');
+    expect(variables['--fd-blank-lines-before-action']).toBe('1');
+    expect(variables['--fd-blank-lines-before-character']).toBe('1');
+    expect(variables['--fd-blank-lines-before-dialogue']).toBe('0');
+    expect(variables['--fd-blank-lines-before-parenthetical']).toBe('0');
+    expect(variables['--fd-blank-lines-before-transition']).toBe('1');
+    expect(variables['--fd-blank-lines-before-shot']).toBe('1');
   });
 
   it('returns every value as a page-edge measurement, leaving margin subtraction to CSS calc()', () => {

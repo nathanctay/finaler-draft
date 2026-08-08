@@ -42,6 +42,7 @@ function ToolButton({
       className={`tool-button${active ? ' active' : ''}`}
       disabled={disabled}
       onClick={onClick}
+      title={label}
       type="button"
     >
       {children}
@@ -139,6 +140,11 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   });
   const [zoom, setZoom] = useState(100);
   const [dark, setDark] = useState(false);
+  // View state, not document state: never travels with the canonical screenplay, and defaults
+  // off. The label itself renders as a zero-layout-space overlay (see .script-body
+  // [data-screenplay-block]::before in styles.css), so toggling this never moves a line on the
+  // grid -- both states were proven identical by the e2e measurement suite.
+  const [showLabels, setShowLabels] = useState(false);
   const [activeElement, setActiveElement] = useState<ScreenplayElementType>('scene_heading');
   const [activeBlockId, setActiveBlockId] = useState<string>();
   const [projection, setProjection] = useState<LocalScreenplayProjection>({
@@ -375,6 +381,28 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
           </select>
         </label>
         <span className="toolbar-spacer" />
+        <div className="zoom-controls">
+          <button
+            aria-label="Zoom out"
+            onClick={() => updateZoom(-10)}
+            title="Zoom out"
+            type="button"
+          >
+            −
+          </button>
+          <output aria-label="Zoom level">{zoom}%</output>
+          <button aria-label="Zoom in" onClick={() => updateZoom(10)} title="Zoom in" type="button">
+            +
+          </button>
+        </div>
+        <span className="rule" />
+        <ToolButton
+          active={showLabels}
+          label="Toggle element labels"
+          onClick={() => setShowLabels((value) => !value)}
+        >
+          ⌸
+        </ToolButton>
         <ToolButton
           active={panels.navigator}
           label="Toggle navigator"
@@ -396,9 +424,10 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
             <div className="panel-heading">
               <span>Navigator</span>
               <button
-                type="button"
-                onClick={() => togglePanel('navigator')}
                 aria-label="Close navigator"
+                onClick={() => togglePanel('navigator')}
+                title="Close navigator"
+                type="button"
               >
                 ×
               </button>
@@ -443,7 +472,7 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
             <div className="script-meta">
               {initialContent ? 'Autosaved screenplay draft' : 'Read-only screenplay'}
             </div>
-            <div className="script-body">
+            <div className={showLabels ? 'script-body show-element-labels' : 'script-body'}>
               <EditorContent editor={editor} />
             </div>
           </article>
@@ -453,9 +482,10 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
             <div className="panel-heading">
               <span>Inspector</span>
               <button
-                type="button"
-                onClick={() => togglePanel('inspector')}
                 aria-label="Close inspector"
+                onClick={() => togglePanel('inspector')}
+                title="Close inspector"
+                type="button"
               >
                 ×
               </button>
@@ -493,15 +523,6 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                     ? `Saved · validated locally · ${wordCount} words · no print pagination`
                     : `Draft needs attention · ${projection.issues[0] ?? 'Invalid screenplay data.'}`}
         </span>
-        <div className="zoom-controls">
-          <button type="button" aria-label="Zoom out" onClick={() => updateZoom(-10)}>
-            −
-          </button>
-          <output aria-label="Zoom level">{zoom}%</output>
-          <button type="button" aria-label="Zoom in" onClick={() => updateZoom(10)}>
-            +
-          </button>
-        </div>
       </footer>
     </main>
   );

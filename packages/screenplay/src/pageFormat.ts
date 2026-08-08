@@ -116,6 +116,31 @@ export const PAGE_NUMBER_RIGHT_IN = 0.75;
  */
 export const MEASURED_COURIER_PRIME_ADVANCE_EM = 1228 / 2048;
 
+/**
+ * Blank lines before each element, on the six-per-inch line grid -- see "Vertical spacing
+ * between elements" in plan.md. Every blank line consumes one of the 54 to 55 lines on the page,
+ * so this is a pagination input, not a styling choice, and must never be expressed in pixels: the
+ * web editor's CSS derives a whole-line margin from these counts and the line-height custom
+ * property, never a literal length.
+ *
+ * A speech is contiguous: character, parenthetical, and dialogue carry **zero** blank lines
+ * before them relative to each other, in every order they can appear -- character to dialogue,
+ * character to parenthetical, parenthetical to dialogue, and dialogue to a mid-speech
+ * parenthetical. Only the `character` value below actually governs that (it is the sole entry
+ * point into a speech); `parenthetical` and `dialogue` are zero unconditionally, which is exactly
+ * what makes them contiguous with whatever preceded them inside the same speech. The blank line
+ * before a `character` element is what separates one speech from the next.
+ */
+export const BLANK_LINES_BEFORE: Readonly<Record<ScreenplayElementKind, number>> = {
+  scene_heading: 1,
+  action: 1,
+  character: 1,
+  dialogue: 0,
+  parenthetical: 0,
+  transition: 1,
+  shot: 1,
+};
+
 /** The screenplay elements the page format specifies indents for. */
 export type ScreenplayElementKind =
   | 'scene_heading'

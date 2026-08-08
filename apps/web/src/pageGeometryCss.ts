@@ -1,4 +1,5 @@
 import {
+  BLANK_LINES_BEFORE,
   BODY_WIDTH_IN,
   ELEMENT_INDENTS,
   LINE_HEIGHT_RATIO,
@@ -11,6 +12,7 @@ import {
   PAGE_WIDTH_IN,
   TYPEFACE,
   TYPE_SIZE_PT,
+  type ScreenplayElementKind,
 } from '@finaler-draft/screenplay/pageFormat';
 
 const inches = (value: number): string => `${value}in`;
@@ -45,7 +47,21 @@ export function pageGeometryCssVariables(): Readonly<Record<string, string>> {
     throw new Error('Screenplay page format element indents are missing an expected value.');
   }
 
+  // One custom property per element, expressing BLANK_LINES_BEFORE as a bare number.
+  // styles.css multiplies it by the line-height custom property to get a whole-line margin --
+  // this module is the only place that reads the count itself, matching every other geometry
+  // figure above.
+  const blankLinesBeforeVariables = Object.fromEntries(
+    (Object.entries(BLANK_LINES_BEFORE) as Array<[ScreenplayElementKind, number]>).map(
+      ([element, lines]) => [
+        `--fd-blank-lines-before-${element.replace(/_/g, '-')}`,
+        String(lines),
+      ],
+    ),
+  );
+
   return {
+    ...blankLinesBeforeVariables,
     '--fd-page-width': inches(PAGE_WIDTH_IN),
     '--fd-page-height': inches(PAGE_HEIGHT_IN),
     '--fd-page-margin-top': inches(MARGIN_TOP_IN),

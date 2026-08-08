@@ -448,4 +448,62 @@ describe('local semantic screenplay editor', () => {
     expect(screen.queryByRole('complementary', { name: 'Inspector' })).not.toBeInTheDocument();
     expect(canvas).toBeVisible();
   });
+
+  it('toggles the element-label overlay class without changing document state, defaulting off', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const scriptBody = container.querySelector('.script-body');
+    if (!scriptBody) {
+      throw new Error('Missing .script-body container.');
+    }
+    expect(scriptBody).not.toHaveClass('show-element-labels');
+
+    const labelToggle = screen.getByRole('button', { name: 'Toggle element labels' });
+    expect(labelToggle).toHaveAttribute('aria-pressed', 'false');
+    await user.click(labelToggle);
+    expect(scriptBody).toHaveClass('show-element-labels');
+    expect(labelToggle).toHaveAttribute('aria-pressed', 'true');
+    await user.click(labelToggle);
+    expect(scriptBody).not.toHaveClass('show-element-labels');
+  });
+
+  it('gives every icon-only control a title tooltip sourced from its accessible name', async () => {
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    for (const name of [
+      'Undo local change',
+      'Redo local change',
+      'Toggle element labels',
+      'Toggle navigator',
+      'Toggle inspector',
+      'Close navigator',
+      'Close inspector',
+      'Zoom out',
+      'Zoom in',
+    ]) {
+      const control = screen.getByRole('button', { name });
+      expect(control).toHaveAttribute('title', name);
+    }
+  });
+
+  it('moves zoom into the toolbar, keeping the same range and the output element', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('100%');
+
+    const zoomOut = within(toolbar).getByRole('button', { name: 'Zoom out' });
+    for (let i = 0; i < 4; i += 1) {
+      await user.click(zoomOut);
+    }
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('70%');
+    await user.click(zoomOut);
+    // Clamped at 70, the existing floor -- a relocation must preserve the original range.
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('70%');
+  });
 });
