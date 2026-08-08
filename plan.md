@@ -92,11 +92,53 @@ Consequences that must be honored:
 
 - Because the SPA and API share an origin, `@fastify/cors` is not required for the web client. Do not add permissive CORS speculatively. If a genuine cross-origin consumer ever appears, add an explicit environment-configured allow-list of exact origins with `credentials: true`, never `Access-Control-Allow-Origin: *`, never reflected arbitrary origins, and integration tests for allowed, rejected, preflight, and credentialed cases.
 - Session cookies are `Secure`, `HttpOnly`, and `SameSite=Lax`, set explicitly rather than left to library defaults, and covered by tests.
+- Every request that carries identity is verified server-side. See the session verification section; a route guard in the browser is never a substitute.
 - The Hocuspocus WebSocket handshake is cross-origin but same-site. CORS does not apply to WebSockets and browsers perform no preflight, so **the server must validate the `Origin` header itself**. Because Hocuspocus authenticates from a cookie the browser attaches automatically, an unvalidated `Origin` is a cross-site WebSocket hijacking vulnerability.
 - Static assets must be served with correct caching. Vite emits content-hashed filenames, which require `public, max-age=31536000, immutable`; `index.html` requires `no-cache`. `@fastify/static` currently emits `Cache-Control: public, max-age=0` on every asset because no `maxAge` is configured, which is a freshness directive that overrides any CDN default and forces revalidation on every request.
 - Every authenticated API response must carry `Cache-Control: private, no-store` explicitly rather than relying on a CDN's content-type heuristics. Railway's CDN cross-served authenticated responses during a 52-minute misconfiguration incident in March 2026; defense in depth is warranted for unpublished screenplays.
 
 Origin policy does not authenticate anything. Every REST, export, asset, and collaboration endpoint must independently verify the Better Auth session and document/project authorization server-side.
+
+### Session verification
+
+Every request that carries identity is re-verified server-side. The client never supplies a user
+identifier: the API derives one from the session cookie in a `preHandler`, and every query scopes
+through `project_members`. That property is absolute and does not change. What is tunable is whether
+verification costs a database round-trip.
+
+**Current decision: verify against the database on every request.** Revocation is immediate, sign-out
+genuinely ends a session, and the latency is invisible at present scale.
+
+Measured in August 2026 against a local database, 50 requests each, with the roughly 9.4 ms client
+process baseline subtracted:
+
+| Work                                          | Cost    |
+| --------------------------------------------- | ------- |
+| Session verification (`session` table lookup) | ~2.8 ms |
+| The authorized query it protects              | ~0.2 ms |
+
+Session verification is therefore about fourteen times the cost of the query it guards, and it
+competes for the same connection pool as real work.
+
+**Planned change: enable Better Auth's `session.cookieCache`.** It keeps a short-lived signed copy of
+the session in the cookie, so verification within the window is an HMAC check with no I/O, and the
+next request past the window revalidates against the `session` table. Adopt it when any of the
+following becomes true, not before:
+
+- authenticated request latency becomes measurable to users, or the connection pool shows contention;
+- Yjs collaboration ships. This is the likely trigger: Hocuspocus authenticates once per connection
+  rather than per message, but presence, reconnection, and concurrent autosave traffic multiply
+  authenticated requests substantially;
+- a second application instance exists, since each one queries the same database for every request.
+
+Do not adopt stateless tokens that skip verification entirely. Without a revocation path, a stolen or
+post-sign-out token stays valid until expiry and sign-out stops meaning anything. That is an
+unacceptable trade for a product holding unpublished creative work.
+
+When `cookieCache` is enabled, **its `maxAge` is a security parameter, not a performance knob**: it is
+the window during which an already-revoked session still functions. Record the chosen value here,
+keep it short, default to five minutes, and add a test proving that sign-out stops access within the
+stated window.
 
 ### Export architecture
 
@@ -231,6 +273,142 @@ Formatting, keyboard behavior, pagination, and PDF export are product-critical. 
 
 The editor shell and FDX/PDF fixture suite are explicit first-class Phase 0/1 deliverables. Do not defer them behind generic account screens or collaboration plumbing.
 
+## Screenplay page format
+
+These are the industry conventions the product must produce. They are the contract the layout package implements, the PDF renderer paints, and the FDX fixtures assert. They are not styling preferences and must not be adjusted to make a layout problem easier.
+
+Every measurement is from the physical page edge on US Letter, 8.5 by 11 inches.
+
+### Typeface
+
+**12 pt Courier at 10 pitch. No exceptions, no user setting, no fallback.** Ten characters per inch is what makes page count meaningful: it is why one page approximates one minute of screen time, and it is the reason the layout package can be a pure function rather than a measurement of rendered text. Every horizontal measurement below therefore has an exact character equivalent, and the layout engine should work in characters and lines internally, converting to inches only at render.
+
+### Page geometry
+
+| Region                 | Measurement                          | Characters |
+| ---------------------- | ------------------------------------ | ---------- |
+| Left margin            | 1.5 in                               | —          |
+| Right margin           | 1.0 in                               | —          |
+| Top margin             | 1.0 in                               | —          |
+| Bottom margin          | 0.5 to 1.5 in, set by the page break | —          |
+| Body width             | 6.0 in                               | 60         |
+| Page number from top   | 0.5 in                               | —          |
+| Page number from right | 0.75 in                              | —          |
+
+The variable bottom margin is deliberate: the break rules below decide where a page ends, and the remaining space is whatever is left. Do not pad content to force a uniform bottom edge.
+
+### Vertical metrics
+
+| Property       | Value                            |
+| -------------- | -------------------------------- |
+| Leading        | 12 pt, single-spaced             |
+| Lines per inch | 6                                |
+| Body height    | 9.0 in at a 1.0 in bottom margin |
+| Lines per page | 54 to 55                         |
+
+Leading equals type size: 12 pt type on 12 pt leading. This is not a stylistic choice. It is what makes six lines fill an inch, which is what makes a full page 54 to 55 lines, which is what makes one page approximate one minute of screen time. A CSS `line-height` of 1.0 satisfies it; any larger value silently reduces the page to fewer lines.
+
+The vertical grid is the exact counterpart of the horizontal one. Ten characters per inch fixes where lines break; six lines per inch fixes where pages break. Both are required for a page count to mean anything, and neither may be treated as presentation.
+
+### Element indents
+
+| Element       | Left   | Right  | Width  | Characters    |
+| ------------- | ------ | ------ | ------ | ------------- |
+| Scene heading | 1.5 in | 1.0 in | 6.0 in | 60            |
+| Action        | 1.5 in | 1.0 in | 6.0 in | 60            |
+| Character     | 3.7 in | —      | —      | —             |
+| Dialogue      | 2.5 in | 2.5 in | 3.5 in | 35            |
+| Parenthetical | 3.1 in | —      | 2.0 in | 20            |
+| Transition    | —      | 1.0 in | —      | right-aligned |
+| Shot          | 1.5 in | 1.0 in | 6.0 in | 60            |
+
+Three of these need comment, because the owner's stated figures and the most common industry values differ slightly and the difference should be a decision rather than an accident:
+
+- **Character at 3.7 in.** The Final Draft default and the most widely reproduced value. Adjustable.
+- **Parenthetical at 3.1 in.** Roughly half an inch inside the character indent, which 3.7 minus 3.1 satisfies. Adjustable.
+- **Parenthetical width of 2.0 in.** The common convention. Adjustable.
+
+These are defaults, not constraints. Every one is exposed in document settings, so a writer who prefers a different house style can set it; the defaults only need to be right for someone who never opens that dialog.
+
+Dual-dialogue column geometry is **not yet specified** and must be settled before dual dialogue can paginate or export.
+
+### Why no text-measurement library
+
+Text-measurement and layout libraries such as Pretext were evaluated and are deliberately not used for screenplay layout.
+
+At 10 pitch every glyph is exactly 0.1 in wide, so line breaking is arithmetic on character counts against a fixed budget — 60, 35, or 20 characters depending on element — not measurement of rendered text. A measurement library solves a problem the monospace requirement removes.
+
+More decisively, such libraries measure through the browser's font engine via Canvas, which makes them unavailable to the export worker. The layout package must produce byte-identical page models in the browser and on the server, which is the entire reason it is a pure function. Introducing a browser-only measurement step would reintroduce the divergence that decision exists to prevent.
+
+One idea is worth taking without the dependency: use `Intl.Segmenter` directly for grapheme-aware counting, so a combining sequence or an emoji occupies one grid cell rather than several code units. It is a platform API in both Node and the browser. Note that this is a different unit from the schema's annotation offsets, which are UTF-16 code units and must stay that way.
+
+### Page numbering
+
+- Arabic numerals by default, top right.
+- **The first page of the screenplay carries no number. Numbering begins at 2 on the second page.**
+- The title page is never numbered and never counted. It is not page 1.
+- Roman numerals are available as a document setting. The setting is offered because "Arabic numerals" is unfamiliar phrasing to many writers; label it in plain language such as "Numbers" and "Roman numerals" rather than by numeral-system name.
+
+### Page break rules
+
+The layout package decides breaks. These rules are the specification:
+
+- **A scene heading never ends a page.** It stays with the action that follows it; if both do not fit, the heading moves to the next page.
+- **A single orphaned line of dialogue moves to the next page** rather than sitting alone at a page foot.
+- **Long dialogue splits across the break.** When it does:
+  - `(MORE)` is placed at the foot of the first part, at the character indent.
+  - The continuation on the next page repeats the character name followed by `(CONT'D)`.
+  - Both are generated automatically and **both must be deletable by the writer.** Automatic insertion that cannot be removed is a defect, not a feature.
+
+`(MORE)` was not in the owner's original list and is added here: without it the split reads as two separate speeches by the same character.
+
+### Character names and extensions
+
+A character element may carry an extension on the same line, such as `MARA (V.O.)`.
+
+**The Navigator's character list strips extensions before grouping.** `MARA`, `MARA (V.O.)`, and `MARA (O.S.)` are one character, not three. Strip the full conventional set — `(V.O.)`, `(O.S.)`, `(O.C.)`, `(CONT'D)` — and treat any trailing parenthetical on a character line as an extension rather than matching a fixed list. Note the trailing period in `(V.O.)` and `(O.S.)`; accept the period-less spellings on import but normalise on output.
+
+### Title page
+
+A new screenplay gets a dedicated title page by default, containing placeholder text blocks:
+
+- Title
+- "written by"
+- Author name
+- A contact block in the lower right: name, address, phone number, email
+
+All are ordinary deletable text blocks. The title page never paginates with the screenplay body and never receives a page number.
+
+### Scene numbers
+
+A document setting, **disabled by default**. When enabled, every scene heading receives a number, right-aligned.
+
+This is display only and belongs to Phase 1. It is distinct from the Phase 5 production feature, where scene numbers are locked and inserted scenes take suffixes such as `A1`. Do not conflate them: the Phase 1 setting renumbers freely as scenes move; the Phase 5 feature deliberately does not.
+
+### Document settings
+
+A dialog under the File menu. Adjustable: character indent, parenthetical indent and width, page-number position and numeral style, scene numbers on or off.
+
+Not adjustable, ever: the typeface, the type size, the pitch.
+
+The parenthetical indent shows an inline warning when it is set more than half an inch from the character indent in either direction. A warning, not a block — the writer may have a reason.
+
+**These values are document state, not application preferences.** They live in the canonical screenplay, travel with it through export and import, and are inputs to the layout package. A screenplay must paginate identically on any machine and for any collaborator, so a setting stored per user or per browser would break the pagination contract.
+
+### Viewport and zoom
+
+The editor presents a fixed physical page, in the manner of Microsoft Word and Google Docs:
+
+- The page is always 8.5 by 11 inches at the current zoom. It never reflows to the window.
+- As the window narrows, the surrounding whitespace shrinks first.
+- Once the whitespace is gone, the page area scrolls horizontally. It does not compress the page.
+- Zoom changes the rendered scale of the whole page, not the text size within a reflowing container.
+- At narrow widths the Navigator and Inspector overlay the page rather than displacing it, which is the behaviour already observed and preferred.
+
+**The current implementation is wrong and produces a visible defect.** `.page` is `width: min(100%, 8.5in)`, so the page shrinks below 8.5 in as the window narrows, while element indents stay at fixed inch values. A character element at a 3.7 in indent inside a page that is now 5 in wide is pushed toward and eventually past the right edge. Zoom is also implemented as a font-size percentage on `.page`, which reflows text instead of scaling the page; `transform-origin: top center` is already set, indicating scale was the original intent.
+
+This model is not only more familiar, it is the only one consistent with the rest of the plan: the layout package computes a page in inches and characters, and the screen must show that same page rather than a fluid approximation of it.
+
 ## Collaboration, history, and restoration
 
 ### Separate concepts
@@ -308,7 +486,11 @@ The design-token system is a prerequisite for further interface work, not a para
 
 - Projects, screenplay creation, semantic elements, keyboard element switching, title pages, autosave, and scene/character navigation.
 - Rename and soft-delete for projects and screenplays. Deletion is always soft; screenplays are the asset a user least wants a stray click to destroy.
-- The deterministic pagination layout package and accessible editor behavior.
+- The deterministic pagination layout package and accessible editor behavior, implementing the screenplay page format section in full: page geometry, element indents, page numbering from 2, and the break rules including `(MORE)` and `CONT'D`.
+- The fixed-page viewport and scale-based zoom described in that section. The current fluid page is a live defect: centred elements drift off the right edge as the window narrows.
+- Character-extension stripping in the Navigator, so `MARA` and `MARA (V.O.)` are one character.
+- The default title page, and the scene-number display setting.
+- Document settings as document-level state travelling with the screenplay. The values are Phase 1 because pagination depends on them; the settings dialog itself may land late in the phase, but the defaults and their storage cannot.
 - FDX import/export compatibility fixtures; deterministic PDF export painted from the layout package; and Word-compatible `.docx` export. Add Fountain/plain-text interchange where it does not compromise FDX quality.
 - A canonical round-trip test asserting that screenplay to editor projection and back is the identity function. This becomes load-bearing once FDX import exists.
 - SmartType-style, context-aware completion. Scene-heading input must suggest screenplay prefixes such as `INT.`, `EXT.`, `INT./EXT.`, and `I/E.`, then reuse locations and times already authored in the document; character input must suggest previously authored characters. Suggestions must be keyboard-operable, never replace text without an explicit accept action, and stay local to the screenplay unless a future user-controlled project dictionary is designed.
