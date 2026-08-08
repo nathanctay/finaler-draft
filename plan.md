@@ -402,6 +402,8 @@ One idea is worth taking without the dependency: use `Intl.Segmenter` directly f
 
 The layout package decides breaks. These rules are the specification:
 
+- **Space before is suppressed at the top of every page.** The first element on a page begins at the top margin with no leading blank line, and this applies to every page, not only the first. Otherwise each page break would push its page's content down one line and the page count would drift progressively as the script grows.
+
 - **A scene heading never ends a page.** It stays with the action that follows it; if both do not fit, the heading moves to the next page.
 - **A single orphaned line of dialogue moves to the next page** rather than sitting alone at a page foot.
 - **Long dialogue splits across the break.** When it does:
@@ -458,6 +460,25 @@ The shell is fixed to the viewport. **The manuscript is the only thing that scro
 Zoom belongs in the toolbar, alongside the other controls that act on the document view, rather than in the status bar where it is easy to miss.
 
 The status bar carries the active scene, the word count, and the save state. Save state in particular must not be hidden below the fold: it is the writer's only signal that their work is persisted. If the status bar is ever removed, save state has to move somewhere permanently visible first.
+
+### Zoom controls
+
+Not urgent, and not required for the layout package. Recorded so the design is settled before someone builds it piecemeal.
+
+**Zoom is a mode, not only a number.** Fit-to-page is not a zoom value that happens to be computed once; it is a state that must recompute whenever the available area changes — a window resize, a panel opening or closing, entering or leaving the overlay breakpoint. Model zoom as a discriminated union of a fixed percentage and the fit modes, rather than storing a number and losing the fact that the writer asked for a fit. Storing the computed percentage instead is the mistake that makes fit silently stop fitting after the first resize.
+
+Three additions:
+
+- **Pinch to zoom.** Trackpad pinch arrives as a `wheel` event with `ctrlKey` set, which is a de facto standard rather than a specified one; touch devices need their own handling. Scope the handler to the editor region and call `preventDefault()` there, so the writer can still use the browser's own zoom on the surrounding interface. Intercepting it globally would take away a control the operating system gives them.
+- **A preset dropdown** beside the existing plus and minus buttons: a set of fixed percentages plus "Fit page" and "Fit width". The current range is 70 to 150 percent and will need widening to make presets worth having. Use a real `select`, or a listbox that behaves like one; do not build a custom menu that only responds to a mouse.
+- **Fit page and fit width**, computed from the available editor area against the page's physical dimensions, recomputed on every change to that area.
+
+Constraints that apply to all of them:
+
+- **The character grid stays invariant at every zoom level and in every mode.** Zoom scales the rendered manuscript and changes nothing about where lines break or pages end. The existing measurement test asserts this; extend it to cover the new paths rather than trusting that a new mechanism preserves the property.
+- Keyboard equivalents for zoom in, zoom out, and reset to 100 percent, consistent with the keyboard-first commitment.
+- Respect `prefers-reduced-motion`: no animated transition between zoom levels for a writer who has asked for less motion.
+- Zoom is view state, not document state. It never enters the canonical screenplay and never travels to a collaborator.
 
 ### Viewport and zoom
 
