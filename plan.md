@@ -296,6 +296,20 @@ Zoom is the one control that crosses the boundary, and it crosses in one directi
 
 **12 pt Courier at 10 pitch. No exceptions, no user setting, no fallback.** Ten characters per inch is what makes page count meaningful: it is why one page approximates one minute of screen time, and it is the reason the layout package can be a pure function rather than a measurement of rendered text. Every horizontal measurement below therefore has an exact character equivalent, and the layout engine should work in characters and lines internally, converting to inches only at render.
 
+### The character grid is normative; inches are derived
+
+Line breaking is integer character counting against fixed budgets: 60 characters for action, 35 for dialogue, 20 for parenthetical. **Those budgets are the specification.** The inch measurements throughout this section are a rendering projection of them.
+
+Pagination must never consult a font's advance width. Never compute a character capacity by dividing an inch measurement by a measured glyph width; that single line would make the layout package font-dependent and reintroduce the browser-versus-server divergence the pure-function design exists to prevent.
+
+This has a useful consequence. Because breaks are character counts, pagination stays identical even if Courier Prime fails to load and a fallback monospace renders in its place. Physical widths would differ; page breaks would not.
+
+Measured in Chrome in August 2026, Courier Prime's advance is **1228/2048 em = 0.599609375**, not exactly 0.6. That yields 10.0065 characters per inch rather than 10.0000, so a 60-character line measures 5.996 in against a nominal 6.0 in — 0.1 mm short over a full measure. The deviation is accepted and must not be corrected with letter-spacing or a transform, which would fight the font's real metrics and misbehave under zoom.
+
+The direction is what makes it safe: a full measure falls _short_ of the body width rather than crossing it. A ratio above 0.6 would have overflowed the right margin and would have been a genuine defect.
+
+Record the measured ratio as a constant with its provenance, and pin it with a regression test. If the typeface is swapped, or the webfont silently fails to load and a fallback is measured, that test should fail loudly rather than the page quietly reflowing.
+
 ### Page geometry
 
 | Region                 | Measurement                          | Characters |
