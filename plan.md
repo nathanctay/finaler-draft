@@ -337,6 +337,28 @@ Leading equals type size: 12 pt type on 12 pt leading. This is not a stylistic c
 
 The vertical grid is the exact counterpart of the horizontal one. Ten characters per inch fixes where lines break; six lines per inch fixes where pages break. Both are required for a page count to mean anything, and neither may be treated as presentation.
 
+### Vertical spacing between elements
+
+Spacing between elements is measured in **whole lines on the six-per-inch grid**, never in pixels. Every blank line consumes one of the 54 to 55 lines on the page, so inter-element spacing is a pagination input, not a styling choice. A gap of "about a line and a half" is not a valid value.
+
+Blank lines before each element:
+
+| Element       | Blank lines before |
+| ------------- | ------------------ |
+| Scene heading | 1                  |
+| Action        | 1                  |
+| Character     | 1                  |
+| Parenthetical | **0**              |
+| Dialogue      | **0**              |
+| Transition    | 1                  |
+| Shot          | 1                  |
+
+**A speech is contiguous.** Character, parenthetical, and dialogue run on consecutive lines with no blank line between them, in any combination: character to dialogue, character to parenthetical, parenthetical to dialogue, and dialogue to a mid-speech parenthetical. The blank line before a character element is what separates one speech from the next; inserting one inside a speech breaks the block apart visually and inflates the page count.
+
+Some production houses double-space before a scene heading. One line is the default here. If that becomes a requirement it belongs in document settings, and it must feed the layout package rather than being applied as presentation.
+
+**No editing affordance may consume grid space.** Element-name labels, selection outlines, comment markers, collaborator cursors, and anything else the editor draws to help a writer work must render as overlays: absolutely positioned, `pointer-events: none` where appropriate, and taking zero layout space. If a view toggle changes where lines sit, it changes where pages break, and the same screenplay reports different page counts depending on an editor setting the writer may not connect to the number. Editing affordances are view state and belong in local UI state or a user preference — never in document settings, and never in the canonical screenplay, which travels between users and machines.
+
 ### Element indents
 
 | Element       | Left   | Right  | Width  | Characters    |
@@ -421,6 +443,21 @@ Not adjustable, ever: the typeface, the type size, the pitch.
 The parenthetical indent shows an inline warning when it is set more than half an inch from the character indent in either direction. A warning, not a block — the writer may have a reason.
 
 **These values are document state, not application preferences.** They live in the canonical screenplay, travel with it through export and import, and are inputs to the layout package. A screenplay must paginate identically on any machine and for any collaborator, so a setting stored per user or per browser would break the pagination contract.
+
+### Application shell
+
+The shell is fixed to the viewport. **The manuscript is the only thing that scrolls vertically with the page**, and the panels scroll independently of it if their own content overflows.
+
+- Title bar, menu bar, and toolbar are always visible at the top.
+- The status bar, if retained, is always visible at the bottom.
+- The editor region scrolls; the shell around it does not move.
+- Navigator and Inspector scroll their own content independently, and overlay the page at narrow widths.
+
+`.application` currently uses `min-height: 100vh`, which lets the grid grow past the viewport instead of constraining it. Measured at an 800 px viewport, the shell computes to 1290 px tall and the status bar's bottom edge lands 490 px below the fold, so a writer has to scroll the whole application to discover it. The editor region is not scrolling at all in that state — its `scrollHeight` equals its `clientHeight`; the row simply expands to fit the 1144 px page. A fixed viewport height is what makes `minmax(0, 1fr)` constrain the row and hand the scrolling to the editor where it belongs.
+
+Zoom belongs in the toolbar, alongside the other controls that act on the document view, rather than in the status bar where it is easy to miss.
+
+The status bar carries the active scene, the word count, and the save state. Save state in particular must not be hidden below the fold: it is the writer's only signal that their work is persisted. If the status bar is ever removed, save state has to move somewhere permanently visible first.
 
 ### Viewport and zoom
 
