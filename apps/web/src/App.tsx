@@ -435,7 +435,7 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
           </div>
           <article
             className="page"
-            style={{ fontSize: `${zoom}%` }}
+            style={{ transform: `scale(${zoom / 100})` }}
             aria-label={`${initial.title} screenplay canvas`}
           >
             <div className="page-number">DRAFT</div>
