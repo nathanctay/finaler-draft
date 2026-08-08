@@ -1,4 +1,5 @@
 import { screenplaySchema, type Screenplay } from '@finaler-draft/screenplay';
+import { PASSWORD_REQUIREMENTS_MESSAGE } from '@finaler-draft/config';
 import { z } from 'zod';
 
 const projectSchema = z.object({
@@ -49,8 +50,8 @@ const authErrorMessages = {
   INVALID_EMAIL: 'Enter a valid email address.',
   INVALID_EMAIL_OR_PASSWORD: 'Invalid email or password.',
   INVALID_PASSWORD: 'Enter a valid password.',
-  PASSWORD_TOO_SHORT: 'Password must be at least 12 characters.',
-  PASSWORD_TOO_LONG: 'Password is too long.',
+  PASSWORD_TOO_SHORT: PASSWORD_REQUIREMENTS_MESSAGE,
+  PASSWORD_TOO_LONG: PASSWORD_REQUIREMENTS_MESSAGE,
   USER_ALREADY_EXISTS: 'An account already exists for this email address.',
   USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL: 'An account already exists for this email address.',
 } as const;

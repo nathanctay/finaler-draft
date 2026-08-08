@@ -79,6 +79,101 @@ describe('sign-in page', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('could not complete');
   });
 
+  it('renders the specific message for invalid credentials, whether the password is wrong or the email is unregistered', async () => {
+    fetchMock.mockImplementation(
+      async () =>
+        ({
+          json: async () => ({ code: 'INVALID_EMAIL_OR_PASSWORD' }),
+          ok: false,
+          status: 401,
+        }) as Response,
+    );
+    const user = userEvent.setup();
+    const first = render(<SignInPage />);
+    await user.type(screen.getByLabelText('Email'), 'writer@example.com');
+    await user.type(screen.getByLabelText('Password'), 'wrong password');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+    await vi.waitFor(() => expect(routeState.mutationErrorValue).toBeDefined());
+    first.unmount();
+
+    render(<SignInPage />);
+    expect(screen.getByRole('alert')).toHaveTextContent('Invalid email or password.');
+  });
+
+  it('renders the account-exists message for a duplicate email at sign-up', async () => {
+    fetchMock.mockImplementation(
+      async () =>
+        ({
+          json: async () => ({ code: 'USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL' }),
+          ok: false,
+          status: 422,
+        }) as Response,
+    );
+    const user = userEvent.setup();
+    const first = render(<SignInPage />);
+    await user.click(screen.getByRole('button', { name: 'Create an account' }));
+    await user.type(screen.getByLabelText('Name'), 'Writer');
+    await user.type(screen.getByLabelText('Email'), 'writer@example.com');
+    await user.type(screen.getByLabelText('Password'), 'a secure passphrase');
+    await user.type(screen.getByLabelText('Confirm password'), 'a secure passphrase');
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+    await vi.waitFor(() => expect(routeState.mutationErrorValue).toBeDefined());
+    first.unmount();
+
+    render(<SignInPage />);
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'An account already exists for this email address.',
+    );
+  });
+
+  it('falls back to the generic message for a non-authentication failure, never surfacing a raw server message or code', async () => {
+    fetchMock.mockImplementation(
+      async () =>
+        ({
+          json: async () => ({ code: 'DATABASE_CONNECTION_LEAKED', message: 'sensitive detail' }),
+          ok: false,
+          status: 500,
+        }) as Response,
+    );
+    const user = userEvent.setup();
+    const first = render(<SignInPage />);
+    await user.type(screen.getByLabelText('Email'), 'writer@example.com');
+    await user.type(screen.getByLabelText('Password'), 'a secure passphrase');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+    await vi.waitFor(() => expect(routeState.mutationErrorValue).toBeDefined());
+    first.unmount();
+
+    render(<SignInPage />);
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('could not complete');
+    expect(alert).not.toHaveTextContent('sensitive detail');
+    expect(alert).not.toHaveTextContent('DATABASE_CONNECTION_LEAKED');
+  });
+
+  it('clears an error raised in one mode after switching to the other', async () => {
+    fetchMock.mockImplementation(
+      async () =>
+        ({
+          json: async () => ({ code: 'INVALID_EMAIL_OR_PASSWORD' }),
+          ok: false,
+          status: 401,
+        }) as Response,
+    );
+    const user = userEvent.setup();
+    const first = render(<SignInPage />);
+    await user.type(screen.getByLabelText('Email'), 'writer@example.com');
+    await user.type(screen.getByLabelText('Password'), 'wrong password');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+    await vi.waitFor(() => expect(routeState.mutationErrorValue).toBeDefined());
+    first.unmount();
+
+    render(<SignInPage />);
+    expect(screen.getByRole('alert')).toHaveTextContent('Invalid email or password.');
+
+    await user.click(screen.getByRole('button', { name: 'Create an account' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('sign-in mode renders no confirm password field', () => {
     render(<SignInPage />);
     expect(screen.queryByLabelText('Confirm password')).not.toBeInTheDocument();

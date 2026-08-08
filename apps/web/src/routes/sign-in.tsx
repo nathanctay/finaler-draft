@@ -2,8 +2,11 @@ import { useId, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { createFileRoute, redirect, useNavigate } from '@tanstack/react-router';
 import { PASSWORD_MIN_LENGTH, PASSWORD_REQUIREMENTS_MESSAGE } from '@finaler-draft/config';
-import { api } from '../api.js';
+import { api, AuthApiError } from '../api.js';
 import { guardSessionUser, sessionQueryOptions } from '../session.js';
+
+const GENERIC_AUTH_ERROR_MESSAGE =
+  'We could not complete that request. Check your details and try again.';
 
 export const Route = createFileRoute('/sign-in')({
   beforeLoad: async ({ context }) => {
@@ -117,6 +120,7 @@ function SignInPage() {
     setConfirmPassword('');
     setConfirmTouched(false);
     setSubmitAttempted(false);
+    authentication.reset();
   }
 
   return (
@@ -227,7 +231,11 @@ function SignInPage() {
           </button>
         </form>
         {authentication.isError && (
-          <p role="alert">We could not complete that request. Check your details and try again.</p>
+          <p className="field-error" role="alert">
+            {authentication.error instanceof AuthApiError
+              ? authentication.error.safeMessage
+              : GENERIC_AUTH_ERROR_MESSAGE}
+          </p>
         )}
         <button className="text-button" onClick={switchMode} type="button">
           {mode === 'sign-in' ? 'Create an account' : 'I already have an account'}

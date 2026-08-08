@@ -14,12 +14,14 @@ type QueryState = { data: unknown; isError: boolean; isLoading: boolean };
 export const routeState: {
   editorMounts: number;
   mutationError: boolean;
+  mutationErrorValue: unknown;
   navigate: ReturnType<typeof vi.fn>;
   query: QueryState;
   screenplayId: string;
 } = {
   editorMounts: 0,
   mutationError: false,
+  mutationErrorValue: undefined,
   navigate: vi.fn(),
   query: { data: undefined, isError: false, isLoading: false },
   screenplayId,
@@ -37,12 +39,20 @@ export function reactQueryMock(): Record<string, unknown> {
       mutationFn: () => Promise<unknown>;
       onSuccess?: (value: never) => unknown;
     }) => ({
-      isError: routeState.mutationError,
+      error: routeState.mutationErrorValue,
+      isError: routeState.mutationError || routeState.mutationErrorValue !== undefined,
       isPending: false,
       mutate: () =>
-        void Promise.resolve(options.mutationFn()).then((value) =>
-          options.onSuccess?.(value as never),
+        void Promise.resolve(options.mutationFn()).then(
+          (value) => options.onSuccess?.(value as never),
+          (error: unknown) => {
+            routeState.mutationErrorValue = error;
+          },
         ),
+      reset: () => {
+        routeState.mutationError = false;
+        routeState.mutationErrorValue = undefined;
+      },
     }),
     // The page's own query function runs so the endpoint it requests is exercised.
     // Its result is discarded; tests drive rendering through `routeState.query`.
@@ -89,6 +99,7 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
 export function resetRouteHarness() {
   routeState.editorMounts = 0;
   routeState.mutationError = false;
+  routeState.mutationErrorValue = undefined;
   routeState.navigate.mockReset();
   routeState.query = { data: undefined, isError: false, isLoading: false };
   routeState.screenplayId = screenplayId;

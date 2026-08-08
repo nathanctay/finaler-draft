@@ -1,5 +1,6 @@
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { PASSWORD_REQUIREMENTS_MESSAGE } from '@finaler-draft/config';
 import { ApiError, AuthApiError, api } from './api.js';
 
 const projectId = '216ec49a-a6c6-49ff-8e2e-5994d5ca91dd';
@@ -102,6 +103,23 @@ describe('API client', () => {
     });
     await expect(api.signIn('writer@example.com', 'wrong password')).rejects.toBeInstanceOf(
       AuthApiError,
+    );
+  });
+
+  it('derives the PASSWORD_TOO_SHORT and PASSWORD_TOO_LONG messages from the shared password policy rather than restating it', async () => {
+    fetchMock
+      .mockResolvedValueOnce(response({ code: 'PASSWORD_TOO_SHORT' }, false, 400))
+      .mockResolvedValueOnce(response({ code: 'PASSWORD_TOO_LONG' }, false, 400));
+
+    await expect(api.signUp('Writer', 'writer@example.com', 'short')).rejects.toMatchObject({
+      code: 'PASSWORD_TOO_SHORT',
+      safeMessage: PASSWORD_REQUIREMENTS_MESSAGE,
+    });
+    await expect(api.signUp('Writer', 'writer@example.com', 'x'.repeat(200))).rejects.toMatchObject(
+      {
+        code: 'PASSWORD_TOO_LONG',
+        safeMessage: PASSWORD_REQUIREMENTS_MESSAGE,
+      },
     );
   });
 
