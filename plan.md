@@ -279,6 +279,19 @@ These are the industry conventions the product must produce. They are the contra
 
 Every measurement is from the physical page edge on US Letter, 8.5 by 11 inches.
 
+### Manuscript and interface are separate type systems
+
+Everything in this section governs the **manuscript**: the page, its margins, and the screenplay text on it. None of it governs the **interface** around the page — menu bar, toolbar, Navigator, Inspector, status bar, entry and project screens.
+
+The two are deliberately unrelated. The manuscript is a fixed physical artefact reproducing an industry standard that predates the product; its measurements are inches and characters and may not be adjusted for visual taste. The interface is desktop authoring software as described under UI and interaction direction; its measurements are pixels and it is free to be dense, responsive, and styled to the design tokens.
+
+Two consequences that are easy to get wrong:
+
+- Manuscript metrics must never leak outward. Applying 12 pt type or single-spaced leading to interface chrome would make the application enormous and sparse.
+- Interface conventions must never leak inward. A comfortable reading `line-height`, a responsive width, or a scaled type ramp applied to the page silently destroys the character and line grid, and with it the page count.
+
+Zoom is the one control that crosses the boundary, and it crosses in one direction only: it scales the rendered manuscript and leaves the interface at its natural size.
+
 ### Typeface
 
 **12 pt Courier at 10 pitch. No exceptions, no user setting, no fallback.** Ten characters per inch is what makes page count meaningful: it is why one page approximates one minute of screen time, and it is the reason the layout package can be a pure function rather than a measurement of rendered text. Every horizontal measurement below therefore has an exact character equivalent, and the layout engine should work in characters and lines internally, converting to inches only at render.
