@@ -427,16 +427,21 @@ A page fills to **55 lines**, which leaves a 0.833 in bottom margin.
 
 Filling further is possible within the stated 0.5 to 1.5 in range — 57 lines reaches exactly 0.5 in — and is deliberately not done. Page count is contractual in this form and the one-page-per-minute heuristic is calibrated against roughly 55 lines. A 110-page script at 57 lines per page measures about 106, so routinely filling tighter would make every screenplay read as shorter than it is.
 
-**A page must not end above a 1.5 in bottom margin**, which means it must not contain fewer than 51 lines. Two exceptions: the last page of the screenplay, and a page ended by an author-inserted `page_break`, both of which end wherever the content does.
+**A page should not end above a 1.5 in bottom margin**, meaning 51 lines, and the keep-together rules bring it close to that but do not guarantee it. The reachable bound is **50 lines, a 1.667 in bottom margin**, and it is reached by one specific shape:
 
-That floor is not a coincidence of the other rules, and the arithmetic is worth keeping because it shows the rules are consistent rather than merely compatible:
+| Speech at a page foot        | Room a legal split needs | Max room left unused | Page ends at | Bottom margin |
+| ---------------------------- | ------------------------ | -------------------- | ------------ | ------------- |
+| cue and dialogue             | 5 lines                  | 4                    | 51           | 1.500 in      |
+| cue, parenthetical, dialogue | 6 lines                  | 5                    | 50           | 1.667 in      |
+| scene heading                | 4 lines                  | 3                    | 52           | 1.333 in      |
 
-- A speech of three or more dialogue lines can always split under the two-and-one minimum, so it never forces a whole-speech move.
-- The largest whole-speech move that can therefore occur is a cue, two dialogue lines and the blank line before them: four lines. From a 55-line page that ends the page at 51 lines, exactly 1.5 in.
+A parenthetical between the cue and the dialogue adds an atomic, uncounted line to the room a split requires, so one more line can go unused before the speech has to move whole. The parenthetical is not counted toward the two-dialogue-line minimum, because it is not dialogue, and the two-line minimum at a page foot is not relaxed to compensate. Both alternatives trade a well-founded typographic rule for a margin that is already acceptable.
 
-Under a two-and-two minimum a three-line speech would also have to move, ending the page at 50 lines and breaching the floor. The asymmetric split rule is what keeps the fill rule satisfiable.
+**The engine must never refuse to paginate a legitimate screenplay.** A margin outside the preferred range is ordinary output, not an error: real scripts have pages that end early when a speech or a scene heading moves. Throwing there would mean a writer's document fails to render because of where a page happened to break, which is far worse than 0.167 in of extra white space.
 
-The engine should assert the floor rather than assume it. If a fixture ever produces a page below 51 lines outside the two stated exceptions, that is a defect in the break rules and should fail loudly rather than render as an unusually short page.
+Reserve failure for input the engine genuinely cannot lay out, such as `dual_dialogue` while its column geometry is unspecified. That distinction is the rule: **fail on unsupported input, never on an unwelcome but valid layout outcome.**
+
+Expose the per-page line count and bottom margin in the model so tests can assert the distribution across fixtures and a regression that pushes pages below 50 lines is caught. That is a test-suite assertion, not a runtime one.
 
 - **Long dialogue splits across the break.** When it does:
   - `(MORE)` is placed at the foot of the first part, at the character indent.
@@ -525,6 +530,36 @@ If the toggle ever changed the page count, the editor would report two different
 **The current `:first-child` rule only approximates this.** Space-before suppression is presently implemented as "the first block of the body", which is exact while a single continuous page exists and becomes wrong the moment real page boundaries do. It must become "the first element on each page" as part of the pagination work, in both views.
 
 **The hard part is rendering, not computing.** ProseMirror manages one contiguous document; presenting it as discrete pages while keeping it a single editable document is the principal technical risk in this area. Computing breaks is pure arithmetic over line counts and is exhaustively testable without a browser. Those two problems should not be attempted in one slice: prove the layout package against fixtures first, then render its output.
+
+#### The rendering technique, prototyped
+
+Do not build per-page containers. Content stays one contiguous flow, which is what keeps selection, cursor movement, and undo working across a page boundary.
+
+- Every page block occupies exactly the page height. At each break, a spacer absorbs the unused remainder of the page, plus the inter-page gap, plus the next page's top margin. Its height is `PAGE_HEIGHT - (TOP_MARGIN + lineCount * LINE_HEIGHT) + GAP + TOP_MARGIN`, computable directly from the `lineCount` the layout model exposes.
+- Because every page block is then a fixed height, page backgrounds can be painted by a repeating gradient on the container rather than by any per-page element.
+- In ProseMirror the spacer is a **widget decoration**: nothing enters the document, so the document remains contiguous and its positions are unaffected.
+
+This was verified in Chrome before the work was scoped. Across three pages, including one broken early at 51 lines, the first line of every page landed at exactly 1.0 in from its own page top. The `(MORE)` and `CONT'D` lines are widget decorations by the same mechanism, which is what makes them derived and non-editable rather than document content.
+
+#### Pagination is too expensive to run per keystroke
+
+Measured on the completed layout package, in Node:
+
+| Blocks | Pages | Time   |
+| ------ | ----- | ------ |
+| 500    | 22    | 18 ms  |
+| 2,000  | 86    | 77 ms  |
+| 5,000  | 215   | 191 ms |
+
+Cost is linear at roughly 0.038 ms per block. A feature-length screenplay of about 110 pages is around 2,500 blocks, so a full repagination costs roughly 100 ms. Running that synchronously on every keystroke would consume most of a typing frame budget and produce a visible hitch on every character.
+
+The rendering slice must address this, and it is a design constraint rather than an optimisation to defer:
+
+- **Repaginate incrementally** from the page containing the edit rather than from the start. Pagination is sequential and deterministic, so pages before the edit are unaffected. This may require extending the layout package's API to resume from a known page boundary; that extension is in scope for the rendering slice and is not a defect in the layout package, which is correct as built.
+- **Debounce** repagination so it runs on a typing pause rather than per character.
+- Moving the work to a worker removes the hitch but not the cost, and adds an asynchronous boundary to a currently synchronous render path. Prefer incremental recomputation first.
+
+Editing near the top of a long screenplay is the worst case and still repaginates most of the document. Measure it before choosing a strategy.
 
 ### Zoom controls
 
