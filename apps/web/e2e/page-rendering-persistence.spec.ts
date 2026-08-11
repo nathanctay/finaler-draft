@@ -349,7 +349,28 @@ test.describe('page rendering: real editor, real DOM', () => {
         return (numberEl.getBoundingClientRect().top - pageEl.getBoundingClientRect().top) / 96;
       });
 
-    const baselineOffsetIn = await readFirstBreakNumberOffsetIn();
+    /**
+     * A completed save does not mean layout has settled. Autosave and pagination are independent —
+     * the save is debounced on its own timer, while pagination is coalesced to an animation frame —
+     * so `await initialSave` says nothing about whether the break has reached its final position.
+     * Reading the baseline straight after the PUT captured a still-converging value roughly one run
+     * in four, and both assertions below then compared against a number that was never correct.
+     * Polling until the offset stops moving removes the assumption instead of padding a timeout.
+     */
+    const readSettledBreakOffsetIn = async () => {
+      let previous = await readFirstBreakNumberOffsetIn();
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        await page.waitForTimeout(50);
+        const current = await readFirstBreakNumberOffsetIn();
+        if (Math.abs(current - previous) < TOLERANCE_IN) {
+          return current;
+        }
+        previous = current;
+      }
+      throw new Error('The page-break offset never stopped changing.');
+    };
+
+    const baselineOffsetIn = await readSettledBreakOffsetIn();
 
     // Place the caret at offset 0 of the first block through the selection API directly.
     // Clicking the block and pressing Home does NOT move the caret here: the click does not
@@ -396,10 +417,9 @@ test.describe('page rendering: real editor, real DOM', () => {
     const immediateOffsetIn = await readFirstBreakNumberOffsetIn();
     expect(Math.abs(immediateOffsetIn - baselineOffsetIn)).toBeLessThan(TOLERANCE_IN);
 
-    // "After things settle": wait well past a single animation frame and re-check. The offset
-    // must still be unchanged -- this rules out a coincidentally-correct read on the first sample.
-    await page.waitForTimeout(500);
-    const settledOffsetIn = await readFirstBreakNumberOffsetIn();
+    // "After things settle": let the offset stop moving, then re-check. It must still equal the
+    // baseline -- this rules out a coincidentally-correct read on the first sample.
+    const settledOffsetIn = await readSettledBreakOffsetIn();
     expect(Math.abs(settledOffsetIn - baselineOffsetIn)).toBeLessThan(TOLERANCE_IN);
   });
   test("a page frame stays put when an edit changes a short page's fill without moving a block", async ({
