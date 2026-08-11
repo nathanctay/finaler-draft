@@ -393,6 +393,28 @@ More decisively, such libraries measure through the browser's font engine via Ca
 
 One idea is worth taking without the dependency: use `Intl.Segmenter` directly for grapheme-aware counting, so a combining sequence or an emoji occupies one grid cell rather than several code units. It is a platform API in both Node and the browser. Note that this is a different unit from the schema's annotation offsets, which are UTF-16 code units and must stay that way.
 
+#### Known limitation: characters outside the screenplay face
+
+The engine counts grid cells; the browser measures glyphs. Those agree only while every character is rendered in Courier Prime at its 0.6 em advance. A character the face does not cover triggers font fallback to a substitute at a different advance, and the two disagree.
+
+Measured in Chrome against the shipped renderer:
+
+| Content                                 | Engine lines | Rendered lines |
+| --------------------------------------- | ------------ | -------------- |
+| 60 Latin characters                     | 1            | 1              |
+| Hyphenated word spanning the measure    | 2            | 2              |
+| Em dash spanning the measure            | 2            | 2              |
+| Non-breaking space spanning the measure | 2            | 2              |
+| A long URL                              | 3            | 3              |
+| 40 CJK characters                       | 1            | **2**          |
+| An emoji ZWJ sequence mid-line          | 1            | **2**          |
+
+Latin text agrees everywhere, including the cases where UAX #14 line breaking and character counting could plausibly have differed. The failure is confined to font fallback.
+
+The consequence is not cosmetic: a line that renders taller than the model predicts shifts every subsequent page boundary on screen relative to the computed model, and the spacers are positioned from the model. Page fidelity degrades from that point down the document.
+
+This is a product decision, not only a technical one, and it is deliberately unresolved. The principled fix is to count East Asian Wide and Fullwidth characters as two grid cells per UAX #11, as a terminal does, and to require a fallback face that is genuinely double-width monospace — which cannot be assumed. The alternatives are to restrict authoring to the face's coverage, or to accept and document that non-Latin screenplays lose exact page fidelity. Decide before advertising the page-count guarantee to anyone writing in a non-Latin script.
+
 ### Page numbering
 
 - Arabic numerals by default, top right.
