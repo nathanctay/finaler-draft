@@ -692,6 +692,20 @@ The visual direction is **desktop authoring software**, informed by Microsoft Of
 
 Before the main editor implementation, create and review a clickable shell/design prototype for the writing workspace, navigator, inspector, review state, and responsive behavior. It must be treated as a product design deliverable, not disposable scaffolding.
 
+### Deleting and restoring
+
+The API for rename, soft delete, and restore exists; this records the interface direction so it is not built piecemeal. Deletion is always soft, and nothing in the product hard-deletes a project or screenplay.
+
+- **Entry point:** an overflow (three-dot) menu on the right of each screenplay card and each project card. It carries **Delete** now and gains **Edit** — rename and other document properties — when that work lands. The menu button needs a real accessible name, `aria-haspopup`, keyboard operation, and Escape to close.
+- **No confirmation dialog.** Deletion is reversible by design, so a modal is friction that buys nothing and trains people to dismiss dialogs unread. Confirm after the fact instead: an inline "Deleted — Undo" affordance covers the mistake noticed immediately. Modals are reserved for genuinely irreversible actions, of which this area has none.
+- **Deleted items live on their own page**, reachable from the account/settings menu — never on the writing desk or a project's screenplay list. Restoring is a rectangular **Restore** button per row, not an overflow menu: it is the only action available there, so hiding it behind a menu would be perverse. Nothing deleted appears in any main working view.
+
+**Why self-serve restore rather than a support request.** Routing recovery through support was considered and rejected. It does not remove the work, it moves it somewhere riskier: someone must still perform the restore, which means either an admin interface — larger than the page it replaces, and requiring an admin role the schema does not have — or hand-written `UPDATE` statements against production. It also contradicts the reason soft deletion exists at all: a writer who deletes the wrong screenplay and must file a ticket experiences it as destroyed, whatever the database holds. An undo affordance covers the mistake caught in seconds; it does nothing for the one caught on Tuesday. Support-mediated recovery remains a reasonable escape hatch for unusual cases, but it must not be the only route, and the delete interface must not ship before the restore route exists.
+
+**A screenplay whose project was deleted is not itself deleted**, and must not appear on the deleted-items page as though it were. Deleting a project does not write to its screenplay rows; they become unreachable because their parent is, and restoring the project restores exactly those that were not independently deleted. Presenting them as individually deleted would make restoring a project look like it resurrected screenplays the writer never deleted.
+
+**There is no retention window and nothing is purged.** Deletion is permanent-until-restored, so the page is named **Deleted**, not "Recently deleted" — the latter promises an expiry that does not exist. Introducing automatic purging later is a separate product decision with storage and data-protection consequences; do not imply one in a label before it is made.
+
 ## Phased roadmap
 
 ### Phase 0 — Engineering foundation
