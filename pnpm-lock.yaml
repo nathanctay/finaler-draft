@@ -93,6 +93,9 @@ importers:
       '@finaler-draft/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@finaler-draft/layout':
+        specifier: workspace:*
+        version: link:../../packages/layout
       '@finaler-draft/screenplay':
         specifier: workspace:*
         version: link:../../packages/screenplay

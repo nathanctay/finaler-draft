@@ -1,11 +1,13 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Editor } from '@tiptap/core';
 import { AllSelection, TextSelection } from '@tiptap/pm/state';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
+import type { Screenplay, ScreenplayBlock } from '@finaler-draft/screenplay';
 import { App } from './App.js';
 import { ApiError, api, type PersistedScreenplay } from './api.js';
+import { pageStackMinHeightIn } from './pagination.js';
 import {
   findScreenplayBlockPosition,
   getActiveScreenplayBlock,
@@ -467,6 +469,84 @@ describe('local semantic screenplay editor', () => {
     expect(labelToggle).toHaveAttribute('aria-pressed', 'true');
     await user.click(labelToggle);
     expect(scriptBody).not.toHaveClass('show-element-labels');
+  });
+
+  it('keeps .script-body as the first in-flow child of .page, with .page-number the sole exception', async () => {
+    const { container } = render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const pageEl = container.querySelector('.page');
+    if (!pageEl) {
+      throw new Error('Missing .page element.');
+    }
+
+    // .page-number is the only sibling allowed to precede .script-body: it is the sole element
+    // inside .page that is removed from flow (position: absolute; see styles.css). Anything else
+    // appearing here silently displaces the manuscript below where the pagination spacers assume
+    // it starts, decoupling painted page boundaries from actual content -- exactly the defect a
+    // .script-title/.script-meta pair caused before both were removed (see
+    // progress/page-rendering.md's 2026-08-09 entry). This assertion is a guard against that
+    // recurring: it fails loudly the moment a new in-flow child is added ahead of .script-body,
+    // rather than requiring someone to remember why the order matters.
+    const childrenBeforeScriptBody = Array.from(pageEl.children).filter(
+      (child) => !child.classList.contains('script-body'),
+    );
+    expect(childrenBeforeScriptBody.map((child) => child.className)).toEqual(['page-number']);
+
+    const scriptBodyIndex = Array.from(pageEl.children).findIndex((child) =>
+      child.classList.contains('script-body'),
+    );
+    expect(scriptBodyIndex).toBe(1);
+  });
+
+  it("drives .page's minimum height from the real page count once the initial document paginates", async () => {
+    // Three action blocks, each hard-wrapped (no whitespace to wrap at) to exactly 55 lines --
+    // the page-fill cap (plan.md's "Page fill and the bottom margin") -- so each one exactly
+    // fills its own page with nothing left over: 3 blocks, 3 pages, no ambiguity in the count.
+    const linesOfLength = (budget: number, n: number): string => 'x'.repeat(budget * (n - 1) + 1);
+    const actionBlock = (index: number): ScreenplayBlock => ({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      type: 'action',
+      text: linesOfLength(60, 55),
+    });
+    const screenplay: Screenplay = {
+      annotations: [],
+      blocks: [0, 1, 2].map(actionBlock),
+      id: '9c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
+      schemaVersion: 1,
+      title: 'Three full pages',
+      titlePages: [],
+    };
+
+    const { container } = render(
+      <App
+        initial={{
+          id: screenplay.id,
+          projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+          screenplay,
+          title: screenplay.title,
+          version: 1,
+        }}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const pageEl = container.querySelector<HTMLElement>('.page');
+    if (!pageEl) {
+      throw new Error('Missing .page element.');
+    }
+    // `onCreate`'s `setPageCount` (App.tsx) is a React state update, applied on a render after
+    // the one `findByRole` above resolved on (the canvas already exists at pageCount's initial
+    // value of 0) -- so this has to poll rather than read the style synchronously. Sourced from
+    // the pagination plugin's own PaginationState, not recomputed independently here, matching
+    // what the component actually does. pageStackMinHeightIn is the one place the
+    // pages*height+(pages-1)*gap arithmetic lives (pagination.ts), so this asserts against that
+    // function rather than restating its formula.
+    await waitFor(() => {
+      expect(pageEl.style.getPropertyValue('--fd-page-stack-min-height')).toBe(
+        `${pageStackMinHeightIn(3)}in`,
+      );
+    });
   });
 
   it('gives every icon-only control a title tooltip sourced from its accessible name', async () => {

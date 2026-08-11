@@ -32,7 +32,33 @@ import type { AuthoredLine, Utf16CodeUnitOffset } from './model.js';
  */
 const GRAPHEME_SEGMENTER = new Intl.Segmenter('en', { granularity: 'grapheme' });
 
+/**
+ * Fast path for the common case: text made entirely of printable ASCII, `\x20` (space) through
+ * `\x7E` (`~`).
+ *
+ * This is not merely "usually true", it is safe by construction. Every code point in this range
+ * is, on its own, a full extended grapheme cluster under UAX #29: none of them is a combining
+ * mark, a variation selector, a ZWJ, a regional indicator, or any other character that extends or
+ * joins with a neighbor. So within this range, and only within it, one code point is always
+ * exactly one grapheme, which means grapheme count is exactly `String.length` (UTF-16 code
+ * units) and no `Intl.Segmenter` iteration is needed to get that count.
+ *
+ * The range is deliberately `\x20`-`\x7E`, not the full 7-bit `\x00`-`\x7F`: it excludes every
+ * C0 control character, and in particular CR (`\x0D`) and LF (`\x0A`). `\r\n` is the one ASCII
+ * sequence where two code units form a single grapheme cluster (UAX #29's explicit CR x LF
+ * boundary rule) -- a range that admitted control characters would silently mis-split it. Because
+ * `\r` and `\n` fall outside this range, any text containing `\r\n` fails this test and falls
+ * through to the `Intl.Segmenter` path below unchanged, which handles it correctly.
+ *
+ * Everything outside `\x20`-`\x7E` -- every non-ASCII character, and every ASCII control
+ * character -- always falls through to `Intl.Segmenter` too; this path never runs for them.
+ */
+const ASCII_PRINTABLE = /^[\x20-\x7E]*$/;
+
 function graphemeLength(text: string): number {
+  if (ASCII_PRINTABLE.test(text)) {
+    return text.length;
+  }
   let count = 0;
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   for (const _segment of GRAPHEME_SEGMENTER.segment(text)) {
@@ -43,6 +69,11 @@ function graphemeLength(text: string): number {
 
 /** The UTF-16 length of the first `count` graphemes of `text`. `text` must have >= `count` graphemes. */
 function utf16LengthOfFirstGraphemes(text: string, count: number): number {
+  // Safe by the same reasoning as `graphemeLength` above: within \x20-\x7E, one code point is
+  // one grapheme, so the first `count` graphemes are exactly the first `count` code units.
+  if (ASCII_PRINTABLE.test(text)) {
+    return Math.min(count, text.length);
+  }
   let seen = 0;
   for (const segment of GRAPHEME_SEGMENTER.segment(text)) {
     if (seen === count) {

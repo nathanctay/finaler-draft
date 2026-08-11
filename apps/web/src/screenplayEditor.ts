@@ -1,6 +1,7 @@
 import { Node, type Editor } from '@tiptap/core';
 import { History } from '@tiptap/extension-history';
 import { TextSelection } from '@tiptap/pm/state';
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
 import {
   SCREENPLAY_SCHEMA_VERSION,
   safeParseScreenplay,
@@ -173,15 +174,22 @@ function mapBlock(node: {
   return { id, type: element, text: node.textContent };
 }
 
-export function projectEditorScreenplay(
-  editor: Editor,
+/**
+ * Projects a raw ProseMirror document into a canonical screenplay. Takes the document node
+ * directly (not an `Editor`) so the pagination plugin (`paginationExtension.ts`) can call it from
+ * inside a ProseMirror `Plugin`, which only ever has a `state`/`doc`, never an `Editor` instance.
+ * `projectEditorScreenplay` below is a thin convenience wrapper over this for call sites that do
+ * have an `Editor` on hand.
+ */
+export function projectDocumentScreenplay(
+  doc: ProseMirrorNode,
   id = '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
   title = 'The Long Way Home',
 ): LocalScreenplayProjection {
   const blocks: ScreenplayBlock[] = [];
   let unsupportedNode: string | undefined;
 
-  editor.state.doc.forEach((node) => {
+  doc.forEach((node) => {
     if (node.type.name !== 'screenplayBlock') {
       unsupportedNode ??= node.type.name;
       return;
@@ -216,6 +224,14 @@ export function projectEditorScreenplay(
     valid: false,
     issues: result.error.issues.map((issue: { message: string }) => issue.message),
   };
+}
+
+export function projectEditorScreenplay(
+  editor: Editor,
+  id = '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
+  title = 'The Long Way Home',
+): LocalScreenplayProjection {
+  return projectDocumentScreenplay(editor.state.doc, id, title);
 }
 
 export const projectLocalScreenplay = projectEditorScreenplay;

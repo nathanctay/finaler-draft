@@ -402,6 +402,11 @@ select:focus-visible,
   position: relative;
   display: flex;
   flex: 1;
+  /* flex-start, not the default stretch: a stretched item takes its cross size from this
+     container, so `.page`'s min-height became its final height and multi-page content
+     overflowed the element instead of growing it -- leaving later pages with no painted
+     background. Content-sized here, min-height acts as a floor. */
+  align-items: flex-start;
   justify-content: center;
   overflow: auto;
   padding: 44px 56px;
@@ -423,13 +428,40 @@ select:focus-visible,
   font-size: 10px;
 }
 
+/*
+ * .page is a single contiguous flow holding every page of the manuscript, not one physical page --
+ * see the module comment in pagination.ts for why (selection, cursor movement, and undo have to
+ * keep working across a page boundary, which per-page containers would break). Each page-break
+ * widget the pagination plugin inserts reserves a spacer exactly tall enough that every page
+ * occupies exactly --fd-page-height of vertical space (see .page-break-spacer below), which is
+ * what makes a single repeating-linear-gradient background correct here regardless of how many
+ * pages exist or where any of them break: white for --fd-page-height, then the gap colour for
+ * --fd-page-gap, repeating. Discrete pages (the default -- plan.md's "Page presentation") is this
+ * gradient; continuous scroll is the same flow with the gradient removed, below.
+ */
 .page {
   position: relative;
   flex-shrink: 0;
   width: var(--fd-page-width);
-  min-height: var(--fd-page-height);
+  /* --fd-page-stack-min-height (App.tsx, sourced from pagination.ts's pageStackMinHeightIn) is
+     pages * --fd-page-height + (pages - 1) * --fd-page-gap -- the height every painted page
+     through the last one needs, not just the single page --fd-page-height alone would reserve.
+     .page is content-sized (see the module comment below), so without this a partly-filled last
+     page's natural height falls short of its own full page-and-gap cycle in the gradient below
+     and its background paints truncated. The bare --fd-page-height fallback covers the moment
+     before the pagination plugin's first result lands. */
+  min-height: var(--fd-page-stack-min-height, var(--fd-page-height));
   padding: var(--fd-page-margin-top) var(--fd-page-margin-right) 0 var(--fd-page-margin-left);
-  background: white;
+  background-color: white;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    white 0,
+    white var(--fd-page-height),
+    var(--surface-11) var(--fd-page-height),
+    var(--surface-11) calc(var(--fd-page-height) + var(--fd-page-gap))
+  );
+  background-repeat: repeat-y;
+  background-size: 100% calc(var(--fd-page-height) + var(--fd-page-gap));
   box-shadow: 0 1px 5px var(--shadow-02);
   font-family: var(--fd-typeface);
   /* The manuscript grid, not a page-level default: .page is the manuscript container, so any
@@ -440,6 +472,18 @@ select:focus-visible,
   transform-origin: top center;
 }
 
+/*
+ * Continuous scroll (plan.md's "Page presentation"): view state only, defaulting off. The
+ * pagination plugin computes the identical decorations either way -- this rule changes nothing
+ * about where pages break, how many there are, or where any line sits; it only removes the drawn
+ * page edge (the gradient above), so the gap between pages reads as plain manuscript whitespace
+ * rather than a separated sheet. (MORE)/CONT'D and every page number still render, because they
+ * are consequences of a break, not decorations of a page edge.
+ */
+.page.continuous {
+  background-image: none;
+}
+
 .page-number {
   position: absolute;
   top: var(--fd-page-number-top);
@@ -448,24 +492,17 @@ select:focus-visible,
   line-height: 1.35;
 }
 
-.script-title {
-  margin-top: 1in;
-  text-align: center;
-  font-size: 15px;
-  font-weight: 700;
-  line-height: 1.35;
-}
-
-.script-meta {
-  margin-top: 0.5in;
-  text-align: center;
-  font-size: 11px;
-  line-height: 1.35;
-}
-
 .script-body {
-  /* No margin-top: .page's padding-top (--fd-page-margin-top) already places the content box
-     at exactly the 1.0in top margin the specification requires for the first line. */
+  /* .script-body must be the first in-flow child of .page: .page-number is the only sibling
+     before it, and it is position: absolute, so it contributes nothing to flow. .page's
+     padding-top (--fd-page-margin-top) is what places the content box at exactly the 1.0in top
+     margin the specification requires for the first line -- see paginationExtension.test.ts's
+     structural guard, and page-rendering.spec.ts's real-DOM measurement, for what keeps this
+     true. A .script-title / .script-meta pair used to render here; they were removed because
+     they silently displaced the manuscript by nearly two inches below where the pagination
+     spacers assumed it started, decoupling painted page boundaries from actual content -- see
+     progress/page-rendering.md's 2026-08-09 entry. The title already appears in the title bar
+     (App.tsx's .document-title) and the save state in the status bar, so nothing is lost. */
   margin-top: 0;
   font-size: var(--fd-type-size);
   line-height: var(--fd-line-height);
@@ -493,11 +530,23 @@ select:focus-visible,
   padding-top: 0;
 }
 
-.script-body [data-screenplay-block]:first-child {
-  /* .page's padding-top (--fd-page-margin-top) already places the content box at the 1.0in top
-     margin the specification requires for the first line of the body. A blank line here would
-     push that first line down by one more line and misreport where the page starts, regardless
-     of which element opens the document. */
+/*
+ * Per-page space-before suppression (requirement 1, progress/page-rendering.md). This replaces a
+ * former `:first-child` rule that only suppressed the leading blank line on the document's first
+ * block -- exact while a single continuous page existed, wrong the moment real page boundaries
+ * exist, because every block after a break would then inherit its own leading blank line and the
+ * page count would drift as the script grows.
+ *
+ * `.page-top` is applied by the pagination plugin (pagination.ts's computePageTopBlocks) as a
+ * ProseMirror node decoration to exactly the blocks that open a page: the first authored line of
+ * every page (not only page 1) whose block starts fresh there, in both view modes. A page whose
+ * first line instead continues a block wrapped from the page before (after a CONT'D heading)
+ * needs no suppression at all -- mid-block wrap never carries a margin -- so this class is simply
+ * absent there. .page's own padding-top (--fd-page-margin-top) still places page 1's first line
+ * at the 1.0in top margin; this rule does the equivalent for every later page, whose top margin
+ * is instead the tail of the previous break's spacer (see the page-break-spacer rules below).
+ */
+.script-body [data-screenplay-block].page-top {
   margin-top: 0;
 }
 
@@ -605,6 +654,60 @@ select:focus-visible,
 
 .script-body [data-screenplay-block] {
   white-space: pre-wrap;
+  /*
+   * Requirement 5, progress/page-rendering.md: normal text already wraps exactly where the
+   * layout engine says it does (word-boundary wrapping, the CSS default, coincides with the
+   * engine's character budget because each element's box width is that budget's exact inch
+   * equivalent -- see pageGeometryCss.ts). An unbroken run -- a long URL, filename, or run of
+   * dashes with no space to wrap at -- has no such boundary, so the CSS default (overflow-wrap:
+   * normal) never breaks it and it overflows the page instead, while the engine still hard-breaks
+   * it at the same character budget (wrap.ts's wrapBlockText). overflow-wrap: break-word adds
+   * exactly the fallback the default lacks: it only breaks a word that would otherwise overflow
+   * its box, and it breaks at the box edge, which is the same character-budget boundary the
+   * engine already hard-breaks at. It changes nothing about ordinary word-boundary wrapping.
+   */
+  overflow-wrap: break-word;
+}
+
+/*
+ * Page-break widgets (pagination.ts's buildPageBreakWidget): the composite ProseMirror widget
+ * decoration rendered at every break -- optionally `(MORE)`, then the spacer that reserves the
+ * outgoing page's unused remainder plus the inter-page gap plus the incoming page's top margin,
+ * then optionally the `CONT'D` heading. None of this is document content (requirement 4,
+ * progress/page-rendering.md): it is not selectable or editable, so it is excluded from the
+ * writer's text selection the same way the element-name label overlay is.
+ */
+.script-body .page-break-widget {
+  user-select: none;
+}
+
+.script-body .page-break-cue-line {
+  /* Same physical indent as an authored character cue -- see the identical calc() on
+     [data-screenplay-element='character'] above -- because both `(MORE)` and `CONT'D` render at
+     the character indent per plan.md's "Page fill and the bottom margin". */
+  margin-left: calc(var(--fd-character-indent) - var(--fd-page-margin-left));
+}
+
+.script-body .page-break-continued {
+  /* CONT'D repeats the character cue it follows, so it takes the same bold weight a real
+     character element gets (see [data-screenplay-element='character'], [data-screenplay-element='scene_heading']
+     above). (MORE) is not a cue and stays regular weight, the default. */
+  font-weight: 700;
+}
+
+.script-body .page-break-spacer {
+  /* position: relative anchors .page-break-number below without a per-page container -- see the
+     doc comment on buildPageBreakWidget in pagination.ts for the geometry this depends on. */
+  position: relative;
+}
+
+.script-body .page-break-number {
+  position: absolute;
+  /* top is set inline per widget (pagination.ts) since it depends on that break's own spacer
+     height, which varies page to page. */
+  right: calc(var(--fd-page-number-right) - var(--fd-page-margin-right));
+  font-size: 10px;
+  line-height: 1.35;
 }
 
 .inspector-section {
