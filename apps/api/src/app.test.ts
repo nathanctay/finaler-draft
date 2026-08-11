@@ -80,6 +80,28 @@ describe('persisted project API', () => {
     version: 1,
   };
   let updateResult: Awaited<ReturnType<ProjectStore['updateScreenplay']>> = 'conflict';
+  let renameProjectResult: Awaited<ReturnType<ProjectStore['renameProject']>> = {
+    id: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+    title: 'Renamed',
+  };
+  let deleteProjectResult: Awaited<ReturnType<ProjectStore['deleteProject']>> = {
+    id: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+  };
+  let restoreProjectResult: Awaited<ReturnType<ProjectStore['restoreProject']>> = {
+    id: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+    title: 'Project',
+  };
+  let renameScreenplayResult: Awaited<ReturnType<ProjectStore['renameScreenplay']>> = {
+    id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
+    title: 'Renamed',
+  };
+  let deleteScreenplayResult: Awaited<ReturnType<ProjectStore['deleteScreenplay']>> = {
+    id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
+  };
+  let restoreScreenplayResult: Awaited<ReturnType<ProjectStore['restoreScreenplay']>> = {
+    id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
+    title: 'Draft',
+  };
   const store: ProjectStore = {
     listProjects: async () => [
       {
@@ -93,6 +115,9 @@ describe('persisted project API', () => {
       id: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
       title,
     }),
+    renameProject: async () => renameProjectResult,
+    deleteProject: async () => deleteProjectResult,
+    restoreProject: async () => restoreProjectResult,
     listScreenplays: async () => [],
     createScreenplay: async () => {
       if (createScreenplayResult === 'forbidden')
@@ -106,6 +131,9 @@ describe('persisted project API', () => {
       version: 1,
       screenplay: screenplayFixture,
     }),
+    renameScreenplay: async () => renameScreenplayResult,
+    deleteScreenplay: async () => deleteScreenplayResult,
+    restoreScreenplay: async () => restoreScreenplayResult,
     updateScreenplay: async () => updateResult,
   };
   const auth = {
@@ -473,6 +501,266 @@ describe('persisted project API', () => {
     } finally {
       await app.close();
     }
+  });
+
+  describe('rename, soft delete, and restore', () => {
+    const projectId = '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f';
+    const screenplayId = 'ecf1118c-3a2e-4656-84e6-fce75c461710';
+    const headers = { cookie: 'session=test' };
+
+    it('renames a project and returns the exact store response, unstripped', async () => {
+      renameProjectResult = { id: projectId, title: 'New Title' };
+      const app = await buildApp({ auth, projects: store });
+      try {
+        const response = await app.inject({
+          method: 'PATCH',
+          url: `/api/projects/${projectId}`,
+          headers,
+          payload: { title: 'New Title' },
+        });
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({ id: projectId, title: 'New Title' });
+      } finally {
+        renameProjectResult = { id: projectId, title: 'Renamed' };
+        await app.close();
+      }
+    });
+
+    it('maps project rename outcomes to 404 for missing and 403 for forbidden', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        renameProjectResult = 'missing';
+        const missing = await app.inject({
+          method: 'PATCH',
+          url: `/api/projects/${projectId}`,
+          headers,
+          payload: { title: 'New Title' },
+        });
+        expect(missing.statusCode).toBe(404);
+        expect(missing.json()).toEqual({ error: 'Project not found' });
+
+        renameProjectResult = 'forbidden';
+        const forbidden = await app.inject({
+          method: 'PATCH',
+          url: `/api/projects/${projectId}`,
+          headers,
+          payload: { title: 'New Title' },
+        });
+        expect(forbidden.statusCode).toBe(403);
+        expect(forbidden.json()).toEqual({ error: 'Project editor access required' });
+      } finally {
+        renameProjectResult = { id: projectId, title: 'Renamed' };
+        await app.close();
+      }
+    });
+
+    it('rejects a blank or overlong rename body with 400, matching the create title constraints', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        const blank = await app.inject({
+          method: 'PATCH',
+          url: `/api/projects/${projectId}`,
+          headers,
+          payload: { title: '' },
+        });
+        expect(blank.statusCode).toBe(400);
+        const overlong = await app.inject({
+          method: 'PATCH',
+          url: `/api/screenplays/${screenplayId}`,
+          headers,
+          payload: { title: 'x'.repeat(201) },
+        });
+        expect(overlong.statusCode).toBe(400);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('soft-deletes a project and returns its id, mapping outcomes to 403 and 404', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        deleteProjectResult = { id: projectId };
+        const deleted = await app.inject({
+          method: 'DELETE',
+          url: `/api/projects/${projectId}`,
+          headers,
+        });
+        expect(deleted.statusCode).toBe(200);
+        expect(deleted.json()).toEqual({ id: projectId });
+
+        deleteProjectResult = 'forbidden';
+        const forbidden = await app.inject({
+          method: 'DELETE',
+          url: `/api/projects/${projectId}`,
+          headers,
+        });
+        expect(forbidden.statusCode).toBe(403);
+        expect(forbidden.json()).toEqual({ error: 'Project owner access required' });
+
+        deleteProjectResult = 'missing';
+        const missing = await app.inject({
+          method: 'DELETE',
+          url: `/api/projects/${projectId}`,
+          headers,
+        });
+        expect(missing.statusCode).toBe(404);
+        expect(missing.json()).toEqual({ error: 'Project not found' });
+      } finally {
+        deleteProjectResult = { id: projectId };
+        await app.close();
+      }
+    });
+
+    it('restores a project and returns its id and title, mapping outcomes to 403 and 404', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        restoreProjectResult = { id: projectId, title: 'Project' };
+        const restored = await app.inject({
+          method: 'POST',
+          url: `/api/projects/${projectId}/restore`,
+          headers,
+        });
+        expect(restored.statusCode).toBe(200);
+        expect(restored.json()).toEqual({ id: projectId, title: 'Project' });
+
+        restoreProjectResult = 'forbidden';
+        const forbidden = await app.inject({
+          method: 'POST',
+          url: `/api/projects/${projectId}/restore`,
+          headers,
+        });
+        expect(forbidden.statusCode).toBe(403);
+        expect(forbidden.json()).toEqual({ error: 'Project owner access required' });
+
+        restoreProjectResult = 'missing';
+        const missing = await app.inject({
+          method: 'POST',
+          url: `/api/projects/${projectId}/restore`,
+          headers,
+        });
+        expect(missing.statusCode).toBe(404);
+        expect(missing.json()).toEqual({ error: 'Project not found' });
+      } finally {
+        restoreProjectResult = { id: projectId, title: 'Project' };
+        await app.close();
+      }
+    });
+
+    it('renames a screenplay and returns the exact store response, unstripped', async () => {
+      renameScreenplayResult = { id: screenplayId, title: 'New Draft Title' };
+      const app = await buildApp({ auth, projects: store });
+      try {
+        const response = await app.inject({
+          method: 'PATCH',
+          url: `/api/screenplays/${screenplayId}`,
+          headers,
+          payload: { title: 'New Draft Title' },
+        });
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({ id: screenplayId, title: 'New Draft Title' });
+      } finally {
+        renameScreenplayResult = { id: screenplayId, title: 'Renamed' };
+        await app.close();
+      }
+    });
+
+    it('maps screenplay rename outcomes to 404 for missing (including soft-deleted) and 403 for forbidden', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        renameScreenplayResult = 'missing';
+        const missing = await app.inject({
+          method: 'PATCH',
+          url: `/api/screenplays/${screenplayId}`,
+          headers,
+          payload: { title: 'New Title' },
+        });
+        expect(missing.statusCode).toBe(404);
+        expect(missing.json()).toEqual({ error: 'Screenplay not found' });
+
+        renameScreenplayResult = 'forbidden';
+        const forbidden = await app.inject({
+          method: 'PATCH',
+          url: `/api/screenplays/${screenplayId}`,
+          headers,
+          payload: { title: 'New Title' },
+        });
+        expect(forbidden.statusCode).toBe(403);
+        expect(forbidden.json()).toEqual({ error: 'Screenplay editor access required' });
+      } finally {
+        renameScreenplayResult = { id: screenplayId, title: 'Renamed' };
+        await app.close();
+      }
+    });
+
+    it('soft-deletes a screenplay and returns its id, mapping outcomes to 403 and 404', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        deleteScreenplayResult = { id: screenplayId };
+        const deleted = await app.inject({
+          method: 'DELETE',
+          url: `/api/screenplays/${screenplayId}`,
+          headers,
+        });
+        expect(deleted.statusCode).toBe(200);
+        expect(deleted.json()).toEqual({ id: screenplayId });
+
+        deleteScreenplayResult = 'forbidden';
+        const forbidden = await app.inject({
+          method: 'DELETE',
+          url: `/api/screenplays/${screenplayId}`,
+          headers,
+        });
+        expect(forbidden.statusCode).toBe(403);
+        expect(forbidden.json()).toEqual({ error: 'Screenplay editor access required' });
+
+        deleteScreenplayResult = 'missing';
+        const missing = await app.inject({
+          method: 'DELETE',
+          url: `/api/screenplays/${screenplayId}`,
+          headers,
+        });
+        expect(missing.statusCode).toBe(404);
+        expect(missing.json()).toEqual({ error: 'Screenplay not found' });
+      } finally {
+        deleteScreenplayResult = { id: screenplayId };
+        await app.close();
+      }
+    });
+
+    it('restores a screenplay and returns its id and title, mapping outcomes to 403 and 404', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        restoreScreenplayResult = { id: screenplayId, title: 'Draft' };
+        const restored = await app.inject({
+          method: 'POST',
+          url: `/api/screenplays/${screenplayId}/restore`,
+          headers,
+        });
+        expect(restored.statusCode).toBe(200);
+        expect(restored.json()).toEqual({ id: screenplayId, title: 'Draft' });
+
+        restoreScreenplayResult = 'forbidden';
+        const forbidden = await app.inject({
+          method: 'POST',
+          url: `/api/screenplays/${screenplayId}/restore`,
+          headers,
+        });
+        expect(forbidden.statusCode).toBe(403);
+        expect(forbidden.json()).toEqual({ error: 'Screenplay editor access required' });
+
+        restoreScreenplayResult = 'missing';
+        const missing = await app.inject({
+          method: 'POST',
+          url: `/api/screenplays/${screenplayId}/restore`,
+          headers,
+        });
+        expect(missing.statusCode).toBe(404);
+        expect(missing.json()).toEqual({ error: 'Screenplay not found' });
+      } finally {
+        restoreScreenplayResult = { id: screenplayId, title: 'Draft' };
+        await app.close();
+      }
+    });
   });
 });
 

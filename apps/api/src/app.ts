@@ -13,6 +13,7 @@ import {
   type ProjectStore,
   createProjectInput,
   createScreenplayInput,
+  renameInput,
   updateScreenplayInput,
 } from './projects.js';
 
@@ -70,6 +71,11 @@ const screenplayResponseSchema = z.object({
   screenplay: screenplaySchema,
 });
 const updateScreenplayResponseSchema = z.object({ version: z.number() });
+// Shared by both projects and screenplays: rename and restore both return the resource's
+// current id and title, and delete returns just the id it acted on. One schema per shape rather
+// than four near-identical ones, since the two resources' responses are structurally identical.
+const renameResponseSchema = z.object({ id: z.string(), title: z.string() });
+const deleteResponseSchema = z.object({ id: z.string() });
 
 export async function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
@@ -163,6 +169,71 @@ export async function buildApp(options: BuildAppOptions = {}) {
           .code(201)
           .send(await options.projects!.createProject(request.actorId!, request.body.title)),
     );
+    typedApp.patch(
+      '/api/projects/:id',
+      {
+        schema: {
+          params: idParam,
+          body: renameInput,
+          response: {
+            200: renameResponseSchema,
+            403: errorResponseSchema,
+            404: errorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        const result = await options.projects!.renameProject(
+          request.actorId!,
+          request.params.id,
+          request.body.title,
+        );
+        if (result === 'missing') return reply.code(404).send({ error: 'Project not found' });
+        if (result === 'forbidden')
+          return reply.code(403).send({ error: 'Project editor access required' });
+        return result;
+      },
+    );
+    typedApp.delete(
+      '/api/projects/:id',
+      {
+        schema: {
+          params: idParam,
+          response: {
+            200: deleteResponseSchema,
+            403: errorResponseSchema,
+            404: errorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        const result = await options.projects!.deleteProject(request.actorId!, request.params.id);
+        if (result === 'missing') return reply.code(404).send({ error: 'Project not found' });
+        if (result === 'forbidden')
+          return reply.code(403).send({ error: 'Project owner access required' });
+        return result;
+      },
+    );
+    typedApp.post(
+      '/api/projects/:id/restore',
+      {
+        schema: {
+          params: idParam,
+          response: {
+            200: renameResponseSchema,
+            403: errorResponseSchema,
+            404: errorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        const result = await options.projects!.restoreProject(request.actorId!, request.params.id);
+        if (result === 'missing') return reply.code(404).send({ error: 'Project not found' });
+        if (result === 'forbidden')
+          return reply.code(403).send({ error: 'Project owner access required' });
+        return result;
+      },
+    );
     typedApp.get(
       '/api/projects/:id/screenplays',
       { schema: { params: idParam, response: { 200: z.array(screenplayListItemSchema) } } },
@@ -241,6 +312,77 @@ export async function buildApp(options: BuildAppOptions = {}) {
           return reply.code(400).send({ error: 'Screenplay identity must match request path' });
         if (result === 'conflict')
           return reply.code(409).send({ error: 'Screenplay changed; reload before saving' });
+        return result;
+      },
+    );
+    typedApp.patch(
+      '/api/screenplays/:id',
+      {
+        schema: {
+          params: idParam,
+          body: renameInput,
+          response: {
+            200: renameResponseSchema,
+            403: errorResponseSchema,
+            404: errorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        const result = await options.projects!.renameScreenplay(
+          request.actorId!,
+          request.params.id,
+          request.body.title,
+        );
+        if (result === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
+        if (result === 'forbidden')
+          return reply.code(403).send({ error: 'Screenplay editor access required' });
+        return result;
+      },
+    );
+    typedApp.delete(
+      '/api/screenplays/:id',
+      {
+        schema: {
+          params: idParam,
+          response: {
+            200: deleteResponseSchema,
+            403: errorResponseSchema,
+            404: errorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        const result = await options.projects!.deleteScreenplay(
+          request.actorId!,
+          request.params.id,
+        );
+        if (result === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
+        if (result === 'forbidden')
+          return reply.code(403).send({ error: 'Screenplay editor access required' });
+        return result;
+      },
+    );
+    typedApp.post(
+      '/api/screenplays/:id/restore',
+      {
+        schema: {
+          params: idParam,
+          response: {
+            200: renameResponseSchema,
+            403: errorResponseSchema,
+            404: errorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        const result = await options.projects!.restoreScreenplay(
+          request.actorId!,
+          request.params.id,
+        );
+        if (result === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
+        if (result === 'forbidden')
+          return reply.code(403).send({ error: 'Screenplay editor access required' });
         return result;
       },
     );

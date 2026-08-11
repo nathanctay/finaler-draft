@@ -4,6 +4,7 @@ import {
   ForbiddenError,
   createPostgresProjectStore,
   createScreenplayInput,
+  renameInput,
   updateScreenplayInput,
 } from './projects.js';
 
@@ -32,6 +33,12 @@ describe('project persistence validation', () => {
       updateScreenplayInput.parse({ expectedVersion: 0, screenplay: screenplayFixture }),
     ).toThrow();
     expect(() => updateScreenplayInput.parse({ expectedVersion: 1, screenplay: {} })).toThrow();
+  });
+
+  it('trims rename titles and rejects blank or overlong ones', () => {
+    expect(renameInput.parse({ title: ' New Title ' })).toEqual({ title: 'New Title' });
+    expect(() => renameInput.parse({ title: '' })).toThrow();
+    expect(() => renameInput.parse({ title: 'x'.repeat(201) })).toThrow();
   });
 });
 
@@ -128,7 +135,7 @@ describe('PostgreSQL project store', () => {
 
     const noMemberClient = fakeClient([
       empty(),
-      rows([{ project_id: projectId, version: 1 }]),
+      rows([{ projectId, version: 1 }]),
       empty(),
       empty(),
     ]);
@@ -142,7 +149,7 @@ describe('PostgreSQL project store', () => {
 
     const reviewerClient = fakeClient([
       empty(),
-      rows([{ project_id: projectId, version: 1 }]),
+      rows([{ projectId, version: 1 }]),
       rows([{ role: 'reviewer' }]),
       empty(),
     ]);
@@ -156,7 +163,7 @@ describe('PostgreSQL project store', () => {
 
     const identityMismatchClient = fakeClient([
       empty(),
-      rows([{ project_id: projectId, version: 1 }]),
+      rows([{ projectId, version: 1 }]),
       rows([{ role: 'owner' }]),
       empty(),
     ]);
@@ -174,7 +181,7 @@ describe('PostgreSQL project store', () => {
 
     const staleClient = fakeClient([
       empty(),
-      rows([{ project_id: projectId, version: 2 }]),
+      rows([{ projectId, version: 2 }]),
       rows([{ role: 'owner' }]),
       empty(),
     ]);
@@ -188,7 +195,7 @@ describe('PostgreSQL project store', () => {
 
     const savedClient = fakeClient([
       empty(),
-      rows([{ project_id: projectId, version: 1 }]),
+      rows([{ projectId, version: 1 }]),
       rows([{ role: 'owner' }]),
       rows([{ version: 2 }]),
       empty(),
@@ -210,6 +217,245 @@ describe('PostgreSQL project store', () => {
       staleClient,
       savedClient,
     ]) {
+      expect(client.release).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('renames a project only for an owner or editor, and reports missing without leaking existence details', async () => {
+    const missingProjectClient = fakeClient([empty(), empty()]);
+    await expect(
+      createPostgresProjectStore(fakePool([], missingProjectClient)).renameProject(
+        actorId,
+        projectId,
+        'New Title',
+      ),
+    ).resolves.toBe('missing');
+    expect(missingProjectClient.query).toHaveBeenCalledWith('rollback');
+
+    const noMemberClient = fakeClient([empty(), rows([{ id: projectId }]), empty()]);
+    await expect(
+      createPostgresProjectStore(fakePool([], noMemberClient)).renameProject(
+        actorId,
+        projectId,
+        'New Title',
+      ),
+    ).resolves.toBe('missing');
+
+    const reviewerClient = fakeClient([
+      empty(),
+      rows([{ id: projectId }]),
+      rows([{ role: 'reviewer' }]),
+    ]);
+    await expect(
+      createPostgresProjectStore(fakePool([], reviewerClient)).renameProject(
+        actorId,
+        projectId,
+        'New Title',
+      ),
+    ).resolves.toBe('forbidden');
+    expect(reviewerClient.query).toHaveBeenCalledWith('rollback');
+
+    const editorClient = fakeClient([
+      empty(),
+      rows([{ id: projectId }]),
+      rows([{ role: 'editor' }]),
+      rows([{ id: projectId, title: 'New Title' }]),
+    ]);
+    await expect(
+      createPostgresProjectStore(fakePool([], editorClient)).renameProject(
+        actorId,
+        projectId,
+        'New Title',
+      ),
+    ).resolves.toEqual({ id: projectId, title: 'New Title' });
+    expect(editorClient.query).toHaveBeenCalledWith('commit');
+
+    for (const client of [missingProjectClient, noMemberClient, reviewerClient, editorClient]) {
+      expect(client.release).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('deletes a project only for its owner, unlike rename which also allows an editor', async () => {
+    const missingClient = fakeClient([empty(), empty()]);
+    await expect(
+      createPostgresProjectStore(fakePool([], missingClient)).deleteProject(actorId, projectId),
+    ).resolves.toBe('missing');
+
+    // A project that exists but has no membership row for this actor is a distinct code path
+    // from "the project doesn't exist" above, and must reach the same 'missing' answer so a
+    // non-member cannot distinguish the two.
+    const noMemberClient = fakeClient([empty(), rows([{ id: projectId }]), empty()]);
+    await expect(
+      createPostgresProjectStore(fakePool([], noMemberClient)).deleteProject(actorId, projectId),
+    ).resolves.toBe('missing');
+
+    const editorClient = fakeClient([
+      empty(),
+      rows([{ id: projectId }]),
+      rows([{ role: 'editor' }]),
+    ]);
+    await expect(
+      createPostgresProjectStore(fakePool([], editorClient)).deleteProject(actorId, projectId),
+    ).resolves.toBe('forbidden');
+    expect(editorClient.query).toHaveBeenCalledWith('rollback');
+
+    const ownerClient = fakeClient([empty(), rows([{ id: projectId }]), rows([{ role: 'owner' }])]);
+    await expect(
+      createPostgresProjectStore(fakePool([], ownerClient)).deleteProject(actorId, projectId),
+    ).resolves.toEqual({ id: projectId });
+    expect(ownerClient.query).toHaveBeenCalledWith(
+      'update projects set deleted_at = now() where id = $1',
+      [projectId],
+    );
+    expect(ownerClient.query).toHaveBeenCalledWith('commit');
+
+    for (const client of [missingClient, noMemberClient, editorClient, ownerClient]) {
+      expect(client.release).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('restores a project only for its owner, mirroring delete authorisation exactly', async () => {
+    const notDeletedClient = fakeClient([empty(), empty()]);
+    await expect(
+      createPostgresProjectStore(fakePool([], notDeletedClient)).restoreProject(actorId, projectId),
+    ).resolves.toBe('missing');
+
+    const editorClient = fakeClient([
+      empty(),
+      rows([{ id: projectId }]),
+      rows([{ role: 'editor' }]),
+    ]);
+    await expect(
+      createPostgresProjectStore(fakePool([], editorClient)).restoreProject(actorId, projectId),
+    ).resolves.toBe('forbidden');
+
+    const ownerClient = fakeClient([
+      empty(),
+      rows([{ id: projectId }]),
+      rows([{ role: 'owner' }]),
+      rows([{ id: projectId, title: 'Project' }]),
+    ]);
+    await expect(
+      createPostgresProjectStore(fakePool([], ownerClient)).restoreProject(actorId, projectId),
+    ).resolves.toEqual({ id: projectId, title: 'Project' });
+    expect(ownerClient.query).toHaveBeenCalledWith('commit');
+
+    for (const client of [notDeletedClient, editorClient, ownerClient]) {
+      expect(client.release).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('renames a screenplay for an owner or editor and reports missing for a nonexistent or already-deleted one', async () => {
+    const missingClient = fakeClient([empty(), empty()]);
+    await expect(
+      createPostgresProjectStore(fakePool([], missingClient)).renameScreenplay(
+        actorId,
+        screenplayId,
+        'New Title',
+      ),
+    ).resolves.toBe('missing');
+
+    const reviewerClient = fakeClient([
+      empty(),
+      rows([{ projectId, version: 1 }]),
+      rows([{ role: 'reviewer' }]),
+    ]);
+    await expect(
+      createPostgresProjectStore(fakePool([], reviewerClient)).renameScreenplay(
+        actorId,
+        screenplayId,
+        'New Title',
+      ),
+    ).resolves.toBe('forbidden');
+
+    const editorClient = fakeClient([
+      empty(),
+      rows([{ projectId, version: 1 }]),
+      rows([{ role: 'editor' }]),
+      rows([{ id: screenplayId, title: 'New Title' }]),
+    ]);
+    await expect(
+      createPostgresProjectStore(fakePool([], editorClient)).renameScreenplay(
+        actorId,
+        screenplayId,
+        'New Title',
+      ),
+    ).resolves.toEqual({ id: screenplayId, title: 'New Title' });
+
+    for (const client of [missingClient, reviewerClient, editorClient]) {
+      expect(client.release).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('deletes a screenplay for an owner or editor, unlike project deletion which requires the owner', async () => {
+    const editorClient = fakeClient([
+      empty(),
+      rows([{ projectId, version: 1 }]),
+      rows([{ role: 'editor' }]),
+    ]);
+    await expect(
+      createPostgresProjectStore(fakePool([], editorClient)).deleteScreenplay(
+        actorId,
+        screenplayId,
+      ),
+    ).resolves.toEqual({ id: screenplayId });
+    expect(editorClient.query).toHaveBeenCalledWith(
+      'update screenplays set deleted_at = now() where id = $1',
+      [screenplayId],
+    );
+
+    const reviewerClient = fakeClient([
+      empty(),
+      rows([{ projectId, version: 1 }]),
+      rows([{ role: 'reviewer' }]),
+    ]);
+    await expect(
+      createPostgresProjectStore(fakePool([], reviewerClient)).deleteScreenplay(
+        actorId,
+        screenplayId,
+      ),
+    ).resolves.toBe('forbidden');
+
+    for (const client of [editorClient, reviewerClient]) {
+      expect(client.release).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('restores a screenplay for an owner or editor, and reports missing when it is not currently deleted', async () => {
+    const notDeletedClient = fakeClient([empty(), empty()]);
+    await expect(
+      createPostgresProjectStore(fakePool([], notDeletedClient)).restoreScreenplay(
+        actorId,
+        screenplayId,
+      ),
+    ).resolves.toBe('missing');
+
+    // The screenplay is genuinely soft-deleted and its project active (lockScreenplayRow finds
+    // it), but the actor has no membership row at all — a distinct code path from "not deleted"
+    // above, and it must reach the same 'missing' answer.
+    const noMemberClient = fakeClient([empty(), rows([{ projectId, version: 1 }]), empty()]);
+    await expect(
+      createPostgresProjectStore(fakePool([], noMemberClient)).restoreScreenplay(
+        actorId,
+        screenplayId,
+      ),
+    ).resolves.toBe('missing');
+
+    const editorClient = fakeClient([
+      empty(),
+      rows([{ projectId, version: 1 }]),
+      rows([{ role: 'editor' }]),
+      rows([{ id: screenplayId, title: 'Draft' }]),
+    ]);
+    await expect(
+      createPostgresProjectStore(fakePool([], editorClient)).restoreScreenplay(
+        actorId,
+        screenplayId,
+      ),
+    ).resolves.toEqual({ id: screenplayId, title: 'Draft' });
+    expect(editorClient.query).toHaveBeenCalledWith('commit');
+
+    for (const client of [notDeletedClient, noMemberClient, editorClient]) {
       expect(client.release).toHaveBeenCalledOnce();
     }
   });

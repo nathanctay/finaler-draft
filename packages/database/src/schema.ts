@@ -76,6 +76,7 @@ export const projects = pgTable('projects', {
   title: varchar('title', { length: 200 }).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
 });
 
 export const projectRole = pgEnum('project_role', ['owner', 'editor', 'reviewer']);
@@ -114,6 +115,7 @@ export const screenplays = pgTable(
     version: integer('version').default(1).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
   },
   (table) => [index('screenplays_project_id_index').on(table.projectId)],
 );

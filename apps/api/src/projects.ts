@@ -1,11 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Screenplay } from '@finaler-draft/screenplay';
 import { screenplaySchema } from '@finaler-draft/screenplay';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
 
 const projectTitle = z.string().trim().min(1).max(200);
 export const createProjectInput = z.object({ title: projectTitle }).strict();
+// Rename shares the exact same title constraints as create (`z.string().trim().min(1).max(200)`,
+// matching the `varchar(200)` columns) and is used for both projects and screenplays: the two
+// resources have identical title rules, so one schema covers both routes.
+export const renameInput = z.object({ title: projectTitle }).strict();
 // The nested `screenplay` field is the canonical screenplaySchema itself, not z.unknown(), so
 // this schema is a complete, directly usable Fastify body schema: declaring it as a route's
 // `body` validates title and screenplay together in one pass, with no separate manual
@@ -19,11 +23,23 @@ export const updateScreenplayInput = z
 export type CreateScreenplayInput = z.infer<typeof createScreenplayInput>;
 export type UpdateScreenplayInput = z.infer<typeof updateScreenplayInput>;
 
+type RenameResult = { id: string; title: string } | 'forbidden' | 'missing';
+type DeleteResult = { id: string } | 'forbidden' | 'missing';
+type RestoreResult = { id: string; title: string } | 'forbidden' | 'missing';
+
 export interface ProjectStore {
   listProjects(
     actorId: string,
   ): Promise<Array<{ id: string; title: string; updatedAt: string; role: string }>>;
   createProject(actorId: string, title: string): Promise<{ id: string; title: string }>;
+  renameProject(actorId: string, projectId: string, title: string): Promise<RenameResult>;
+  // Soft delete only: nothing this store adds ever removes a row. Owner-only, because deleting a
+  // project is the one action here whose blast radius is the whole project and everything under it.
+  deleteProject(actorId: string, projectId: string): Promise<DeleteResult>;
+  // Authorised identically to deleteProject. Restoring a project never reaches into its
+  // screenplays: their own `deletedAt` was never touched by the delete (see the read-path
+  // comment below), so unsetting the project's `deletedAt` is the complete operation.
+  restoreProject(actorId: string, projectId: string): Promise<RestoreResult>;
   listScreenplays(
     actorId: string,
     projectId: string,
@@ -40,6 +56,17 @@ export interface ProjectStore {
     | { id: string; projectId: string; title: string; version: number; screenplay: Screenplay }
     | 'missing'
   >;
+  // Renames only the screenplay row's `title` (the listing/display field). It deliberately never
+  // touches `canonicalScreenplay`, `canonicalHash`, or `version` — see the comment on
+  // `renameScreenplay` below for why the two title fields are intentionally independent.
+  renameScreenplay(actorId: string, screenplayId: string, title: string): Promise<RenameResult>;
+  // Soft delete only. Same authorisation as editing the screenplay (owner or editor), since
+  // deletion here is reversible and sits within a project both roles already collaborate on.
+  deleteScreenplay(actorId: string, screenplayId: string): Promise<DeleteResult>;
+  // Authorised identically to deleteScreenplay. A screenplay cannot be restored while its parent
+  // project is itself soft-deleted (the project must be restored first) — the lookup this shares
+  // with every other screenplay operation enforces that by construction.
+  restoreScreenplay(actorId: string, screenplayId: string): Promise<RestoreResult>;
   updateScreenplay(
     actorId: string,
     screenplayId: string,
@@ -51,11 +78,42 @@ function screenplayHash(screenplay: Screenplay) {
   return createHash('sha256').update(JSON.stringify(screenplay)).digest('hex');
 }
 
+// Every screenplay-touching operation in this store locks the screenplay row through this single
+// helper rather than writing its own `select ... from screenplays where id = $1` — that is the
+// structural guard against a future operation forgetting to join the parent project's state.
+// `deleted` selects which side of history is being reached for: `false` (the default) is the
+// live document any read/write/rename/delete operates on; `true` is the one used by restore,
+// which must find a row that is currently soft-deleted.
+//
+// The join to `projects` and the `p.deleted_at is null` predicate are unconditional, including
+// when `deleted: true`. That is deliberate, not an oversight: a screenplay can never be reached
+// by id — for any operation, including restore — while its parent project is itself soft-deleted.
+// The project must be restored first. Without this, restore would be the one door left open on an
+// otherwise fully inaccessible screenplay.
+async function lockScreenplayRow(
+  client: Pick<PoolClient, 'query'>,
+  screenplayId: string,
+  deleted = false,
+): Promise<{ projectId: string; version: number } | 'missing'> {
+  const result = await client.query(
+    `select s.project_id as "projectId", s.version
+       from screenplays s
+       join projects p on p.id = s.project_id
+      where s.id = $1
+        and p.deleted_at is null
+        and s.deleted_at is ${deleted ? 'not null' : 'null'}
+      for update`,
+    [screenplayId],
+  );
+  if (result.rowCount !== 1) return 'missing';
+  return result.rows[0] as { projectId: string; version: number };
+}
+
 export function createPostgresProjectStore(pool: Pool): ProjectStore {
   return {
     async listProjects(actorId) {
       const result = await pool.query(
-        'select p.id, p.title, p.updated_at as "updatedAt", m.role from projects p join project_members m on m.project_id = p.id where m.user_id = $1 order by p.updated_at desc',
+        'select p.id, p.title, p.updated_at as "updatedAt", m.role from projects p join project_members m on m.project_id = p.id where m.user_id = $1 and p.deleted_at is null order by p.updated_at desc',
         [actorId],
       );
       return result.rows.map((row) => ({
@@ -82,9 +140,117 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
         client.release();
       }
     },
+    async renameProject(actorId, projectId, title) {
+      const client = await pool.connect();
+      try {
+        await client.query('begin');
+        const project = await client.query(
+          'select id from projects where id = $1 and deleted_at is null for update',
+          [projectId],
+        );
+        if (project.rowCount !== 1) {
+          await client.query('rollback');
+          return 'missing';
+        }
+        const membership = await client.query(
+          'select role from project_members where project_id = $1 and user_id = $2 for update',
+          [projectId, actorId],
+        );
+        if (!membership.rowCount) {
+          await client.query('rollback');
+          return 'missing';
+        }
+        if (!canEdit(membership.rows[0]?.role)) {
+          await client.query('rollback');
+          return 'forbidden';
+        }
+        const result = await client.query(
+          'update projects set title = $1, updated_at = now() where id = $2 returning id, title',
+          [title, projectId],
+        );
+        await client.query('commit');
+        return result.rows[0] as { id: string; title: string };
+      } catch (error) {
+        await client.query('rollback');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+    async deleteProject(actorId, projectId) {
+      const client = await pool.connect();
+      try {
+        await client.query('begin');
+        const project = await client.query(
+          'select id from projects where id = $1 and deleted_at is null for update',
+          [projectId],
+        );
+        if (project.rowCount !== 1) {
+          await client.query('rollback');
+          return 'missing';
+        }
+        const membership = await client.query(
+          'select role from project_members where project_id = $1 and user_id = $2 for update',
+          [projectId, actorId],
+        );
+        if (!membership.rowCount) {
+          await client.query('rollback');
+          return 'missing';
+        }
+        if (membership.rows[0]?.role !== 'owner') {
+          await client.query('rollback');
+          return 'forbidden';
+        }
+        await client.query('update projects set deleted_at = now() where id = $1', [projectId]);
+        await client.query('commit');
+        return { id: projectId };
+      } catch (error) {
+        await client.query('rollback');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+    async restoreProject(actorId, projectId) {
+      const client = await pool.connect();
+      try {
+        await client.query('begin');
+        const project = await client.query(
+          'select id from projects where id = $1 and deleted_at is not null for update',
+          [projectId],
+        );
+        if (project.rowCount !== 1) {
+          await client.query('rollback');
+          return 'missing';
+        }
+        const membership = await client.query(
+          'select role from project_members where project_id = $1 and user_id = $2 for update',
+          [projectId, actorId],
+        );
+        if (!membership.rowCount) {
+          await client.query('rollback');
+          return 'missing';
+        }
+        if (membership.rows[0]?.role !== 'owner') {
+          await client.query('rollback');
+          return 'forbidden';
+        }
+        const result = await client.query(
+          'update projects set deleted_at = null, updated_at = now() where id = $1 returning id, title',
+          [projectId],
+        );
+        await client.query('commit');
+        return result.rows[0] as { id: string; title: string };
+      } catch (error) {
+        await client.query('rollback');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
     async listScreenplays(actorId, projectId) {
       const result = await pool.query(
-        'select s.id, s.title, s.version, s.updated_at as "updatedAt" from screenplays s join project_members m on m.project_id = s.project_id where s.project_id = $1 and m.user_id = $2 order by s.updated_at desc',
+        'select s.id, s.title, s.version, s.updated_at as "updatedAt" from screenplays s join project_members m on m.project_id = s.project_id join projects p on p.id = s.project_id where s.project_id = $1 and m.user_id = $2 and s.deleted_at is null and p.deleted_at is null order by s.updated_at desc',
         [projectId, actorId],
       );
       return result.rows.map((row) => ({
@@ -96,8 +262,14 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
       const client = await pool.connect();
       try {
         await client.query('begin');
+        // Joined to `projects` and requiring it active, so creating into a soft-deleted project
+        // is denied the same way creating into a nonexistent project always was: this membership
+        // lookup finds no role, `canEdit(undefined)` is false, and the existing ForbiddenError /
+        // 403 path below handles it. A soft-deleted project must not be a place new screenplays
+        // can be created, or they would be immediately unreachable by every read path added in
+        // this slice.
         const membership = await client.query(
-          'select role from project_members where project_id = $1 and user_id = $2 for update',
+          'select m.role from project_members m join projects p on p.id = m.project_id where m.project_id = $1 and m.user_id = $2 and p.deleted_at is null for update',
           [projectId, actorId],
         );
         if (!canEdit(membership.rows[0]?.role)) throw new ForbiddenError();
@@ -130,8 +302,10 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
         `select s.id, s.project_id as "projectId", s.title, s.version,
                 s.canonical_screenplay as screenplay
            from screenplays s
+           join projects p on p.id = s.project_id
            join project_members m on m.project_id = s.project_id
-          where s.id = $1 and m.user_id = $2`,
+          where s.id = $1 and m.user_id = $2
+            and s.deleted_at is null and p.deleted_at is null`,
         [screenplayId, actorId],
       );
       if (result.rowCount !== 1) return 'missing';
@@ -150,22 +324,127 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
         screenplay: screenplaySchema.parse(row.screenplay),
       };
     },
+    async renameScreenplay(actorId, screenplayId, title) {
+      const client = await pool.connect();
+      try {
+        await client.query('begin');
+        const screenplay = await lockScreenplayRow(client, screenplayId);
+        if (screenplay === 'missing') {
+          await client.query('rollback');
+          return 'missing';
+        }
+        const membership = await client.query(
+          'select role from project_members where project_id = $1 and user_id = $2 for update',
+          [screenplay.projectId, actorId],
+        );
+        if (!membership.rowCount) {
+          await client.query('rollback');
+          return 'missing';
+        }
+        if (!canEdit(membership.rows[0]?.role)) {
+          await client.query('rollback');
+          return 'forbidden';
+        }
+        // Deliberately touches only the screenplay row's `title`, not `canonicalScreenplay`,
+        // `canonicalHash`, or `version`. Those two title fields are intentionally independent:
+        // the row title is listing/display metadata, while any in-document title lives inside the
+        // version-guarded canonical document and can only change through `updateScreenplay`'s
+        // optimistic-concurrency path. Coupling them would force this metadata-only rename to
+        // either bump `version` for a document nobody edited, or mutate canonical content outside
+        // the guarded update path — the latter breaks the invariant that `canonicalHash`
+        // identifies a screenplay for exports and revisions.
+        const result = await client.query(
+          'update screenplays set title = $1, updated_at = now() where id = $2 returning id, title',
+          [title, screenplayId],
+        );
+        await client.query('commit');
+        return result.rows[0] as { id: string; title: string };
+      } catch (error) {
+        await client.query('rollback');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+    async deleteScreenplay(actorId, screenplayId) {
+      const client = await pool.connect();
+      try {
+        await client.query('begin');
+        const screenplay = await lockScreenplayRow(client, screenplayId);
+        if (screenplay === 'missing') {
+          await client.query('rollback');
+          return 'missing';
+        }
+        const membership = await client.query(
+          'select role from project_members where project_id = $1 and user_id = $2 for update',
+          [screenplay.projectId, actorId],
+        );
+        if (!membership.rowCount) {
+          await client.query('rollback');
+          return 'missing';
+        }
+        if (!canEdit(membership.rows[0]?.role)) {
+          await client.query('rollback');
+          return 'forbidden';
+        }
+        await client.query('update screenplays set deleted_at = now() where id = $1', [
+          screenplayId,
+        ]);
+        await client.query('commit');
+        return { id: screenplayId };
+      } catch (error) {
+        await client.query('rollback');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+    async restoreScreenplay(actorId, screenplayId) {
+      const client = await pool.connect();
+      try {
+        await client.query('begin');
+        const screenplay = await lockScreenplayRow(client, screenplayId, true);
+        if (screenplay === 'missing') {
+          await client.query('rollback');
+          return 'missing';
+        }
+        const membership = await client.query(
+          'select role from project_members where project_id = $1 and user_id = $2 for update',
+          [screenplay.projectId, actorId],
+        );
+        if (!membership.rowCount) {
+          await client.query('rollback');
+          return 'missing';
+        }
+        if (!canEdit(membership.rows[0]?.role)) {
+          await client.query('rollback');
+          return 'forbidden';
+        }
+        const result = await client.query(
+          'update screenplays set deleted_at = null, updated_at = now() where id = $1 returning id, title',
+          [screenplayId],
+        );
+        await client.query('commit');
+        return result.rows[0] as { id: string; title: string };
+      } catch (error) {
+        await client.query('rollback');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
     async updateScreenplay(actorId, screenplayId, input) {
       const client = await pool.connect();
       try {
         await client.query('begin');
-        const screenplay = await client.query(
-          'select project_id, version from screenplays where id = $1 for update',
-          [screenplayId],
-        );
-        if (screenplay.rowCount !== 1) {
+        const screenplay = await lockScreenplayRow(client, screenplayId);
+        if (screenplay === 'missing') {
           await client.query('rollback');
           return 'missing';
         }
-        const row = screenplay.rows[0] as { project_id: string; version: number };
         const membership = await client.query(
           'select role from project_members where project_id = $1 and user_id = $2 for update',
-          [row.project_id, actorId],
+          [screenplay.projectId, actorId],
         );
         if (!membership.rowCount) {
           await client.query('rollback');
@@ -179,7 +458,7 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
           await client.query('rollback');
           return 'invalid';
         }
-        if (row.version !== input.expectedVersion) {
+        if (screenplay.version !== input.expectedVersion) {
           await client.query('rollback');
           return 'conflict';
         }
@@ -188,7 +467,7 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
           [JSON.stringify(input.screenplay), screenplayHash(input.screenplay), screenplayId],
         );
         await client.query('update projects set updated_at = now() where id = $1', [
-          row.project_id,
+          screenplay.projectId,
         ]);
         await client.query('commit');
         return { version: result.rows[0]?.version as number };
