@@ -100,7 +100,25 @@ export function convertActiveScreenplayBlock(
   return true;
 }
 
-function splitScreenplayBlock(editor: Editor, element: ScreenplayElementType): boolean {
+/**
+ * Splits the active block at the selection. The half before the split always keeps its own element;
+ * what the half after it becomes depends on where the caret was.
+ *
+ * Enter at the **end** of a block is the writer starting the next element, so the new block takes
+ * `elementWhenSplittingAtEnd` -- the screenplay convention that a character cue is followed by
+ * dialogue, a transition by a scene heading, and so on. An empty block counts as being at its end,
+ * so Enter on a blank line still advances.
+ *
+ * Enter **anywhere else** is the writer breaking one element in two, not starting a different one,
+ * so both halves keep the original element. Previously the new half was always given the next
+ * element in the convention, which meant splitting a paragraph of action mid-sentence silently
+ * retyped the remainder as something else. Offset 0 counts as "anywhere else": it splits an empty
+ * block off above and leaves the text where it was, and that text is still the element it was.
+ */
+function splitScreenplayBlock(
+  editor: Editor,
+  elementWhenSplittingAtEnd: ScreenplayElementType,
+): boolean {
   const activeBlock = getActiveBlock(editor);
   if (!activeBlock) {
     return false;
@@ -130,6 +148,10 @@ function splitScreenplayBlock(editor: Editor, element: ScreenplayElementType): b
   );
   const prefix = activeBlock.text.slice(0, selectionStartOffset);
   const suffix = activeBlock.text.slice(selectionEndOffset);
+  const element =
+    selectionEndOffset === activeBlock.text.length
+      ? elementWhenSplittingAtEnd
+      : activeBlock.element;
   const preservedBlock = existingNode.type.create(
     { element: activeBlock.element, id: activeBlock.id },
     prefix === '' ? undefined : editor.schema.text(prefix),

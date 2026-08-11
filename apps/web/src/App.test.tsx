@@ -236,8 +236,15 @@ describe('local semantic screenplay editor', () => {
     fireEvent.keyDown(editor.view.dom, { key: 'Tab' });
     expect(editor.state.doc.child(2).attrs.element).toBe('character');
 
+    // At the END of the cue, which is what makes this Enter a transition to the next element
+    // rather than a split of this one. Enter inside a block keeps the element on both halves (see
+    // screenplayEditor.test.ts), so a caret one character in would leave a second character block
+    // here and prove nothing about the character-to-dialogue transition this assertion is for.
+    const cueBlock = editor.state.doc.child(2);
     editor.view.dispatch(
-      editor.state.tr.setSelection(TextSelection.create(editor.state.doc, splitPosition + 2)),
+      editor.state.tr.setSelection(
+        TextSelection.create(editor.state.doc, splitPosition + 1 + cueBlock.content.size),
+      ),
     );
     fireEvent.keyDown(editor.view.dom, { key: 'Enter' });
     const ids = Array.from(
