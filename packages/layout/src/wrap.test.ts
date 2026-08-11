@@ -159,6 +159,91 @@ describe('wrapBlockText', () => {
   });
 });
 
+/**
+ * `graphemeLength` and `utf16LengthOfFirstGraphemes` (in wrap.ts) are not exported: they are an
+ * internal ASCII fast path in front of `Intl.Segmenter`. These tests exercise that fast path
+ * (and, by contrast, the `Intl.Segmenter` path it defers to for anything outside `\x20`-`\x7E`)
+ * black-box, through `wrapBlockText`'s public wrap boundary, against a grapheme count computed
+ * independently here rather than by importing wrap.ts's own logic -- so a wrong fast path would
+ * make these tests fail rather than silently agree with itself.
+ */
+describe('wrapBlockText: ASCII fast path agrees with a reference Intl.Segmenter grapheme count', () => {
+  const REFERENCE_SEGMENTER = new Intl.Segmenter('en', { granularity: 'grapheme' });
+
+  function referenceGraphemeCount(text: string): number {
+    let count = 0;
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    for (const _segment of REFERENCE_SEGMENTER.segment(text)) {
+      count += 1;
+    }
+    return count;
+  }
+
+  /**
+   * `text` must be a single token (no whitespace): wrapping it at one grapheme short of its full
+   * reference count forces the "token alone exceeds the budget" hard-split branch, which is the
+   * one that calls `utf16LengthOfFirstGraphemes` -- so the split lands exactly at the reference
+   * count's grapheme boundary, on whichever path (ASCII fast path or `Intl.Segmenter`) actually
+   * ran, wrong-by-one, wrong-path-taken, and combining-mark/ZWJ/regional-indicator miscounts would
+   * all show up as a mismatch here.
+   */
+  function assertHardSplitAgreesWithReference(text: string): void {
+    const referenceCount = referenceGraphemeCount(text);
+    const budget = referenceCount - 1;
+    const lines = wrapBlockText(BLOCK_ID, 'action', text, budget);
+    expect(lines).toHaveLength(2);
+    expect(referenceGraphemeCount(lines[0]?.text ?? '')).toBe(budget);
+    expect(referenceGraphemeCount(lines[1]?.text ?? '')).toBe(1);
+    assertGapless(lines, text);
+  }
+
+  it('agrees for plain printable ASCII (the fast path itself)', () => {
+    assertHardSplitAgreesWithReference('A'.repeat(30));
+  });
+
+  it('agrees for a decomposed combining-mark sequence (segmenter path)', () => {
+    // 'e' + COMBINING ACUTE ACCENT (U+0301): one grapheme, two UTF-16 code units. Neither
+    // character is in \x20-\x7E, so this always takes the Intl.Segmenter path.
+    assertHardSplitAgreesWithReference('é'.repeat(15));
+  });
+
+  it('agrees for a ZWJ family-emoji sequence (segmenter path)', () => {
+    // MAN + ZWJ + WOMAN + ZWJ + GIRL + ZWJ + BOY: one grapheme cluster, seven code points (all
+    // astral, so 11 UTF-16 code units, plus the 3 ZWJ code units = 14). Every unit is non-ASCII.
+    const familyEmoji = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}';
+    assertHardSplitAgreesWithReference(familyEmoji.repeat(6));
+  });
+
+  it('agrees for a regional-indicator flag pair (segmenter path)', () => {
+    // REGIONAL INDICATOR U + REGIONAL INDICATOR S ("US" flag): one grapheme, two astral code
+    // points, four UTF-16 code units. A naive UTF-16-length count would see 4 cells, not 1.
+    const flag = '\u{1F1FA}\u{1F1F8}';
+    assertHardSplitAgreesWithReference(flag.repeat(10));
+  });
+
+  it('agrees for a single run mixing ASCII with non-ASCII graphemes (both paths in one call)', () => {
+    // 'ab' and 'cd' are pure ASCII (fast path per-token); the family emoji between them is not
+    // (segmenter path). All three are one token here (no whitespace), so `graphemeLength` and
+    // `utf16LengthOfFirstGraphemes` see the whole mixed string as a single `text` argument.
+    const familyEmoji = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}';
+    assertHardSplitAgreesWithReference(`ab${familyEmoji}cd`.repeat(3));
+  });
+
+  it('counts \\r\\n as a single grapheme cluster via the segmenter path, never the ASCII fast path', () => {
+    // \r and \n both fall outside \x20-\x7E, so any text containing them fails ASCII_PRINTABLE
+    // and unconditionally takes the Intl.Segmenter path -- this is what makes the fast path safe
+    // for CRLF rather than merely untested. If a future change widened the fast-path range to
+    // include control characters, this text would be miscounted: `\r\n` would count as 2 cells
+    // (raw UTF-16 length) instead of the correct 1 (a single CR x LF grapheme cluster), and the
+    // assertion below would fail.
+    const text = `${'a'.repeat(11)}\r\n`; // 11 ASCII graphemes + 1 CRLF grapheme = 12; budget 12
+    const lines = wrapBlockText(BLOCK_ID, 'action', text, 12);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.text).toBe(text);
+    assertGapless(lines, text);
+  });
+});
+
 describe('wrapBlock', () => {
   it('derives the character wrap budget as 38, from the 3.7 in indent to the 7.5 in right margin', () => {
     expect(CHARACTER_WRAP_BUDGET).toBe(38);

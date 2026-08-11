@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
   deriveScenes,
   type DerivedScene,
@@ -18,6 +18,8 @@ import {
   type LocalScreenplayProjection,
   type ScreenplayElementType,
 } from './screenplayEditor.js';
+import { PaginationExtension, paginationPluginKey } from './paginationExtension.js';
+import { PAGE_GAP_IN, pageStackMinHeightIn } from './pagination.js';
 import { ApiError, api, type PersistedScreenplay } from './api.js';
 
 type Panel = 'navigator' | 'inspector';
@@ -145,6 +147,19 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   // [data-screenplay-block]::before in styles.css), so toggling this never moves a line on the
   // grid -- both states were proven identical by the e2e measurement suite.
   const [showLabels, setShowLabels] = useState(false);
+  // View state, not document state: defaults to discrete pages per plan.md ("Page presentation").
+  // Toggling this never touches the pagination plugin's decorations -- see paginationExtension.ts
+  // and pagination.ts's buildPaginationDecorations -- so page count and break positions are
+  // identical in both modes by construction; only the .page/.page.continuous background rules in
+  // styles.css differ.
+  const [continuousScroll, setContinuousScroll] = useState(false);
+  // Drives .page's minimum height (requirement 3, progress/page-rendering.md): .page is
+  // content-sized, so once the last page is only partly full its natural height falls short of
+  // the repeating-gradient background's next full page-and-gap cycle, truncating the last page's
+  // painted background. Sourced from the pagination plugin's own state (see
+  // paginationExtension.ts's PaginationState) so this never triggers a second pagination pass --
+  // it rides the same frame-coalesced computation the decorations already use.
+  const [pageCount, setPageCount] = useState(0);
   const [activeElement, setActiveElement] = useState<ScreenplayElementType>('scene_heading');
   const [activeBlockId, setActiveBlockId] = useState<string>();
   const [projection, setProjection] = useState<LocalScreenplayProjection>({
@@ -264,6 +279,18 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     }
   };
 
+  // The pagination plugin recomputes on a requestAnimationFrame coalesce (paginationExtension.ts),
+  // dispatching a decoration-only transaction that does not change the document -- Tiptap's `onUpdate` only
+  // fires for doc changes, so it would miss that dispatch entirely. `onTransaction` fires for
+  // every transaction, including that one, which is what lets pageCount track the plugin's own
+  // state rather than becoming a second source of truth for it.
+  const syncPageCount = (editorInstance: Editor) => {
+    const state = paginationPluginKey.getState(editorInstance.state);
+    if (state) {
+      setPageCount(state.pageCount);
+    }
+  };
+
   const editor = useEditor({
     content: editorContent ?? unavailableEditorContent,
     editable: initialContent !== undefined,
@@ -274,10 +301,14 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
         role: 'textbox',
       },
     },
-    extensions: screenplayExtensions,
-    onCreate: ({ editor: editorInstance }) => syncEditorState(editorInstance),
+    extensions: [...screenplayExtensions, PaginationExtension],
+    onCreate: ({ editor: editorInstance }) => {
+      syncEditorState(editorInstance);
+      syncPageCount(editorInstance);
+    },
     onSelectionUpdate: ({ editor: editorInstance }) => syncEditorState(editorInstance),
     onUpdate: ({ editor: editorInstance }) => syncEditorState(editorInstance, true),
+    onTransaction: ({ editor: editorInstance }) => syncPageCount(editorInstance),
   });
 
   useEffect(() => () => window.clearTimeout(timer.current), []);
@@ -404,6 +435,13 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
           ⌸
         </ToolButton>
         <ToolButton
+          active={continuousScroll}
+          label="Toggle continuous scroll"
+          onClick={() => setContinuousScroll((value) => !value)}
+        >
+          ⬍
+        </ToolButton>
+        <ToolButton
           active={panels.navigator}
           label="Toggle navigator"
           onClick={() => togglePanel('navigator')}
@@ -463,15 +501,17 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
             <span>6</span>
           </div>
           <article
-            className="page"
-            style={{ transform: `scale(${zoom / 100})` }}
+            className={continuousScroll ? 'page continuous' : 'page'}
+            style={
+              {
+                transform: `scale(${zoom / 100})`,
+                '--fd-page-gap': `${PAGE_GAP_IN}in`,
+                '--fd-page-stack-min-height': `${pageStackMinHeightIn(pageCount)}in`,
+              } as CSSProperties
+            }
             aria-label={`${initial.title} screenplay canvas`}
           >
             <div className="page-number">DRAFT</div>
-            <div className="script-title">{initial.title.toUpperCase()}</div>
-            <div className="script-meta">
-              {initialContent ? 'Autosaved screenplay draft' : 'Read-only screenplay'}
-            </div>
             <div className={showLabels ? 'script-body show-element-labels' : 'script-body'}>
               <EditorContent editor={editor} />
             </div>

@@ -2,7 +2,11 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './apps/web/e2e',
-  testMatch: ['**/persistence.spec.ts', '**/session-routing.spec.ts'],
+  testMatch: [
+    '**/persistence.spec.ts',
+    '**/session-routing.spec.ts',
+    '**/page-rendering-persistence.spec.ts',
+  ],
   timeout: 30_000,
   reporter: 'list',
   use: {
