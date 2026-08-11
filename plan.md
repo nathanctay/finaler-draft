@@ -788,18 +788,24 @@ No agent may silently broaden scope, replace this plan, create a partial product
 
 ## Immediate next action
 
-An audit of `main` at `1bce6d3` found that the CI workflow cannot pass: `pnpm typecheck` fails on a clean checkout because leaf packages are typechecked rather than built and their declarations never exist, and `pnpm format:check` fails on files committed unformatted. It also found that `POST /api/auth/sign-out` returns 500, and that the API error handler converts every client error into a 500. Until those are fixed, no branch can produce trustworthy verification evidence, so the recorded gate results in earlier `progress.md` entries should not be relied on.
+Landed since the original audit of `main` at `1bce6d3`: the CI gates are trustworthy (`typecheck` builds leaf packages, `format:check` passes, sign-out and the client-error handler are fixed), the colour token system replaced the ad hoc literals in `styles.css`, sign-in and sign-up carry descriptive errors and a confirm-password field, and the pagination work is complete — the pure layout package, its rendering as discrete pages, and the latency work described in "Pagination cost and recompute strategy". Gate results recorded in `progress/` entries from those branches can be relied on.
 
-The delivery order is therefore:
+The remaining Phase 1 order is:
 
-1. `fix/ci-green` — make the gates trustworthy. In progress.
-2. `chore/design-tokens` — extract the token system from the 92 distinct color literals currently in `styles.css`. Unblocks all interface work.
-3. `feature/auth-hardening` — password requirements interface, shared validation-code allowlist, rate limiting, explicit cookie attributes, Resend for verification and reset.
-4. `chore/platform-hygiene` — unify on a single Zod major across the workspace, split server environment parsing out of the shared policy package, and adopt a typed Fastify route contract.
-5. `feature/project-screenplay-crud` — rename and soft-delete.
-6. `feature/pagination-engine` — the pure layout package, then the renderer.
+1. `chore/platform-hygiene` — unify on a single Zod major across the workspace (`apps/api` is on 4.1.12, every other package on 3.24.1), split server environment parsing out of the shared policy package, and adopt a typed Fastify route contract.
+2. `feature/project-screenplay-crud` — rename and soft-delete for projects and screenplays.
+3. Title page, scene numbers, and document settings. Document settings are the load-bearing item of the three, because pagination reads them; the dialog may land late but the defaults and their storage cannot.
+4. FDX import/export, PDF export painted from the layout package, and `.docx` export. The PDF worker likely needs its own Dockerfile for headless Chromium.
+5. SmartType-style contextual completion.
+6. Zoom gestures, presets, and fit-page/fit-width. Deliberately last.
 
-Yjs follows item 4 and may run alongside item 6. Billing follows the commercial decisions recorded in the billing section. Private documents must not be represented as launch-ready until the launch-readiness list is complete.
+Three Phase 1 items sit outside that sequence and are easy to lose track of because nothing else depends on them:
+
+- The rest of auth hardening: rate limiting, explicit cookie attributes, and email verification with password reset. The email half is blocked on an email provider being configured, not on engineering.
+- Character-extension stripping in the Navigator, so `MARA` and `MARA (V.O.)` are one character.
+- The canonical round-trip test asserting that screenplay-to-editor projection and back is the identity function. It becomes load-bearing the moment FDX import exists, so it should land no later than item 4.
+
+Yjs may run alongside any of the above. Note that it removes work rather than adding it: the version column, the whole-document `PUT`, and the terminal 409 handling all come out when the Yjs document becomes the source of truth, so avoid further investment in conflict-recovery interface work. Billing follows the commercial decisions recorded in the billing section. Private documents must not be represented as launch-ready until the launch-readiness list is complete.
 
 ## Research basis
 
