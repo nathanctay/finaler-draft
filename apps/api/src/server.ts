@@ -1,4 +1,4 @@
-import { findPersistenceEnvironment, parseServerEnvironment } from '@finaler-draft/config';
+import { findPersistenceEnvironment, parseServerEnvironment } from '@finaler-draft/server-config';
 import { createAuth } from './auth.js';
 import { buildApp } from './app.js';
 import { loadRootEnvironment, shouldLoadRootEnvironment } from './environment.js';

@@ -135,6 +135,91 @@ describe('persisted project API', () => {
       await app.close();
     }
   });
+  it('rejects an unauthenticated request for authentication, not schema validation, even when its id is malformed', async () => {
+    // Fastify's lifecycle runs preValidation -> schema validation -> preHandler -> the route
+    // handler. Before this refactor, every id/body check was a manual `.parse()` call inside the
+    // handler, which is later than all of those hooks, so an unauthenticated request with a
+    // malformed id or body was always rejected for authentication (401) rather than validation
+    // (400). Declaring params/body as route schemas moves validation ahead of preHandler; this
+    // proves the auth-check hook still runs first (it lives in preValidation, not preHandler) and
+    // that ordering, and therefore this status code, is unchanged by the refactor.
+    const app = await buildApp({ auth, projects: store });
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/projects/not-a-uuid/screenplays',
+      });
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).toEqual({ error: 'Authentication required' });
+    } finally {
+      await app.close();
+    }
+  });
+  it('returns response bodies whose fields exactly match the store, unstripped by the new response schemas', async () => {
+    // fastify-type-provider-zod's response schemas serialize by re-parsing the handler's return
+    // value and can silently drop any field the schema doesn't declare. Every assertion here uses
+    // `.toEqual` (exact deep equality), not `.toMatchObject`, specifically to catch that failure
+    // mode for every route this refactor attached a response schema to.
+    const app = await buildApp({ auth, projects: store });
+    try {
+      const headers = { cookie: 'session=test' };
+      expect((await app.inject({ method: 'GET', url: '/api/projects', headers })).json()).toEqual([
+        {
+          id: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+          title: 'Project',
+          updatedAt: '2026-08-06T00:00:00Z',
+          role: 'owner',
+        },
+      ]);
+      expect(
+        (
+          await app.inject({
+            method: 'POST',
+            url: '/api/projects',
+            headers,
+            payload: { title: 'New Project' },
+          })
+        ).json(),
+      ).toEqual({ id: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f', title: 'New Project' });
+      expect(
+        (
+          await app.inject({
+            method: 'GET',
+            url: '/api/projects/5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f/screenplays',
+            headers,
+          })
+        ).json(),
+      ).toEqual([]);
+      expect(
+        (
+          await app.inject({
+            method: 'POST',
+            url: '/api/projects/5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f/screenplays',
+            headers,
+            payload: { title: 'Draft', screenplay: screenplayFixture },
+          })
+        ).json(),
+      ).toEqual({ id: 'ecf1118c-3a2e-4656-84e6-fce75c461710', version: 1 });
+      expect(
+        (
+          await app.inject({
+            method: 'GET',
+            url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
+            headers,
+          })
+        ).json(),
+      ).toEqual({
+        id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
+        projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+        title: 'Draft',
+        version: 1,
+        screenplay: screenplayFixture,
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
   it('validates canonical autosave input and returns optimistic conflicts', async () => {
     const app = await buildApp({ auth, projects: store });
     try {
@@ -335,6 +420,26 @@ describe('persisted project API', () => {
         url: '/api/projects',
         headers: { 'content-type': 'application/json' },
         payload: '{not valid json',
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({ error: 'Invalid request' });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 400 with the generic body, not 500, when a ZodError from @finaler-draft/screenplay reaches the handler', async () => {
+    // Regression guard for the error handler's `error instanceof z.ZodError` branch. The
+    // screenplay's own `screenplaySchema.parse()` throws a ZodError constructed by
+    // @finaler-draft/screenplay's zod import; this proves that error is still recognized here
+    // and mapped to 400, not a 500, now that the string-name fallback has been removed.
+    const app = await buildApp({ auth, projects: store });
+    try {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
+        headers: { cookie: 'session=test' },
+        payload: { expectedVersion: 1, screenplay: { schemaVersion: 1 } },
       });
       expect(response.statusCode).toBe(400);
       expect(response.json()).toEqual({ error: 'Invalid request' });

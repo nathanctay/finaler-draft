@@ -18,12 +18,14 @@
     "@finaler-draft/config": "workspace:*",
     "@finaler-draft/database": "workspace:*",
     "@finaler-draft/screenplay": "workspace:*",
+    "@finaler-draft/server-config": "workspace:*",
     "fastify": "5.5.0",
     "@better-auth/drizzle-adapter": "1.6.25",
     "better-auth": "1.6.25",
     "drizzle-orm": "0.45.2",
+    "fastify-type-provider-zod": "7.0.0",
     "pg": "8.22.0",
-    "zod": "4.1.12"
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/pg": "8.20.0",

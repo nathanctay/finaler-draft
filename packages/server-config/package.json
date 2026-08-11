@@ -1,5 +1,5 @@
 {
-  "name": "@finaler-draft/config",
+  "name": "@finaler-draft/server-config",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -14,6 +14,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "vitest": "3.2.4",

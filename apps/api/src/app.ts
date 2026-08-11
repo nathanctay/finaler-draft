@@ -1,13 +1,19 @@
 import fastifyStatic from '@fastify/static';
+import { screenplaySchema } from '@finaler-draft/screenplay';
 import Fastify from 'fastify';
 import { fromNodeHeaders } from 'better-auth/node';
+import {
+  type ZodTypeProvider,
+  serializerCompiler,
+  validatorCompiler,
+} from 'fastify-type-provider-zod';
 import { z } from 'zod';
 import {
   ForbiddenError,
   type ProjectStore,
   createProjectInput,
-  parseCreateScreenplayInput,
-  parseUpdateScreenplayInput,
+  createScreenplayInput,
+  updateScreenplayInput,
 } from './projects.js';
 
 export interface AuthPort {
@@ -26,6 +32,45 @@ export interface BuildAppOptions {
 const idParam = z.object({ id: z.string().uuid() });
 export const MAX_SCREENPLAY_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
 
+// Success response schemas mirror the ProjectStore interface's return types field for field.
+// Declaring a schema for a shape whose fields don't match the real return value would silently
+// strip fields (or throw a 500 on mismatch), so each one is a direct mirror of its ProjectStore
+// method's return type rather than a hand-written guess. The nested `screenplay` field reuses the
+// exact `screenplaySchema` that already validated the same data on write, so re-validating it
+// here on the way out cannot reject or strip anything that wasn't already rejected before it
+// reached the database.
+//
+// Every route below also lists its error status codes with `errorResponseSchema`, even though
+// their bodies were never schema-validated before this refactor. That is not optional: once a
+// route declares any `response` schema, Fastify's typed reply narrows `.code()` to only the
+// status codes present in that schema, so a route that both succeeds and fails needs every status
+// code it sends listed, not just the success one. `errorResponseSchema` matches the existing
+// `{ error: string }` bodies exactly, so this changes nothing observable — it only makes the
+// handler's existing error replies type-checked, too.
+const errorResponseSchema = z.object({ error: z.string() });
+const projectListItemSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  updatedAt: z.string(),
+  role: z.string(),
+});
+const createProjectResponseSchema = z.object({ id: z.string(), title: z.string() });
+const screenplayListItemSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  version: z.number(),
+  updatedAt: z.string(),
+});
+const createScreenplayResponseSchema = z.object({ id: z.string(), version: z.number() });
+const screenplayResponseSchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  title: z.string(),
+  version: z.number(),
+  screenplay: screenplaySchema,
+});
+const updateScreenplayResponseSchema = z.object({ version: z.number() });
+
 export async function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
     bodyLimit: MAX_SCREENPLAY_REQUEST_BODY_BYTES,
@@ -34,10 +79,19 @@ export async function buildApp(options: BuildAppOptions = {}) {
       redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers.set-cookie'],
     },
   });
+  app.setValidatorCompiler(validatorCompiler);
+  app.setSerializerCompiler(serializerCompiler);
+  const typedApp = app.withTypeProvider<ZodTypeProvider>();
   app.setErrorHandler((error, request, reply) => {
     if (error.statusCode === 413) return reply.code(413).send({ error: 'Request too large' });
-    if (error instanceof z.ZodError || (error instanceof Error && error.name === 'ZodError'))
-      return reply.code(400).send({ error: 'Invalid request' });
+    // The whole workspace resolves a single zod v4 install (verified via `pnpm prune` and the
+    // lockfile: apps/api and @finaler-draft/screenplay both depend on the identical pinned
+    // version, and pnpm dedupes them to one copy in the store), so `instanceof` reliably
+    // recognizes a ZodError raised from either package's `.parse()` calls. A prior string-based
+    // `error.name === 'ZodError'` fallback existed only to bridge two distinct ZodError classes
+    // from two different zod majors coexisting in one process; that hazard no longer exists, so
+    // the fallback was removed rather than kept as unexplained defense in depth.
+    if (error instanceof z.ZodError) return reply.code(400).send({ error: 'Invalid request' });
     if (error.statusCode !== undefined && error.statusCode >= 400 && error.statusCode < 500)
       return reply.code(error.statusCode).send({ error: 'Invalid request' });
     request.log.error(
@@ -46,7 +100,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
     );
     return reply.code(500).send({ error: 'Internal server error' });
   });
-  app.get('/api/health', async () => ({ status: 'ok' as const }));
+  typedApp.get(
+    '/api/health',
+    { schema: { response: { 200: z.object({ status: z.literal('ok') }) } } },
+    async () => ({ status: 'ok' as const }),
+  );
 
   if (options.auth) {
     app.route({
@@ -77,67 +135,115 @@ export async function buildApp(options: BuildAppOptions = {}) {
   }
 
   if (options.auth && options.projects) {
-    app.addHook('preHandler', async (request, reply) => {
+    // Runs as `preValidation`, not `preHandler`. Fastify's request lifecycle runs
+    // preValidation -> schema validation -> preHandler -> the route handler, and before this
+    // refactor every id/body check was a manual `.parse()` call inside the handler, i.e. later
+    // than `preHandler`. So an unauthenticated request with a malformed id or body has always
+    // been rejected for authentication first (401), never for validation (400). Declaring
+    // `params`/`body` as route schemas moves validation ahead of `preHandler`; keeping this check
+    // in `preValidation` (ahead of validation too) is what keeps that precedence, and that
+    // precedence, byte-identical to before.
+    app.addHook('preValidation', async (request, reply) => {
       if (!request.url.startsWith('/api/projects') && !request.url.startsWith('/api/screenplays'))
         return;
       const actorId = await options.auth!.getActorId(fromNodeHeaders(request.headers));
       if (!actorId) return reply.code(401).send({ error: 'Authentication required' });
       request.actorId = actorId;
     });
-    app.get('/api/projects', async (request) => options.projects!.listProjects(request.actorId!));
-    app.post('/api/projects', async (request, reply) =>
-      reply
-        .code(201)
-        .send(
-          await options.projects!.createProject(
-            request.actorId!,
-            createProjectInput.parse(request.body).title,
-          ),
-        ),
+    typedApp.get(
+      '/api/projects',
+      { schema: { response: { 200: z.array(projectListItemSchema) } } },
+      async (request) => options.projects!.listProjects(request.actorId!),
     );
-    app.get('/api/projects/:id/screenplays', async (request) =>
-      options.projects!.listScreenplays(request.actorId!, idParam.parse(request.params).id),
-    );
-    app.post('/api/projects/:id/screenplays', async (request, reply) => {
-      try {
-        return reply
+    typedApp.post(
+      '/api/projects',
+      { schema: { body: createProjectInput, response: { 201: createProjectResponseSchema } } },
+      async (request, reply) =>
+        reply
           .code(201)
-          .send(
-            await options.projects!.createScreenplay(
-              request.actorId!,
-              idParam.parse(request.params).id,
-              parseCreateScreenplayInput(request.body),
-            ),
-          );
-      } catch (error) {
-        if (error instanceof ForbiddenError)
-          return reply.code(403).send({ error: 'Project editor access required' });
-        throw error;
-      }
-    });
-    app.get('/api/screenplays/:id', async (request, reply) => {
-      const screenplay = await options.projects!.getScreenplay(
-        request.actorId!,
-        idParam.parse(request.params).id,
-      );
-      if (screenplay === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
-      return screenplay;
-    });
-    app.put('/api/screenplays/:id', async (request, reply) => {
-      const result = await options.projects!.updateScreenplay(
-        request.actorId!,
-        idParam.parse(request.params).id,
-        parseUpdateScreenplayInput(request.body),
-      );
-      if (result === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
-      if (result === 'forbidden')
-        return reply.code(403).send({ error: 'Screenplay editor access required' });
-      if (result === 'invalid')
-        return reply.code(400).send({ error: 'Screenplay identity must match request path' });
-      if (result === 'conflict')
-        return reply.code(409).send({ error: 'Screenplay changed; reload before saving' });
-      return result;
-    });
+          .send(await options.projects!.createProject(request.actorId!, request.body.title)),
+    );
+    typedApp.get(
+      '/api/projects/:id/screenplays',
+      { schema: { params: idParam, response: { 200: z.array(screenplayListItemSchema) } } },
+      async (request) => options.projects!.listScreenplays(request.actorId!, request.params.id),
+    );
+    typedApp.post(
+      '/api/projects/:id/screenplays',
+      {
+        schema: {
+          params: idParam,
+          body: createScreenplayInput,
+          response: { 201: createScreenplayResponseSchema, 403: errorResponseSchema },
+        },
+      },
+      async (request, reply) => {
+        try {
+          return reply
+            .code(201)
+            .send(
+              await options.projects!.createScreenplay(
+                request.actorId!,
+                request.params.id,
+                request.body,
+              ),
+            );
+        } catch (error) {
+          if (error instanceof ForbiddenError)
+            return reply.code(403).send({ error: 'Project editor access required' });
+          throw error;
+        }
+      },
+    );
+    typedApp.get(
+      '/api/screenplays/:id',
+      {
+        schema: {
+          params: idParam,
+          response: { 200: screenplayResponseSchema, 404: errorResponseSchema },
+        },
+      },
+      async (request, reply) => {
+        const screenplay = await options.projects!.getScreenplay(
+          request.actorId!,
+          request.params.id,
+        );
+        if (screenplay === 'missing')
+          return reply.code(404).send({ error: 'Screenplay not found' });
+        return screenplay;
+      },
+    );
+    typedApp.put(
+      '/api/screenplays/:id',
+      {
+        schema: {
+          params: idParam,
+          body: updateScreenplayInput,
+          response: {
+            200: updateScreenplayResponseSchema,
+            400: errorResponseSchema,
+            403: errorResponseSchema,
+            404: errorResponseSchema,
+            409: errorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        const result = await options.projects!.updateScreenplay(
+          request.actorId!,
+          request.params.id,
+          request.body,
+        );
+        if (result === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
+        if (result === 'forbidden')
+          return reply.code(403).send({ error: 'Screenplay editor access required' });
+        if (result === 'invalid')
+          return reply.code(400).send({ error: 'Screenplay identity must match request path' });
+        if (result === 'conflict')
+          return reply.code(409).send({ error: 'Screenplay changed; reload before saving' });
+        return result;
+      },
+    );
   }
   if (options.serveClient) {
     await app.register(fastifyStatic, {

@@ -3,8 +3,8 @@ import { minimalScreenplayFixture, screenplayFixture } from '@finaler-draft/scre
 import {
   ForbiddenError,
   createPostgresProjectStore,
-  parseCreateScreenplayInput,
-  parseUpdateScreenplayInput,
+  createScreenplayInput,
+  updateScreenplayInput,
 } from './projects.js';
 
 const actorId = 'actor-1';
@@ -13,25 +13,25 @@ const screenplayId = 'ecf1118c-3a2e-4656-84e6-fce75c461710';
 
 describe('project persistence validation', () => {
   it('accepts canonical screenplay input and rejects malformed requests', () => {
-    expect(parseCreateScreenplayInput({ title: ' Draft ', screenplay: screenplayFixture })).toEqual(
-      {
-        title: 'Draft',
-        screenplay: screenplayFixture,
-      },
-    );
     expect(
-      parseUpdateScreenplayInput({ expectedVersion: 1, screenplay: minimalScreenplayFixture }),
+      createScreenplayInput.parse({ title: ' Draft ', screenplay: screenplayFixture }),
+    ).toEqual({
+      title: 'Draft',
+      screenplay: screenplayFixture,
+    });
+    expect(
+      updateScreenplayInput.parse({ expectedVersion: 1, screenplay: minimalScreenplayFixture }),
     ).toEqual({
       expectedVersion: 1,
       screenplay: minimalScreenplayFixture,
     });
     expect(() =>
-      parseCreateScreenplayInput({ title: '', screenplay: screenplayFixture }),
+      createScreenplayInput.parse({ title: '', screenplay: screenplayFixture }),
     ).toThrow();
     expect(() =>
-      parseUpdateScreenplayInput({ expectedVersion: 0, screenplay: screenplayFixture }),
+      updateScreenplayInput.parse({ expectedVersion: 0, screenplay: screenplayFixture }),
     ).toThrow();
-    expect(() => parseUpdateScreenplayInput({ expectedVersion: 1, screenplay: {} })).toThrow();
+    expect(() => updateScreenplayInput.parse({ expectedVersion: 1, screenplay: {} })).toThrow();
   });
 });
 

@@ -1,50 +1,8 @@
-import { z } from 'zod';
-
+/**
+ * Shared policy the browser legitimately needs. Server-only environment parsing lives in
+ * `@finaler-draft/server-config` instead, so the browser bundle has no import path to the shape
+ * of the server's environment, even by accident.
+ */
 export const PASSWORD_MIN_LENGTH = 12;
 export const PASSWORD_MAX_LENGTH = 128;
 export const PASSWORD_REQUIREMENTS_MESSAGE = `Password must be ${PASSWORD_MIN_LENGTH}–${PASSWORD_MAX_LENGTH} characters.`;
-
-const serverEnvironment = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.coerce.number().int().min(1).max(65535).default(3001),
-  DATABASE_URL: z.string().url().optional(),
-  BETTER_AUTH_SECRET: z.string().min(32).optional(),
-  BETTER_AUTH_URL: z.string().url().optional(),
-  CLIENT_ORIGIN: z.string().url().optional(),
-});
-
-export type ServerEnvironment = z.infer<typeof serverEnvironment>;
-
-export function parseServerEnvironment(
-  input: Record<string, string | undefined>,
-): ServerEnvironment {
-  return serverEnvironment.parse(input);
-}
-
-export function requirePersistenceEnvironment(environment: ServerEnvironment) {
-  const persistence = z
-    .object({
-      DATABASE_URL: z.string().url(),
-      BETTER_AUTH_SECRET: z.string().min(32),
-      BETTER_AUTH_URL: z.string().url(),
-      CLIENT_ORIGIN: z.string().url().optional(),
-    })
-    .parse(environment);
-  if (
-    environment.NODE_ENV === 'production' &&
-    new URL(persistence.BETTER_AUTH_URL).protocol !== 'https:'
-  ) {
-    throw new Error('BETTER_AUTH_URL must use HTTPS in production.');
-  }
-  return persistence;
-}
-
-export function findPersistenceEnvironment(environment: ServerEnvironment) {
-  const values = [
-    environment.DATABASE_URL,
-    environment.BETTER_AUTH_SECRET,
-    environment.BETTER_AUTH_URL,
-  ];
-  if (values.every((value) => value === undefined)) return undefined;
-  return requirePersistenceEnvironment(environment);
-}

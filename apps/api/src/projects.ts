@@ -6,14 +6,18 @@ import { z } from 'zod';
 
 const projectTitle = z.string().trim().min(1).max(200);
 export const createProjectInput = z.object({ title: projectTitle }).strict();
+// The nested `screenplay` field is the canonical screenplaySchema itself, not z.unknown(), so
+// this schema is a complete, directly usable Fastify body schema: declaring it as a route's
+// `body` validates title and screenplay together in one pass, with no separate manual
+// `screenplaySchema.parse()` call needed in the handler.
 export const createScreenplayInput = z
-  .object({ title: projectTitle, screenplay: z.unknown() })
+  .object({ title: projectTitle, screenplay: screenplaySchema })
   .strict();
 export const updateScreenplayInput = z
-  .object({ expectedVersion: z.number().int().positive(), screenplay: z.unknown() })
+  .object({ expectedVersion: z.number().int().positive(), screenplay: screenplaySchema })
   .strict();
-type CreateScreenplayInput = { title: string; screenplay: Screenplay };
-type UpdateScreenplayInput = { expectedVersion: number; screenplay: Screenplay };
+export type CreateScreenplayInput = z.infer<typeof createScreenplayInput>;
+export type UpdateScreenplayInput = z.infer<typeof updateScreenplayInput>;
 
 export interface ProjectStore {
   listProjects(
@@ -41,19 +45,6 @@ export interface ProjectStore {
     screenplayId: string,
     input: UpdateScreenplayInput,
   ): Promise<{ version: number } | 'forbidden' | 'conflict' | 'invalid' | 'missing'>;
-}
-
-export function parseCreateScreenplayInput(input: unknown): CreateScreenplayInput {
-  const parsed = createScreenplayInput.parse(input);
-  return { title: parsed.title, screenplay: screenplaySchema.parse(parsed.screenplay) };
-}
-
-export function parseUpdateScreenplayInput(input: unknown): UpdateScreenplayInput {
-  const parsed = updateScreenplayInput.parse(input);
-  return {
-    expectedVersion: parsed.expectedVersion,
-    screenplay: screenplaySchema.parse(parsed.screenplay),
-  };
 }
 
 function screenplayHash(screenplay: Screenplay) {
