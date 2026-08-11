@@ -560,28 +560,44 @@ Do not build per-page containers. Content stays one contiguous flow, which is wh
 - Every page block occupies exactly the page height. At each break, a spacer absorbs the unused remainder of the page, plus the inter-page gap, plus the next page's top margin. Its height is `PAGE_HEIGHT - (TOP_MARGIN + lineCount * LINE_HEIGHT) + GAP + TOP_MARGIN`, computable directly from the `lineCount` the layout model exposes.
 - Because every page block is then a fixed height, page backgrounds can be painted by a repeating gradient on the container rather than by any per-page element.
 - In ProseMirror the spacer is a **widget decoration**: nothing enters the document, so the document remains contiguous and its positions are unaffected.
+- A widget decoration's **key must encode everything the widget draws**, not merely which page it introduces. ProseMirror treats equal keys as the same widget and reuses the existing DOM node without re-rendering it. Keyed on the page number alone, a break whose spacer height changed — which happens on every edit that changes the outgoing page's fill without moving a block across the boundary — kept its stale spacer, leaving the incoming page's frame and number a line or more out of position until some later edit happened to change the key. The model was correct throughout; only the rendering was stale.
+- A break that falls between two blocks must be **anchored after the block node, not inside it**. A widget anchored within a text block renders as that block's child, and ProseMirror appends an `img.ProseMirror-separator` after a widget that ends a text block. That image is an inline box, so it generates a line box: every such break silently added one line the layout engine knew nothing about, and the error accumulated page over page. Mid-block breaks — a dialogue split — have no block boundary to sit at and stay anchored inside, where following text prevents the separator.
 
 This was verified in Chrome before the work was scoped. Across three pages, including one broken early at 51 lines, the first line of every page landed at exactly 1.0 in from its own page top. The `(MORE)` and `CONT'D` lines are widget decorations by the same mechanism, which is what makes them derived and non-editable rather than document content.
 
-#### Pagination is too expensive to run per keystroke
+#### Pagination cost and recompute strategy
 
-Measured on the completed layout package, in Node:
+Pagination was originally measured at roughly 0.038 ms per block — about 100 ms for a feature-length screenplay — and the conclusion drawn was that it could never run per keystroke. That figure was almost entirely `Intl.Segmenter` overhead, not the line arithmetic. Grapheme counting now takes an ASCII fast path: every code point in `\x20-\x7E` is its own grapheme cluster, so its count is simply the string length, and anything outside that range still goes through the segmenter unchanged. The range deliberately excludes control characters, so `\r\n` — the one ASCII sequence forming a single cluster from two code units — cannot reach the fast path. Equivalence was verified against the segmenter across 12,288 code points plus combining marks, ZWJ sequences and regional indicators.
 
-| Blocks | Pages | Time   |
-| ------ | ----- | ------ |
-| 500    | 22    | 18 ms  |
-| 2,000  | 86    | 77 ms  |
-| 5,000  | 215   | 191 ms |
+Measured in Node after that change:
 
-Cost is linear at roughly 0.038 ms per block. A feature-length screenplay of about 110 pages is around 2,500 blocks, so a full repagination costs roughly 100 ms. Running that synchronously on every keystroke would consume most of a typing frame budget and produce a visible hitch on every character.
+| Blocks | Pages | Time    |
+| ------ | ----- | ------- |
+| ~570   | 25    | 1.52 ms |
+| ~2,270 | 100   | 5.39 ms |
+| ~6,800 | 300   | 15.4 ms |
 
-The rendering slice must address this, and it is a design constraint rather than an optimisation to defer:
+Cost is still linear, now at roughly 0.0023 ms per block. A feature-length screenplay repaginates in about 5 ms rather than 100 ms.
 
-- **Repaginate incrementally** from the page containing the edit rather than from the start. Pagination is sequential and deterministic, so pages before the edit are unaffected. This may require extending the layout package's API to resume from a known page boundary; that extension is in scope for the rendering slice and is not a defect in the layout package, which is correct as built.
-- **Debounce** repagination so it runs on a typing pause rather than per character.
-- Moving the work to a worker removes the hitch but not the cost, and adds an asynchronous boundary to a currently synchronous render path. Prefer incremental recomputation first.
+**Repagination is coalesced to the next animation frame, not debounced to a typing pause.** At most one recompute is ever queued, a burst of edits within one frame collapses to one recompute, and the recompute never runs synchronously inside the keystroke that triggered it. The debounce it replaced had a defect worse than its cost: for the length of its delay an already-reflowed document was rendered against a stale break computation, which was directly visible as a page frame and its number jumping by a line and snapping back on every edit near a boundary. Frame coalescing closes that window before the next paint.
 
-Editing near the top of a long screenplay is the worst case and still repaginates most of the document. Measure it before choosing a strategy.
+Measured end to end in real Chrome, driving genuine per-character key events at a realistic 120 WPM:
+
+| Document     | Page breaks | Median keystroke-to-paint | Frames over 16.7 ms |
+| ------------ | ----------- | ------------------------- | ------------------- |
+| 60 blocks    | 2           | 24 ms                     | 0%                  |
+| 400 blocks   | 14          | 24 ms                     | 0%                  |
+| 1,200 blocks | 42          | 32 ms                     | 3%                  |
+| 2,700 blocks | 96          | 48 ms                     | 15%                 |
+
+Keystroke-to-paint is measured with the Event Timing API (the same mechanism as INP), which rounds to 8 ms buckets. Two results are worth recording because both are counterintuitive:
+
+- **Latency does not depend on typing speed.** Median keystroke-to-paint is 48 ms at feature length whether typing at 120, 200, or an artificial 1,200 WPM. Only the share of frames over budget scales with cadence (15%, 24%, 49%). Benchmarks that type unrealistically fast overstate jank and say nothing extra about latency.
+- **Latency depends on document size, and pagination is only about half of it.** There is a ~24 ms floor from the stack itself at any size. Feature length adds another ~24 ms, of which the recompute accounts for roughly 10 ms (phase breakdown at 100 pages: project 2.3 ms, paginate 5.2 ms, decorate 3.1 ms). The remainder is the browser's own style, layout and paint across a ~2,700-element DOM.
+
+48 ms sits well inside the "good" band for INP (the threshold is 200 ms) and is competitive with mainstream browser-based editors, so this is accepted as shipped rather than optimised further.
+
+The consequence for future work is that **incremental repagination is no longer the obvious next lever**. It would remove roughly 10 ms of the 24 ms that feature length adds, taking median keystroke-to-paint from about 48 ms to about 38 ms — real, but not transformative. The other half is DOM size, and the only fix for that is virtualising the rendered document, which conflicts directly with the single contiguous flow that keeps selection, cursor movement and undo working across page boundaries. Neither is worth doing on current evidence. Revisit only against a measured number, not an assumption — that is what the original 100 ms figure turned out to be.
 
 ### Zoom controls
 
