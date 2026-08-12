@@ -810,22 +810,22 @@ No agent may silently broaden scope, replace this plan, create a partial product
 
 ## Immediate next action
 
-Landed since the original audit of `main` at `1bce6d3`: the CI gates are trustworthy (`typecheck` builds leaf packages, `format:check` passes, sign-out and the client-error handler are fixed), the colour token system replaced the ad hoc literals in `styles.css`, sign-in and sign-up carry descriptive errors and a confirm-password field, and the pagination work is complete — the pure layout package, its rendering as discrete pages, and the latency work described in "Pagination cost and recompute strategy". Gate results recorded in `progress/` entries from those branches can be relied on.
+Landed since the original audit of `main` at `1bce6d3`: the CI gates are trustworthy (`typecheck` builds leaf packages, `format:check` passes, sign-out and the client-error handler are fixed), the colour token system replaced the ad hoc literals in `styles.css`, sign-in and sign-up carry descriptive errors and a confirm-password field, and the pagination work is complete — the pure layout package, its rendering as discrete pages, and the latency work described in "Pagination cost and recompute strategy". `chore/platform-hygiene` (single Zod major, split server environment parsing, typed Fastify route contract) and `feature/project-screenplay-crud` — both the rename/soft-delete/restore API and, as of `delete-restore-ui`, its interface (the overflow menu, inline undo, the Deleted page, and the account menu it lives behind) — are also merged. Gate results recorded in `progress/` entries from those branches can be relied on.
 
 The remaining Phase 1 order is:
 
-1. `chore/platform-hygiene` — unify on a single Zod major across the workspace (`apps/api` is on 4.1.12, every other package on 3.24.1), split server environment parsing out of the shared policy package, and adopt a typed Fastify route contract.
-2. `feature/project-screenplay-crud` — rename and soft-delete for projects and screenplays.
-3. Title page, scene numbers, and document settings. Document settings are the load-bearing item of the three, because pagination reads them; the dialog may land late but the defaults and their storage cannot.
-4. FDX import/export, PDF export painted from the layout package, and `.docx` export. The PDF worker likely needs its own Dockerfile for headless Chromium.
-5. SmartType-style contextual completion.
-6. Zoom gestures, presets, and fit-page/fit-width. Deliberately last.
+1. Title page, scene numbers, and document settings. Document settings are the load-bearing item of the three, because pagination reads them; the dialog may land late but the defaults and their storage cannot.
+2. FDX import/export, PDF export painted from the layout package, and `.docx` export. The PDF worker likely needs its own Dockerfile for headless Chromium.
+3. SmartType-style contextual completion.
+4. Zoom gestures, presets, and fit-page/fit-width. Deliberately last.
 
 Three Phase 1 items sit outside that sequence and are easy to lose track of because nothing else depends on them:
 
 - The rest of auth hardening: rate limiting, explicit cookie attributes, and email verification with password reset. The email half is blocked on an email provider being configured, not on engineering.
-- Character-extension stripping in the Navigator, so `MARA` and `MARA (V.O.)` are one character.
-- The canonical round-trip test asserting that screenplay-to-editor projection and back is the identity function. It becomes load-bearing the moment FDX import exists, so it should land no later than item 4.
+- Character-extension stripping in the Navigator, so `MARA` and `MARA (V.O.)` are one character. The Navigator's Characters tab is itself still inert (see "Character names and extensions" above) — that basic list-and-select functionality is a prerequisite this item was implicitly assuming, not a separate task to schedule later.
+- The canonical round-trip test asserting that screenplay-to-editor projection and back is the identity function. It becomes load-bearing the moment FDX import exists, so it should land no later than item 2.
+
+Also outside that sequence, surfaced by the `delete-restore-ui` audits and not yet scheduled: `Cache-Control: private, no-store` on every authenticated API response (`plan.md` already requires this explicitly, citing the March 2026 Railway CDN incident — it is not implemented) and `@fastify/static`'s missing `maxAge` for immutable hashed-asset caching; `Origin`/CSRF validation on state-changing routes, since `SameSite=Lax` alone does not cover same-site sibling-origin attacks; a real database-readiness check ahead of Railway's health probe, which currently reports healthy regardless of migration or connection state; and the editor's missing way back to the writing desk (see "Application shell" above). None of these block Phase 1 functionally, but each is cheap to fix and expensive to rediscover.
 
 Yjs may run alongside any of the above. Note that it removes work rather than adding it: the version column, the whole-document `PUT`, and the terminal 409 handling all come out when the Yjs document becomes the source of truth, so avoid further investment in conflict-recovery interface work. Billing follows the commercial decisions recorded in the billing section. Private documents must not be represented as launch-ready until the launch-readiness list is complete.
 
