@@ -494,6 +494,8 @@ A character element may carry an extension on the same line, such as `MARA (V.O.
 
 **The Navigator's character list strips extensions before grouping.** `MARA`, `MARA (V.O.)`, and `MARA (O.S.)` are one character, not three. Strip the full conventional set — `(V.O.)`, `(O.S.)`, `(O.C.)`, `(CONT'D)` — and treat any trailing parenthetical on a character line as an extension rather than matching a fixed list. Note the trailing period in `(V.O.)` and `(O.S.)`; accept the period-less spellings on import but normalise on output.
 
+**Prerequisite, currently missing:** the Navigator's Characters tab (`App.tsx`'s `.panel-tabs`) is inert markup today — a plain `<span>Characters</span>` beside the working `Scenes` tab, with no click handler, no derived character list, and no click-to-navigate. The extension-stripping rule above presumes a working character list to group; that list does not exist yet. Build the tab itself (character list derived from the shared schema, selectable like a scene, keyboard-operable like the rest of the Navigator) before or alongside the stripping logic, not as an assumed given.
+
 ### Title page
 
 A new screenplay gets a dedicated title page by default, containing placeholder text blocks:
@@ -529,6 +531,12 @@ The shell is fixed to the viewport. **The manuscript is the only thing that scro
 - The status bar, if retained, is always visible at the bottom.
 - The editor region scrolls; the shell around it does not move.
 - Navigator and Inspector scroll their own content independently, and overlay the page at narrow widths.
+- **The editor has no way back to the writing desk.** The title bar's brand mark (`App.tsx`'s
+  `.brand`, the "F" mark plus "Finaler Draft") is inert today — plain text, not a link. Once
+  inside a screenplay, a writer's only way back to `/projects` is the browser back button. Give
+  the editor a real route back: either make the brand mark a link to `/projects` (the pattern
+  already used by the project's screenplay list, whose header is a plain `Projects` link) or add
+  an explicit back control. Whichever is chosen needs a real accessible name, not decoration.
 
 `.application` currently uses `min-height: 100vh`, which lets the grid grow past the viewport instead of constraining it. Measured at an 800 px viewport, the shell computes to 1290 px tall and the status bar's bottom edge lands 490 px below the fold, so a writer has to scroll the whole application to discover it. The editor region is not scrolling at all in that state — its `scrollHeight` equals its `clientHeight`; the row simply expands to fit the 1144 px page. A fixed viewport height is what makes `minmax(0, 1fr)` constrain the row and hand the scrolling to the editor where it belongs.
 
