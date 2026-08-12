@@ -915,6 +915,171 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     });
     expect(createAttempt.statusCode).toBe(403);
   });
+
+  it('lists deleted items scoped to who can actually restore them, and excludes a screenplay whose project is also deleted', async () => {
+    const owner = await signUp('deleted-list-owner@example.test');
+    const editor = await signUp('deleted-list-editor@example.test');
+    const editorId = await userIdFor('deleted-list-editor@example.test');
+    const reviewer = await signUp('deleted-list-reviewer@example.test');
+    const reviewerId = await userIdFor('deleted-list-reviewer@example.test');
+
+    const project = await app!.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { cookie: owner.cookie },
+      payload: { title: 'Restorable project' },
+    });
+    const projectId = project.json<{ id: string }>().id;
+    await pool!.query(
+      "insert into project_members (project_id, user_id, role) values ($1, $2, 'editor'), ($1, $3, 'reviewer')",
+      [projectId, editorId, reviewerId],
+    );
+    const screenplay = await app!.inject({
+      method: 'POST',
+      url: `/api/projects/${projectId}/screenplays`,
+      headers: { cookie: owner.cookie },
+      payload: { title: 'Restorable screenplay', screenplay: screenplayFixture },
+    });
+    const screenplayId = screenplay.json<{ id: string }>().id;
+
+    // Deleted independently of its project, before the project is ever touched -- the case a
+    // screenplay-under-a-deleted-project listing must still exclude, distinct from an orphaned
+    // screenplay whose own `deleted_at` was never written.
+    const cascadeProject = await app!.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { cookie: owner.cookie },
+      payload: { title: 'Cascade project' },
+    });
+    const cascadeProjectId = cascadeProject.json<{ id: string }>().id;
+    const cascadeScreenplay = await app!.inject({
+      method: 'POST',
+      url: `/api/projects/${cascadeProjectId}/screenplays`,
+      headers: { cookie: owner.cookie },
+      payload: { title: 'Independently deleted then orphaned', screenplay: screenplayFixture },
+    });
+    const cascadeScreenplayId = cascadeScreenplay.json<{ id: string }>().id;
+    await app!.inject({
+      method: 'DELETE',
+      url: `/api/screenplays/${cascadeScreenplayId}`,
+      headers: { cookie: owner.cookie },
+    });
+    await app!.inject({
+      method: 'DELETE',
+      url: `/api/projects/${cascadeProjectId}`,
+      headers: { cookie: owner.cookie },
+    });
+
+    // Delete the screenplay before the project, exactly as with the cascade case above: once a
+    // project is deleted, `deleteScreenplay` can no longer reach a screenplay under it at all
+    // (lockScreenplayRow requires an active project unconditionally), so deleting in the other
+    // order would silently leave this screenplay's own `deleted_at` unset and defeat the point of
+    // the test.
+    const independentDelete = await app!.inject({
+      method: 'DELETE',
+      url: `/api/screenplays/${screenplayId}`,
+      headers: { cookie: owner.cookie },
+    });
+    expect(independentDelete.statusCode).toBe(200);
+    await app!.inject({
+      method: 'DELETE',
+      url: `/api/projects/${projectId}`,
+      headers: { cookie: owner.cookie },
+    });
+
+    // `screenplayId` is now independently deleted under a project that is itself also deleted --
+    // the same cascade shape as `cascadeScreenplayId`: both must be excluded from the
+    // deleted-screenplays list, and both restores must be refused until their project is restored
+    // first.
+    const ownerListed = await app!.inject({
+      method: 'GET',
+      url: '/api/deleted',
+      headers: { cookie: owner.cookie },
+    });
+    expect(ownerListed.statusCode).toBe(200);
+    const ownerBody = ownerListed.json<{
+      projects: Array<{ id: string; title: string }>;
+      screenplays: Array<{ id: string; title: string; projectId: string; projectTitle: string }>;
+    }>();
+    expect(ownerBody.projects.map((p) => p.id)).toEqual(
+      expect.arrayContaining([projectId, cascadeProjectId]),
+    );
+    // Both screenplays are excluded: their parent project is deleted, so neither is restorable
+    // by id yet. This is the assertion that fails if the store's `p.deleted_at is null` predicate
+    // on the screenplays query is ever removed.
+    expect(ownerBody.screenplays.map((s) => s.id)).not.toContain(screenplayId);
+    expect(ownerBody.screenplays.map((s) => s.id)).not.toContain(cascadeScreenplayId);
+
+    // Restore the first project only, leaving its screenplay independently deleted. Now that
+    // screenplay becomes genuinely listable and restorable -- the project no longer blocks it --
+    // while the cascade project (and its screenplay) remain excluded.
+    await app!.inject({
+      method: 'POST',
+      url: `/api/projects/${projectId}/restore`,
+      headers: { cookie: owner.cookie },
+    });
+    const afterProjectRestore = await app!.inject({
+      method: 'GET',
+      url: '/api/deleted',
+      headers: { cookie: owner.cookie },
+    });
+    const afterRestoreBody = afterProjectRestore.json<{
+      projects: Array<{ id: string }>;
+      screenplays: Array<{ id: string; projectId: string; projectTitle: string }>;
+    }>();
+    expect(afterRestoreBody.projects.map((p) => p.id)).not.toContain(projectId);
+    expect(afterRestoreBody.projects.map((p) => p.id)).toContain(cascadeProjectId);
+    const restoredScreenplayEntry = afterRestoreBody.screenplays.find((s) => s.id === screenplayId);
+    expect(restoredScreenplayEntry).toMatchObject({
+      id: screenplayId,
+      projectId,
+      projectTitle: 'Restorable project',
+    });
+    expect(afterRestoreBody.screenplays.map((s) => s.id)).not.toContain(cascadeScreenplayId);
+
+    // Scoping, checked from the editor's own session while `screenplayId` is still genuinely
+    // deleted -- not after it has already been restored, which would make "the editor sees
+    // nothing" trivially true regardless of whether the scoping rule actually works. The editor
+    // must see exactly the one screenplay they are eligible to restore, and their listing of
+    // deleted projects must stay empty (they are not `projectId`'s owner, and not a member of
+    // `cascadeProjectId` at all).
+    const editorListedBeforeRestore = await app!.inject({
+      method: 'GET',
+      url: '/api/deleted',
+      headers: { cookie: editor.cookie },
+    });
+    const editorBodyBeforeRestore = editorListedBeforeRestore.json<{
+      projects: unknown[];
+      screenplays: Array<{ id: string }>;
+    }>();
+    expect(editorBodyBeforeRestore.projects).toEqual([]);
+    expect(editorBodyBeforeRestore.screenplays.map((s) => s.id)).toEqual([screenplayId]);
+
+    // The editor restores it themselves, proving they can act on what they can see -- the same
+    // "owner or editor" rule restoreScreenplay itself enforces, not just what listDeleted returns.
+    const screenplayRestore = await app!.inject({
+      method: 'POST',
+      url: `/api/screenplays/${screenplayId}/restore`,
+      headers: { cookie: editor.cookie },
+    });
+    expect(screenplayRestore.statusCode).toBe(200);
+
+    // After restoring, the editor's deleted-screenplays list is empty again, and a reviewer --
+    // who can restore neither a project nor a screenplay -- sees nothing at all, at any point.
+    const editorListedAfterRestore = await app!.inject({
+      method: 'GET',
+      url: '/api/deleted',
+      headers: { cookie: editor.cookie },
+    });
+    expect(editorListedAfterRestore.json<{ projects: unknown[] }>().projects).toEqual([]);
+
+    const reviewerListed = await app!.inject({
+      method: 'GET',
+      url: '/api/deleted',
+      headers: { cookie: reviewer.cookie },
+    });
+    expect(reviewerListed.json()).toEqual({ projects: [], screenplays: [] });
+  });
 });
 
 async function signUp(email: string) {

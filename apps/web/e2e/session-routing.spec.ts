@@ -27,8 +27,9 @@ test('signed-in visitors are kept off /sign-in, and signing out reverses that', 
   await page.goto('/sign-in');
   await expect(page).toHaveURL('/projects');
 
-  // Sign out, then attempt /projects directly and land on /sign-in.
-  await page.getByRole('button', { name: 'Sign out' }).click();
+  // Sign out via the account menu, then attempt /projects directly and land on /sign-in.
+  await page.getByRole('button', { name: 'Account menu' }).click();
+  await page.getByRole('menuitem', { name: 'Sign out' }).click();
   await expect(page).toHaveURL('/sign-in');
   await page.goto('/projects');
   await expect(page).toHaveURL('/sign-in');

@@ -42,3 +42,8 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium chromium-headless-shell
       - run: pnpm build
       - run: pnpm test:system
+      # The database-backed browser suite (delete/restore end-to-end, real autosave/conflict
+      # handling, real sign-up) previously only ran manually by whoever happened to invoke
+      # `pnpm test:system:persistence` locally. It carries the strongest delete/restore UI
+      # coverage in the repo and was never wired into CI.
+      - run: TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres pnpm test:system:persistence

@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createFileRoute, Link, redirect, useNavigate } from '@tanstack/react-router';
-import { api } from '../../api.js';
+import { api, type Project } from '../../api.js';
 import { guardSessionUser } from '../../session.js';
+import { DeletedRow } from '../../components/DeletedRow.js';
+import { OverflowMenu } from '../../components/OverflowMenu.js';
 
 export const Route = createFileRoute('/projects/')({
   beforeLoad: async ({ context }) => {
@@ -12,10 +14,62 @@ export const Route = createFileRoute('/projects/')({
   component: ProjectsPage,
 });
 
+/**
+ * A single project row, either its normal Link-plus-menu form or -- once its own delete
+ * mutation has succeeded -- nothing at all: `ProjectsPage` swaps this out for `DeletedRow`
+ * rather than rendering both, so a just-deleted row never keeps a live Link into the project it
+ * no longer has access to, or a menu whose only action (Delete) no longer applies.
+ *
+ * The menu itself only renders for an owner. `deleteProject` is owner-only server-side, so
+ * showing Delete to an editor or reviewer would be a control that always 403s -- the exact
+ * "broken control" class of defect called out for a Restore button that can't succeed. Non-owner
+ * members still get a real, if empty, menu affordance in Rename/Edit's eventual home; there is
+ * nothing else to put there yet, so the menu is simply omitted rather than rendered disabled.
+ */
+function ProjectRow({ onDeleted, project }: { onDeleted: () => void; project: Project }) {
+  const deleteMutation = useMutation({
+    mutationFn: () => api.deleteProject(project.id),
+    onSuccess: onDeleted,
+  });
+  return (
+    <div className="project-row">
+      <Link
+        className="project-row-link"
+        params={{ projectId: project.id }}
+        to="/projects/$projectId"
+      >
+        <strong>{project.title}</strong>
+        <span className="project-row-role">{project.role}</span>
+      </Link>
+      {project.role === 'owner' && (
+        <OverflowMenu
+          items={[{ label: 'Delete', onSelect: () => deleteMutation.mutate() }]}
+          label={`Project actions for ${project.title}`}
+        />
+      )}
+      {deleteMutation.isError && (
+        <p className="field-error" role="alert">
+          Delete failed. Try again.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function ProjectsPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [title, setTitle] = useState('');
+  // id -> title captured at the moment of deletion. Deliberately not cleared by invalidating
+  // the `['projects']` query on delete -- see the module comment on DeletedRow and the scope's
+  // "what happens when the affordance goes away" requirement. It persists until Undo succeeds
+  // (which does invalidate, restoring the row from fresh server data) or this component
+  // unmounts on navigation, whichever comes first; it never auto-dismisses on a timer. A
+  // background refetch cannot make the affordance vanish either: entries here are rendered
+  // regardless of whether the id is still present in `projects.data`, via `orphanedDeletedIds`
+  // below, so an incidental window-focus refetch can never silently drop the only route back to
+  // Undo before the writer chooses to use it or leave.
+  const [deletedProjects, setDeletedProjects] = useState<Record<string, string>>({});
   const projects = useQuery({ queryKey: ['projects'], queryFn: api.projects });
   const create = useMutation({
     mutationFn: () => api.createProject(title),
@@ -33,6 +87,23 @@ function ProjectsPage() {
       return navigate({ to: '/sign-in' });
     },
   });
+
+  function forgetDeleted(projectId: string) {
+    setDeletedProjects((current) =>
+      Object.fromEntries(Object.entries(current).filter(([id]) => id !== projectId)),
+    );
+  }
+
+  function handleRestored(projectId: string) {
+    forgetDeleted(projectId);
+    void queryClient.invalidateQueries({ queryKey: ['projects'] });
+  }
+
+  const liveProjects = projects.data ?? [];
+  const orphanedDeletedIds = Object.keys(deletedProjects).filter(
+    (id) => !liveProjects.some((project) => project.id === id),
+  );
+
   return (
     <main className="project-screen">
       <header className="project-header">
@@ -40,14 +111,14 @@ function ProjectsPage() {
           <span className="brand-mark">F</span>
           <span>Finaler Draft</span>
         </div>
-        <button
-          className="sign-out-button"
-          disabled={signOut.isPending}
-          onClick={() => signOut.mutate()}
-          type="button"
-        >
-          {signOut.isPending ? 'Signing out…' : 'Sign out'}
-        </button>
+        <OverflowMenu
+          items={[
+            { label: 'Deleted items', onSelect: () => void navigate({ to: '/deleted' }) },
+            { label: 'Sign out', onSelect: () => signOut.mutate() },
+          ]}
+          label="Account menu"
+          triggerContent="Account"
+        />
       </header>
       {signOut.isError && (
         <p className="sign-out-error" role="alert">
@@ -81,12 +152,36 @@ function ProjectsPage() {
           <p role="alert">Projects could not be loaded.</p>
         ) : (
           <ul>
-            {(projects.data ?? []).map((project) => (
-              <li key={project.id}>
-                <Link to="/projects/$projectId" params={{ projectId: project.id }}>
-                  <strong>{project.title}</strong>
-                  <span>{project.role}</span>
-                </Link>
+            {liveProjects.map((project) =>
+              deletedProjects[project.id] === undefined ? (
+                <li key={project.id}>
+                  <ProjectRow
+                    onDeleted={() =>
+                      setDeletedProjects((current) => ({
+                        ...current,
+                        [project.id]: project.title,
+                      }))
+                    }
+                    project={project}
+                  />
+                </li>
+              ) : (
+                <li key={project.id}>
+                  <DeletedRow
+                    onRestored={() => handleRestored(project.id)}
+                    restore={() => api.restoreProject(project.id)}
+                    title={deletedProjects[project.id]!}
+                  />
+                </li>
+              ),
+            )}
+            {orphanedDeletedIds.map((id) => (
+              <li key={id}>
+                <DeletedRow
+                  onRestored={() => handleRestored(id)}
+                  restore={() => api.restoreProject(id)}
+                  title={deletedProjects[id]!}
+                />
               </li>
             ))}
           </ul>

@@ -143,3 +143,110 @@ test('a writer can create, autosave, and reload a private screenplay', async ({ 
   await expect(canvas).toContainText('remains local');
   expect(conflictingPutCount).toBe(1);
 });
+
+test('a writer can delete a screenplay from its overflow menu and undo the deletion inline, against the real API and database', async ({
+  page,
+}) => {
+  const token = crypto.randomUUID();
+  const email = `writer-${token}@example.test`;
+  const password = `test-${token}-safe-password`;
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Create an account' }).click();
+  await page.getByLabel('Name').fill('Writer');
+  await page.getByLabel('Email').fill(email);
+  await page.getByLabel('Password', { exact: true }).fill(password);
+  await page.getByLabel('Confirm password').fill(password);
+  await page.getByRole('button', { name: 'Create account' }).click();
+  await expect(page.getByRole('heading', { name: 'Your writing desk' })).toBeVisible();
+  await page.getByLabel('New project title').fill('Delete-undo project');
+  await page.getByRole('button', { name: 'New project' }).click();
+  await page.getByRole('link', { name: 'Delete-undo project' }).click();
+  await page.getByLabel('New screenplay title').fill('Delete-undo screenplay');
+  await page.getByRole('button', { name: 'New screenplay' }).click();
+  await expect(page.getByRole('textbox', { name: 'Screenplay editing canvas' })).toBeVisible();
+  // The editor shell (App.tsx) has no "Projects" breadcrumb -- that link lives only on the
+  // project's screenplay list (routes/projects/$projectId/index.tsx) -- so returning to it means
+  // navigating back through the push the "New screenplay" creation performed, not clicking a link
+  // that does not exist on this page.
+  await page.goBack();
+  await expect(page.getByRole('link', { name: 'Delete-undo screenplay' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Screenplay actions for Delete-undo screenplay' }).click();
+  const deleteResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'DELETE' &&
+      response.url().includes('/api/screenplays/') &&
+      response.status() === 200,
+  );
+  await page.getByRole('menuitem', { name: 'Delete' }).click();
+  await deleteResponse;
+  await expect(page.getByText('Delete-undo screenplay — Deleted')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Delete-undo screenplay' })).toHaveCount(0);
+
+  const restoreResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      response.url().includes('/restore') &&
+      response.status() === 200,
+  );
+  await page.getByRole('button', { name: 'Undo' }).click();
+  await restoreResponse;
+  await expect(page.getByText('Delete-undo screenplay — Deleted')).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Delete-undo screenplay' })).toBeVisible();
+});
+
+test('a writer can delete a project and restore it from the Deleted page -- reachable only through the account menu -- against the real API and database', async ({
+  page,
+}) => {
+  const token = crypto.randomUUID();
+  const email = `writer-${token}@example.test`;
+  const password = `test-${token}-safe-password`;
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Create an account' }).click();
+  await page.getByLabel('Name').fill('Writer');
+  await page.getByLabel('Email').fill(email);
+  await page.getByLabel('Password', { exact: true }).fill(password);
+  await page.getByLabel('Confirm password').fill(password);
+  await page.getByRole('button', { name: 'Create account' }).click();
+  await expect(page.getByRole('heading', { name: 'Your writing desk' })).toBeVisible();
+  await page.getByLabel('New project title').fill('Delete-restore project');
+  await page.getByRole('button', { name: 'New project' }).click();
+  await expect(page.getByRole('link', { name: 'Delete-restore project' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Project actions for Delete-restore project' }).click();
+  const deleteResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'DELETE' &&
+      response.url().includes('/api/projects/') &&
+      response.status() === 200,
+  );
+  await page.getByRole('menuitem', { name: 'Delete' }).click();
+  await deleteResponse;
+  await expect(page.getByText('Delete-restore project — Deleted')).toBeVisible();
+
+  // Undo is not the only route back -- a full reload (the Undo affordance is gone) proves the
+  // project is genuinely absent from the writing desk, then the Deleted page, reached only
+  // through the account menu, is what restores it. This exercises the restore path Undo never
+  // does: a fresh GET /api/deleted followed by POST /api/projects/:id/restore.
+  await page.reload();
+  await expect(page.getByRole('link', { name: 'Delete-restore project' })).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Account menu' }).click();
+  await page.getByRole('menuitem', { name: 'Deleted items' }).click();
+  await expect(page).toHaveURL('/deleted');
+  await expect(page.getByText('Delete-restore project')).toBeVisible();
+
+  const restoreResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      response.url().includes('/restore') &&
+      response.status() === 200,
+  );
+  await page.getByRole('button', { name: 'Restore' }).click();
+  await restoreResponse;
+  await expect(page.getByText('No deleted projects.')).toBeVisible();
+
+  await page.getByRole('link', { name: 'Projects' }).click();
+  await expect(page).toHaveURL('/projects');
+  await expect(page.getByRole('link', { name: 'Delete-restore project' })).toBeVisible();
+});

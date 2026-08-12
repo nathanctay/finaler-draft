@@ -102,6 +102,26 @@ describe('persisted project API', () => {
     id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
     title: 'Draft',
   };
+  const listDeletedResult: Awaited<ReturnType<ProjectStore['listDeleted']>> = {
+    projects: [
+      {
+        id: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+        title: 'Deleted project',
+        updatedAt: '2026-08-06T00:00:00Z',
+        deletedAt: '2026-08-07T00:00:00Z',
+      },
+    ],
+    screenplays: [
+      {
+        id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
+        title: 'Deleted screenplay',
+        updatedAt: '2026-08-06T00:00:00Z',
+        deletedAt: '2026-08-07T00:00:00Z',
+        projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+        projectTitle: 'Active project',
+      },
+    ],
+  };
   const store: ProjectStore = {
     listProjects: async () => [
       {
@@ -134,6 +154,7 @@ describe('persisted project API', () => {
     renameScreenplay: async () => renameScreenplayResult,
     deleteScreenplay: async () => deleteScreenplayResult,
     restoreScreenplay: async () => restoreScreenplayResult,
+    listDeleted: async () => listDeletedResult,
     updateScreenplay: async () => updateResult,
   };
   const auth = {
@@ -758,6 +779,38 @@ describe('persisted project API', () => {
         expect(missing.json()).toEqual({ error: 'Screenplay not found' });
       } finally {
         restoreScreenplayResult = { id: screenplayId, title: 'Draft' };
+        await app.close();
+      }
+    });
+
+    it('lists deleted projects and screenplays, requires authentication, and returns fields unstripped', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        expect((await app.inject({ method: 'GET', url: '/api/deleted' })).statusCode).toBe(401);
+
+        const response = await app.inject({ method: 'GET', url: '/api/deleted', headers });
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({
+          projects: [
+            {
+              id: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+              title: 'Deleted project',
+              updatedAt: '2026-08-06T00:00:00Z',
+              deletedAt: '2026-08-07T00:00:00Z',
+            },
+          ],
+          screenplays: [
+            {
+              id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
+              title: 'Deleted screenplay',
+              updatedAt: '2026-08-06T00:00:00Z',
+              deletedAt: '2026-08-07T00:00:00Z',
+              projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+              projectTitle: 'Active project',
+            },
+          ],
+        });
+      } finally {
         await app.close();
       }
     });

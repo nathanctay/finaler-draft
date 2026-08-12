@@ -421,6 +421,68 @@ describe('PostgreSQL project store', () => {
     }
   });
 
+  it('lists deleted projects and screenplays with ISO timestamps, inside one repeatable-read transaction', async () => {
+    const client = fakeClient([
+      empty(),
+      rows([
+        {
+          id: projectId,
+          title: 'Deleted project',
+          updatedAt: new Date('2026-08-06T00:00:00Z'),
+          deletedAt: new Date('2026-08-07T00:00:00Z'),
+        },
+      ]),
+      rows([
+        {
+          id: screenplayId,
+          title: 'Deleted screenplay',
+          updatedAt: new Date('2026-08-06T00:00:00Z'),
+          deletedAt: new Date('2026-08-07T00:00:00Z'),
+          projectId,
+          projectTitle: 'Active project',
+        },
+      ]),
+      empty(),
+    ]);
+    const store = createPostgresProjectStore(fakePool([], client));
+    await expect(store.listDeleted(actorId)).resolves.toEqual({
+      projects: [
+        {
+          id: projectId,
+          title: 'Deleted project',
+          updatedAt: '2026-08-06T00:00:00.000Z',
+          deletedAt: '2026-08-07T00:00:00.000Z',
+        },
+      ],
+      screenplays: [
+        {
+          id: screenplayId,
+          title: 'Deleted screenplay',
+          updatedAt: '2026-08-06T00:00:00.000Z',
+          deletedAt: '2026-08-07T00:00:00.000Z',
+          projectId,
+          projectTitle: 'Active project',
+        },
+      ],
+    });
+    // The two collections must be read inside one snapshot, not as two independent pool
+    // queries: a concurrent restore between them could otherwise produce a response that never
+    // existed in the database at any single instant (see the store's own comment on listDeleted).
+    expect(client.query).toHaveBeenCalledWith('begin isolation level repeatable read read only');
+    expect(client.query).toHaveBeenCalledWith('commit');
+    expect(client.release).toHaveBeenCalledOnce();
+    const [projectsQuery] = client.query.mock.calls[1] as [string, unknown[]];
+    const [screenplaysQuery] = client.query.mock.calls[2] as [string, unknown[]];
+    // The scoping rules are the load-bearing part of this query: assert them directly rather
+    // than only through fixture output, so a future edit that drops a predicate fails here even
+    // if the fixture rows happen not to expose it.
+    expect(projectsQuery).toContain("m.role = 'owner'");
+    expect(projectsQuery).toContain('p.deleted_at is not null');
+    expect(screenplaysQuery).toContain("m.role in ('owner', 'editor')");
+    expect(screenplaysQuery).toContain('s.deleted_at is not null');
+    expect(screenplaysQuery).toContain('p.deleted_at is null');
+  });
+
   it('restores a screenplay for an owner or editor, and reports missing when it is not currently deleted', async () => {
     const notDeletedClient = fakeClient([empty(), empty()]);
     await expect(

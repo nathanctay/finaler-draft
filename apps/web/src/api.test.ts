@@ -43,7 +43,12 @@ describe('API client', () => {
           version: 1,
         }),
       )
-      .mockResolvedValueOnce(response({ version: 2 }));
+      .mockResolvedValueOnce(response({ version: 2 }))
+      .mockResolvedValueOnce(response({ id: projectId }))
+      .mockResolvedValueOnce(response({ id: projectId, title: 'Feature' }))
+      .mockResolvedValueOnce(response({ id: screenplayId }))
+      .mockResolvedValueOnce(response({ id: screenplayId, title: 'Draft' }))
+      .mockResolvedValueOnce(response({ projects: [], screenplays: [] }));
 
     await expect(api.session()).resolves.toEqual({
       email: 'writer@example.com',
@@ -70,8 +75,19 @@ describe('API client', () => {
     await expect(api.saveScreenplay(screenplayId, 1, screenplayFixture)).resolves.toEqual({
       version: 2,
     });
+    await expect(api.deleteProject(projectId)).resolves.toEqual({ id: projectId });
+    await expect(api.restoreProject(projectId)).resolves.toEqual({
+      id: projectId,
+      title: 'Feature',
+    });
+    await expect(api.deleteScreenplay(screenplayId)).resolves.toEqual({ id: screenplayId });
+    await expect(api.restoreScreenplay(screenplayId)).resolves.toEqual({
+      id: screenplayId,
+      title: 'Draft',
+    });
+    await expect(api.deletedItems()).resolves.toEqual({ projects: [], screenplays: [] });
 
-    expect(fetchMock).toHaveBeenCalledTimes(10);
+    expect(fetchMock).toHaveBeenCalledTimes(15);
     expect(fetchMock.mock.calls[1]).toEqual([
       '/api/auth/sign-in/email',
       expect.objectContaining({ credentials: 'include', method: 'POST' }),
@@ -83,6 +99,26 @@ describe('API client', () => {
     expect(fetchMock.mock.calls[9]).toEqual([
       `/api/screenplays/${screenplayId}`,
       expect.objectContaining({ method: 'PUT' }),
+    ]);
+    expect(fetchMock.mock.calls[10]).toEqual([
+      `/api/projects/${projectId}`,
+      expect.objectContaining({ method: 'DELETE' }),
+    ]);
+    expect(fetchMock.mock.calls[11]).toEqual([
+      `/api/projects/${projectId}/restore`,
+      expect.objectContaining({ method: 'POST' }),
+    ]);
+    expect(fetchMock.mock.calls[12]).toEqual([
+      `/api/screenplays/${screenplayId}`,
+      expect.objectContaining({ method: 'DELETE' }),
+    ]);
+    expect(fetchMock.mock.calls[13]).toEqual([
+      `/api/screenplays/${screenplayId}/restore`,
+      expect.objectContaining({ method: 'POST' }),
+    ]);
+    expect(fetchMock.mock.calls[14]).toEqual([
+      '/api/deleted',
+      expect.objectContaining({ credentials: 'include' }),
     ]);
   });
 

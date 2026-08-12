@@ -67,6 +67,27 @@ export interface ProjectStore {
   // project is itself soft-deleted (the project must be restored first) — the lookup this shares
   // with every other screenplay operation enforces that by construction.
   restoreScreenplay(actorId: string, screenplayId: string): Promise<RestoreResult>;
+  // Powers the Deleted page. Each collection is scoped to what the actor may actually restore —
+  // projects to owner membership (restoreProject is owner-only), screenplays to owner-or-editor
+  // membership (restoreScreenplay's canEdit check) — so a listed row's Restore button can never
+  // come back 403. Deleted screenplays additionally require their project to be active
+  // (`p.deleted_at is null`): a screenplay independently deleted before its project was, and
+  // still sitting under that now-deleted project, is not restorable by id yet (restoreScreenplay
+  // shares lockScreenplayRow's project-active requirement), so listing it here would be the same
+  // broken-control mistake. A screenplay merely orphaned by its project's deletion (its own
+  // `deletedAt` still null) is excluded by `s.deleted_at is not null` alone and never reaches this
+  // query in the first place — see the interface comment on deleteProject.
+  listDeleted(actorId: string): Promise<{
+    projects: Array<{ id: string; title: string; updatedAt: string; deletedAt: string }>;
+    screenplays: Array<{
+      id: string;
+      title: string;
+      updatedAt: string;
+      deletedAt: string;
+      projectId: string;
+      projectTitle: string;
+    }>;
+  }>;
   updateScreenplay(
     actorId: string,
     screenplayId: string,
@@ -426,6 +447,62 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
         );
         await client.query('commit');
         return result.rows[0] as { id: string; title: string };
+      } catch (error) {
+        await client.query('rollback');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+    async listDeleted(actorId) {
+      // A single `repeatable read` transaction, not two independent `pool.query` calls: the
+      // response is two separate SELECTs composed into one payload, and without a shared
+      // snapshot a concurrent restore between them could produce a response naming a project as
+      // deleted while also listing a screenplay whose exclusion depends on that same project
+      // being deleted (or vice versa) -- an inconsistent view that never existed in the database
+      // at any single instant. `read only` is not just documentation: it lets Postgres skip the
+      // write-conflict bookkeeping `repeatable read` otherwise tracks for a transaction that
+      // never writes.
+      const client = await pool.connect();
+      try {
+        await client.query('begin isolation level repeatable read read only');
+        const projects = await client.query(
+          `select p.id, p.title, p.updated_at as "updatedAt", p.deleted_at as "deletedAt"
+             from projects p
+             join project_members m on m.project_id = p.id
+            where m.user_id = $1 and m.role = 'owner' and p.deleted_at is not null
+            order by p.deleted_at desc`,
+          [actorId],
+        );
+        // `p.deleted_at is null` is not redundant with `s.deleted_at is not null`: it excludes a
+        // screenplay that was independently deleted and whose project was *also* later deleted,
+        // which restoreScreenplay cannot reach until the project itself is restored (see the
+        // interface comment on listDeleted). A screenplay merely orphaned by its project's
+        // deletion never appears here regardless, since its own `deleted_at` stays null.
+        const screenplays = await client.query(
+          `select s.id, s.title, s.updated_at as "updatedAt", s.deleted_at as "deletedAt",
+                  s.project_id as "projectId", p.title as "projectTitle"
+             from screenplays s
+             join project_members m on m.project_id = s.project_id
+             join projects p on p.id = s.project_id
+            where m.user_id = $1 and m.role in ('owner', 'editor')
+              and s.deleted_at is not null and p.deleted_at is null
+            order by s.deleted_at desc`,
+          [actorId],
+        );
+        await client.query('commit');
+        return {
+          projects: projects.rows.map((row) => ({
+            ...row,
+            updatedAt: new Date(row.updatedAt as Date).toISOString(),
+            deletedAt: new Date(row.deletedAt as Date).toISOString(),
+          })),
+          screenplays: screenplays.rows.map((row) => ({
+            ...row,
+            updatedAt: new Date(row.updatedAt as Date).toISOString(),
+            deletedAt: new Date(row.deletedAt as Date).toISOString(),
+          })),
+        };
       } catch (error) {
         await client.query('rollback');
         throw error;

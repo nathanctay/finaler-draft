@@ -938,6 +938,82 @@ select:focus-visible,
   padding: 12px 34px 0;
 }
 
+.overflow-menu {
+  position: relative;
+}
+
+.overflow-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--text-09);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.overflow-menu-trigger:hover,
+.overflow-menu-trigger[aria-expanded='true'] {
+  border-color: var(--border-03);
+  background: var(--surface-05);
+}
+
+.overflow-menu-list {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 4px);
+  right: 0;
+  display: flex;
+  min-width: 160px;
+  flex-direction: column;
+  border: 1px solid var(--border-03);
+  border-radius: 2px;
+  background: var(--surface-01);
+  padding: 4px 0;
+}
+
+.overflow-menu-list button {
+  border: 0;
+  background: transparent;
+  padding: 8px 14px;
+  color: var(--text-17);
+  font-size: 12px;
+  text-align: left;
+}
+
+.overflow-menu-list button:hover,
+.overflow-menu-list button:focus-visible {
+  background: var(--surface-05);
+}
+
+.deleted-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  padding: 16px 4px;
+  color: var(--text-09);
+  font-size: 13px;
+}
+
+.deleted-row .field-error {
+  flex-basis: 100%;
+}
+
+.deleted-row-message {
+  margin: 0;
+}
+
+.deleted-row .text-button {
+  margin-top: 0;
+}
+
 .project-list {
   margin: 64px auto;
   width: min(760px, calc(100vw - 40px));
@@ -963,23 +1039,83 @@ select:focus-visible,
   border-top: 1px solid var(--border-01);
 }
 
-.project-list li a {
+.project-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
+.project-row .field-error {
+  flex-basis: 100%;
+  padding: 0 4px 8px;
+}
+
+.project-row-link {
   align-items: center;
   color: var(--text-17);
   display: flex;
+  flex: 1;
   justify-content: space-between;
   padding: 16px 4px;
   text-decoration: none;
 }
 
-.project-list li a:hover {
+.project-row-link:hover {
   background: var(--surface-05);
 }
 
-.project-list li span {
+.project-row .overflow-menu {
+  margin: 0 4px 0 8px;
+}
+
+/*
+ * Scoped to the role badge specifically, not `.project-list li span` -- that broader descendant
+ * selector used to also match `.restore-row-title`/`.restore-row-meta` on the Deleted page (both
+ * spans nested under the same `.project-list li`), silently title-casing deleted item titles and
+ * the "From {project}" meta text. A role like "owner" is the only thing here that should ever be
+ * capitalized.
+ */
+.project-row-role {
   color: var(--text-08);
   font-size: 12px;
   text-transform: capitalize;
+}
+
+.deleted-page-section {
+  margin-top: 32px;
+}
+
+.deleted-page-section:first-of-type {
+  margin-top: 0;
+}
+
+.deleted-page-section h2 {
+  margin: 0 0 4px;
+  color: var(--text-08);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.restore-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 4px;
+}
+
+.restore-row-title {
+  display: block;
+  color: var(--text-17);
+  font-weight: 600;
+}
+
+.restore-row-meta {
+  display: block;
+  color: var(--text-08);
+  font-size: 12px;
 }
 
 .loading-screen {

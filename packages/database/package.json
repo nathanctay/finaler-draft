@@ -15,7 +15,8 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "db:generate": "node ./scripts/run-drizzle.mjs generate",
-    "db:migrate": "node ./scripts/run-drizzle.mjs migrate"
+    "db:migrate": "node ./scripts/run-drizzle.mjs migrate",
+    "db:studio": "node ./scripts/run-drizzle.mjs studio"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",

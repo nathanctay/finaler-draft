@@ -76,6 +76,24 @@ const updateScreenplayResponseSchema = z.object({ version: z.number() });
 // than four near-identical ones, since the two resources' responses are structurally identical.
 const renameResponseSchema = z.object({ id: z.string(), title: z.string() });
 const deleteResponseSchema = z.object({ id: z.string() });
+const deletedProjectSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  updatedAt: z.string(),
+  deletedAt: z.string(),
+});
+const deletedScreenplaySchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  updatedAt: z.string(),
+  deletedAt: z.string(),
+  projectId: z.string(),
+  projectTitle: z.string(),
+});
+const deletedResponseSchema = z.object({
+  projects: z.array(deletedProjectSchema),
+  screenplays: z.array(deletedScreenplaySchema),
+});
 
 export async function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
@@ -150,7 +168,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
     // in `preValidation` (ahead of validation too) is what keeps that precedence, and that
     // precedence, byte-identical to before.
     app.addHook('preValidation', async (request, reply) => {
-      if (!request.url.startsWith('/api/projects') && !request.url.startsWith('/api/screenplays'))
+      if (
+        !request.url.startsWith('/api/projects') &&
+        !request.url.startsWith('/api/screenplays') &&
+        !request.url.startsWith('/api/deleted')
+      )
         return;
       const actorId = await options.auth!.getActorId(fromNodeHeaders(request.headers));
       if (!actorId) return reply.code(401).send({ error: 'Authentication required' });
@@ -385,6 +407,15 @@ export async function buildApp(options: BuildAppOptions = {}) {
           return reply.code(403).send({ error: 'Screenplay editor access required' });
         return result;
       },
+    );
+    // Not `/api/projects/deleted`: `/api/projects/:id` already owns that path shape, so
+    // `deleted` would bind as `:id` and fail UUID validation with a 400 before this handler
+    // ever ran. Powers the Deleted page — see the ProjectStore.listDeleted interface comment
+    // for how each collection is scoped to what the actor may actually restore.
+    typedApp.get(
+      '/api/deleted',
+      { schema: { response: { 200: deletedResponseSchema } } },
+      async (request) => options.projects!.listDeleted(request.actorId!),
     );
   }
   if (options.serveClient) {

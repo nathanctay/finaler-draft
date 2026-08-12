@@ -27,6 +27,26 @@ const sessionUserSchema = z.object({
   name: z.string(),
 });
 const sessionResponseSchema = z.object({ user: sessionUserSchema }).nullable();
+const renameResponseSchema = z.object({ id: z.string().uuid(), title: z.string() });
+const deleteResponseSchema = z.object({ id: z.string().uuid() });
+const deletedProjectSchema = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  updatedAt: z.string(),
+  deletedAt: z.string(),
+});
+const deletedScreenplaySchema = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  updatedAt: z.string(),
+  deletedAt: z.string(),
+  projectId: z.string().uuid(),
+  projectTitle: z.string(),
+});
+const deletedResponseSchema = z.object({
+  projects: z.array(deletedProjectSchema),
+  screenplays: z.array(deletedScreenplaySchema),
+});
 
 async function request(path: string, init?: RequestInit): Promise<Response> {
   const headers = init?.body
@@ -152,11 +172,22 @@ export const api = {
       body: JSON.stringify({ expectedVersion, screenplay }),
       method: 'PUT',
     }),
+  deleteProject: (id: string) =>
+    json(`/api/projects/${id}`, deleteResponseSchema, { method: 'DELETE' }),
+  restoreProject: (id: string) =>
+    json(`/api/projects/${id}/restore`, renameResponseSchema, { method: 'POST' }),
+  deleteScreenplay: (id: string) =>
+    json(`/api/screenplays/${id}`, deleteResponseSchema, { method: 'DELETE' }),
+  restoreScreenplay: (id: string) =>
+    json(`/api/screenplays/${id}/restore`, renameResponseSchema, { method: 'POST' }),
+  deletedItems: () => json('/api/deleted', deletedResponseSchema),
 };
 
 export type Project = z.infer<typeof projectSchema>;
 export type ScreenplaySummary = z.infer<typeof screenplaySummarySchema>;
 export type SessionUser = z.infer<typeof sessionUserSchema>;
+export type DeletedProject = z.infer<typeof deletedProjectSchema>;
+export type DeletedScreenplay = z.infer<typeof deletedScreenplaySchema>;
 export type PersistedScreenplay = {
   id: string;
   projectId: string;

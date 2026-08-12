@@ -41,10 +41,11 @@ describe('projects page', () => {
     await expect(beforeLoad(contextWithSession(sessionUser))).resolves.toBeUndefined();
   });
 
-  it('signs out, clears the cache, and returns to /sign-in', async () => {
+  it('signs out from the account menu, clears the cache, and returns to /sign-in', async () => {
     const user = userEvent.setup();
     render(<ProjectsPage />);
-    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+    await user.click(screen.getByRole('button', { name: 'Account menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Sign out' }));
     await vi.waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         '/api/auth/sign-out',
@@ -53,6 +54,15 @@ describe('projects page', () => {
     );
     await vi.waitFor(() => expect(clearQueryCache).toHaveBeenCalled());
     expect(routeState.navigate).toHaveBeenCalledWith({ to: '/sign-in' });
+  });
+
+  it('reaches the Deleted page only through the account menu, never a bare link on the writing desk', async () => {
+    const user = userEvent.setup();
+    render(<ProjectsPage />);
+    expect(screen.queryByRole('link', { name: /deleted/i })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Account menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Deleted items' }));
+    expect(routeState.navigate).toHaveBeenCalledWith({ to: '/deleted' });
   });
 
   it('surfaces feedback when sign-out fails, without pretending it succeeded', () => {
@@ -88,5 +98,29 @@ describe('projects page', () => {
     await vi.waitFor(() =>
       expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ['projects'] }),
     );
+  });
+
+  it('shows Delete only for a project the viewer owns, since deleteProject is owner-only server-side', () => {
+    routeState.query = {
+      data: [
+        { id: projectId, role: 'owner', title: 'Owned' },
+        { id: `${projectId}-editor`, role: 'editor', title: 'Edited elsewhere' },
+        { id: `${projectId}-reviewer`, role: 'reviewer', title: 'Reviewed elsewhere' },
+      ],
+      isError: false,
+      isLoading: false,
+    };
+    render(<ProjectsPage />);
+    expect(screen.getByRole('button', { name: 'Project actions for Owned' })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Project actions for Edited elsewhere' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Project actions for Reviewed elsewhere' }),
+    ).not.toBeInTheDocument();
+    // The rows themselves -- and the ability to open them -- are unaffected by role; only the
+    // control for an action the viewer cannot perform is withheld.
+    expect(screen.getByText('Edited elsewhere')).toBeVisible();
+    expect(screen.getByText('Reviewed elsewhere')).toBeVisible();
   });
 });
