@@ -40,6 +40,9 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
         handler: authentication.auth.handler,
         getActorId: async (headers) =>
           (await authentication.auth.api.getSession({ headers }))?.user.id ?? null,
+        // The CSRF tests below exercise a distinct Origin ('https://app.example.test') from
+        // BETTER_AUTH_URL's own origin, standing in for a configured CLIENT_ORIGIN.
+        trustedOrigins: [...authentication.trustedOrigins, 'https://app.example.test'],
       },
       projects: store,
     });
@@ -1079,6 +1082,101 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       headers: { cookie: reviewer.cookie },
     });
     expect(reviewerListed.json()).toEqual({ projects: [], screenplays: [] });
+  });
+
+  it('rejects a forged Origin on a real restore endpoint carrying a real session cookie, and accepts a matching one', async () => {
+    const owner = await signUp('csrf-owner@example.test');
+    const project = await app!.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { cookie: owner.cookie },
+      payload: { title: 'CSRF project' },
+    });
+    const projectId = project.json<{ id: string }>().id;
+    const deleted = await app!.inject({
+      method: 'DELETE',
+      url: `/api/projects/${projectId}`,
+      headers: { cookie: owner.cookie },
+    });
+    expect(deleted.statusCode).toBe(200);
+
+    // The exact request shape a prior audit of this repository reproduced: a valid session
+    // cookie -- attached automatically by the browser on a same-site request -- alongside a
+    // hostile Origin. Before this fix, this returned 200 and actually restored the project.
+    const forgedRestore = await app!.inject({
+      method: 'POST',
+      url: `/api/projects/${projectId}/restore`,
+      headers: {
+        cookie: owner.cookie,
+        origin: 'https://evil.example.test',
+      },
+    });
+    expect(forgedRestore.statusCode).toBe(403);
+    const stillDeleted = await app!.inject({
+      method: 'GET',
+      url: '/api/projects',
+      headers: { cookie: owner.cookie },
+    });
+    expect(stillDeleted.json<Array<{ id: string }>>()).not.toContainEqual(
+      expect.objectContaining({ id: projectId }),
+    );
+
+    // The legitimate request -- Origin in the trusted-origins allowlist -- still succeeds.
+    const legitimateRestore = await app!.inject({
+      method: 'POST',
+      url: `/api/projects/${projectId}/restore`,
+      headers: {
+        cookie: owner.cookie,
+        origin: 'https://app.example.test',
+      },
+    });
+    expect(legitimateRestore.statusCode).toBe(200);
+  });
+
+  it('reports /api/health unavailable when the database is genuinely unreachable, and healthy when it is not, using the same real-pool probe server.ts wires in production', async () => {
+    const probe = (target: Pool) => async () => {
+      try {
+        await target.query('select 1');
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const authStub = {
+      baseUrl: 'http://127.0.0.1:3001',
+      handler: async () => new Response(null, { status: 200 }),
+      getActorId: async () => null,
+      trustedOrigins: ['http://127.0.0.1:3001'],
+    };
+
+    const readyApp = await buildApp({ auth: authStub, databaseReady: probe(pool!) });
+    try {
+      const healthy = await readyApp.inject({ method: 'GET', url: '/api/health' });
+      expect(healthy.statusCode).toBe(200);
+      expect(healthy.json()).toEqual({ status: 'ok' });
+    } finally {
+      await readyApp.close();
+    }
+
+    // A pool pointed at a database that was never created -- the same failure shape as a
+    // misconfigured DATABASE_URL or an unreachable Postgres instance, without touching the
+    // shared `pool` every other test in this file depends on staying open.
+    const unreachablePool = new Pool({
+      connectionString: databaseUrlFor(
+        adminUrl!,
+        `finaler_draft_test_unreachable_${randomUUID().replaceAll('-', '')}`,
+      ),
+      max: 1,
+    });
+    const unreadyApp = await buildApp({ auth: authStub, databaseReady: probe(unreachablePool) });
+    try {
+      const unhealthy = await unreadyApp.inject({ method: 'GET', url: '/api/health' });
+      expect(unhealthy.statusCode).toBe(503);
+      expect(unhealthy.json()).toEqual({ status: 'unavailable' });
+    } finally {
+      await unreadyApp.close();
+      await unreachablePool.end();
+    }
   });
 });
 

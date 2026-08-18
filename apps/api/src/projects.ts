@@ -95,8 +95,14 @@ export interface ProjectStore {
   ): Promise<{ version: number } | 'forbidden' | 'conflict' | 'invalid' | 'missing'>;
 }
 
-function screenplayHash(screenplay: Screenplay) {
-  return createHash('sha256').update(JSON.stringify(screenplay)).digest('hex');
+// Takes the already-serialized JSON, not the screenplay object, so every caller stringifies it
+// exactly once: `JSON.stringify` of a full screenplay document is not free, and both call sites
+// below need the identical serialized string anyway, one to store as `canonical_screenplay` and
+// one to hash into `canonical_hash`. Stringifying twice per save was pure waste, not a
+// correctness issue (the same object always serializes identically within one call), but it is
+// on the hot path every autosave takes.
+function canonicalHash(canonicalJson: string) {
+  return createHash('sha256').update(canonicalJson).digest('hex');
 }
 
 // Every screenplay-touching operation in this store locks the screenplay row through this single
@@ -298,15 +304,10 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
         // trust a client-provided root id when creating a persisted screenplay.
         const screenplayId = randomUUID();
         const screenplay = { ...input.screenplay, id: screenplayId };
+        const canonicalJson = JSON.stringify(screenplay);
         const result = await client.query(
           'insert into screenplays (id, project_id, title, canonical_screenplay, canonical_hash) values ($1, $2, $3, $4::jsonb, $5) returning id, version',
-          [
-            screenplayId,
-            projectId,
-            input.title,
-            JSON.stringify(screenplay),
-            screenplayHash(screenplay),
-          ],
+          [screenplayId, projectId, input.title, canonicalJson, canonicalHash(canonicalJson)],
         );
         await client.query('update projects set updated_at = now() where id = $1', [projectId]);
         await client.query('commit');
@@ -539,9 +540,10 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
           await client.query('rollback');
           return 'conflict';
         }
+        const canonicalJson = JSON.stringify(input.screenplay);
         const result = await client.query(
           'update screenplays set canonical_screenplay = $1::jsonb, canonical_hash = $2, version = version + 1, updated_at = now() where id = $3 returning version',
-          [JSON.stringify(input.screenplay), screenplayHash(input.screenplay), screenplayId],
+          [canonicalJson, canonicalHash(canonicalJson), screenplayId],
         );
         await client.query('update projects set updated_at = now() where id = $1', [
           screenplay.projectId,

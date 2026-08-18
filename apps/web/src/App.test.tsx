@@ -58,6 +58,13 @@ describe('local semantic screenplay editor', () => {
     expect(() => editorContentFromScreenplay(screenplayFixture)).toThrow(/not editable/i);
   });
 
+  it('gives the editor a real way back to the writing desk via the brand mark', () => {
+    render(<App />);
+    const back = screen.getByRole('link', { name: 'Finaler Draft — back to your projects' });
+    expect(back).toHaveAttribute('href', '/projects');
+    expect(back).toHaveTextContent('Finaler Draft');
+  });
+
   it('preserves local edits and visibly locks automatic saves after a conflict', async () => {
     const save = vi.spyOn(api, 'saveScreenplay').mockRejectedValue(new ApiError(409));
     const user = userEvent.setup();
@@ -72,12 +79,16 @@ describe('local semantic screenplay editor', () => {
     save.mockRestore();
   });
 
-  it('reports saving and a retryable non-conflict failure without discarding the editor', async () => {
+  it('reports a retryable non-conflict failure without discarding the editor, and a further edit retries it', async () => {
+    // Unlike a 409 conflict (the sibling test above), a non-conflict failure -- a network error,
+    // a 500 -- does not lock the editor: `App.tsx`'s `scheduleSave` clears `saveState === 'failed'`
+    // the moment a genuinely new edit arrives and retries. `ApiError(500)` on the first call
+    // reproduces that failure; the second call resolving proves the retry itself, not just that
+    // the failure text appeared.
     const save = vi
       .spyOn(api, 'saveScreenplay')
-      .mockImplementationOnce(
-        () => new Promise(() => undefined) as ReturnType<typeof api.saveScreenplay>,
-      );
+      .mockRejectedValueOnce(new ApiError(500))
+      .mockResolvedValueOnce({ version: 2 });
     const user = userEvent.setup();
     render(<App />);
     await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
@@ -85,7 +96,19 @@ describe('local semantic screenplay editor', () => {
       screen.getByRole('combobox', { name: 'Active screenplay element' }),
       'action',
     );
-    expect(await screen.findByText('Saving…')).toBeVisible();
+    expect(await screen.findByText('Save failed · make another edit to retry')).toBeVisible();
+    expect(save).toHaveBeenCalledOnce();
+
+    // `scheduleSave` clears `failed` back to `saved` synchronously the moment this edit lands,
+    // ahead of its own 600 ms debounce -- so asserting on the "Saved" text alone would pass on
+    // that transient state without the retry's save round trip ever completing. Waiting for the
+    // second `saveScreenplay` call is what actually proves the retry happened.
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'shot',
+    );
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/^Saved · validated locally/)).toBeVisible();
     save.mockRestore();
   });
 

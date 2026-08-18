@@ -53,6 +53,71 @@ describe('production client serving', () => {
       await productionApp.close();
     }
   });
+
+  it('caches a content-hashed asset as immutable for a year, since its URL changes the moment its content does', async () => {
+    const productionApp = await buildApp({
+      serveClient: true,
+      clientRoot: new URL('./fixtures/web/', import.meta.url),
+    });
+    try {
+      const response = await productionApp.inject({
+        method: 'GET',
+        url: '/assets/index-fixturehash.js',
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['cache-control']).toBe('public, max-age=31536000, immutable');
+    } finally {
+      await productionApp.close();
+    }
+  });
+
+  it('never caches index.html, whether requested directly or reached through the SPA fallback, since a new deploy answers at the same URL', async () => {
+    const productionApp = await buildApp({
+      serveClient: true,
+      clientRoot: new URL('./fixtures/web/', import.meta.url),
+    });
+    try {
+      const direct = await productionApp.inject({ method: 'GET', url: '/index.html' });
+      const viaFallback = await productionApp.inject({ method: 'GET', url: '/writer/anything' });
+      expect(direct.headers['cache-control']).toBe('no-cache');
+      expect(viaFallback.headers['cache-control']).toBe('no-cache');
+    } finally {
+      await productionApp.close();
+    }
+  });
+
+  // @fastify/static (via its @fastify/send dependency) omits Content-Type entirely on a 304
+  // response -- reading its installed source confirms `sendNotModified` deletes that header
+  // before sending. An earlier version of the no-cache override above keyed off
+  // `Content-Type: text/html`, so it silently stopped applying the moment a browser's
+  // conditional revalidation of index.html got a 304 instead of a fresh 200, leaving the
+  // static plugin's `public, max-age=31536000, immutable` default in place -- letting a
+  // browser cache the app shell as immutable for a year. This reproduces that exact
+  // conditional-request sequence end to end.
+  it('still marks index.html no-cache on a 304 conditional revalidation, not just on the initial 200', async () => {
+    const productionApp = await buildApp({
+      serveClient: true,
+      clientRoot: new URL('./fixtures/web/', import.meta.url),
+    });
+    try {
+      const first = await productionApp.inject({ method: 'GET', url: '/index.html' });
+      expect(first.statusCode).toBe(200);
+      expect(first.headers['cache-control']).toBe('no-cache');
+      const etag = first.headers.etag;
+      expect(typeof etag).toBe('string');
+
+      const conditional = await productionApp.inject({
+        method: 'GET',
+        url: '/index.html',
+        headers: { 'if-none-match': etag as string },
+      });
+      expect(conditional.statusCode).toBe(304);
+      expect(conditional.headers['content-type']).toBeUndefined();
+      expect(conditional.headers['cache-control']).toBe('no-cache');
+    } finally {
+      await productionApp.close();
+    }
+  });
 });
 
 describe('logging', () => {
@@ -163,6 +228,7 @@ describe('persisted project API', () => {
       new Response('auth', { headers: { 'set-cookie': 'session=test; HttpOnly' } }),
     getActorId: async (headers: Headers) =>
       headers.get('cookie') === 'session=test' ? 'actor-1' : null,
+    trustedOrigins: ['https://app.example.test'],
   };
   it('forwards cookies through auth and rejects unauthenticated project access', async () => {
     const app = await buildApp({ auth, projects: store });
@@ -812,6 +878,190 @@ describe('persisted project API', () => {
         });
       } finally {
         await app.close();
+      }
+    });
+  });
+
+  describe('same-site sibling-origin CSRF defense', () => {
+    const projectId = '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f';
+
+    it('rejects a state-changing request whose Origin is not in the trusted-origins allowlist, even with a valid session', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        const forged = await app.inject({
+          method: 'DELETE',
+          url: `/api/projects/${projectId}`,
+          headers: {
+            cookie: 'session=test',
+            origin: 'https://evil.example.test',
+          },
+        });
+        expect(forged.statusCode).toBe(403);
+        expect(forged.json()).toEqual({ error: 'Cross-origin request rejected' });
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('accepts a request whose Origin is in the trusted-origins allowlist', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        const legitimate = await app.inject({
+          method: 'DELETE',
+          url: `/api/projects/${projectId}`,
+          headers: {
+            cookie: 'session=test',
+            origin: 'https://app.example.test',
+          },
+        });
+        expect(legitimate.statusCode).toBe(200);
+      } finally {
+        deleteProjectResult = { id: projectId };
+        await app.close();
+      }
+    });
+
+    // The exact dev-proxy topology `pnpm dev` runs under: Vite's proxy forwards `/api` to the
+    // API with `changeOrigin: true`, which rewrites the outgoing Host header to the API's own
+    // host while leaving the browser's real Origin (the Vite dev server's own origin) untouched.
+    // An earlier version of this check compared Origin's host against the request's own Host
+    // header, which rejected every authenticated write under this exact, documented workflow.
+    // Comparing Origin against a fixed trusted-origins allowlist instead of the (proxy-rewritable)
+    // Host header is what makes this pass.
+    it('accepts a request whose Origin is in the trusted-origins allowlist even when the Host header does not match it', async () => {
+      const devAuth = {
+        ...auth,
+        trustedOrigins: [...auth.trustedOrigins, 'http://localhost:5173'],
+      };
+      const app = await buildApp({ auth: devAuth, projects: store });
+      try {
+        const throughDevProxy = await app.inject({
+          method: 'DELETE',
+          url: `/api/projects/${projectId}`,
+          headers: {
+            cookie: 'session=test',
+            host: 'localhost:3001',
+            origin: 'http://localhost:5173',
+          },
+        });
+        expect(throughDevProxy.statusCode).toBe(200);
+      } finally {
+        deleteProjectResult = { id: projectId };
+        await app.close();
+      }
+    });
+
+    it('does not reject a request with no Origin header at all, since current browsers always attach one to same-origin state-changing requests', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        const noOrigin = await app.inject({
+          method: 'DELETE',
+          url: `/api/projects/${projectId}`,
+          headers: { cookie: 'session=test' },
+        });
+        expect(noOrigin.statusCode).toBe(200);
+      } finally {
+        deleteProjectResult = { id: projectId };
+        await app.close();
+      }
+    });
+
+    it('rejects a malformed Origin header rather than letting it slip through unchecked', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        const malformed = await app.inject({
+          method: 'DELETE',
+          url: `/api/projects/${projectId}`,
+          headers: { cookie: 'session=test', origin: 'not-a-url' },
+        });
+        expect(malformed.statusCode).toBe(403);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('checks Origin before authentication, so a forged cross-origin request is rejected even without a valid session', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        const forgedAndUnauthenticated = await app.inject({
+          method: 'DELETE',
+          url: `/api/projects/${projectId}`,
+          headers: { origin: 'https://evil.example.test' },
+        });
+        expect(forgedAndUnauthenticated.statusCode).toBe(403);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
+  describe('Cache-Control on every /api/ response', () => {
+    it('marks a successful response private and non-cacheable', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        const response = await app.inject({
+          method: 'GET',
+          url: '/api/projects',
+          headers: { cookie: 'session=test' },
+        });
+        expect(response.statusCode).toBe(200);
+        expect(response.headers['cache-control']).toBe('private, no-store');
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('marks an error response private and non-cacheable too, not only success', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        const response = await app.inject({ method: 'GET', url: '/api/projects' });
+        expect(response.statusCode).toBe(401);
+        expect(response.headers['cache-control']).toBe('private, no-store');
+      } finally {
+        await app.close();
+      }
+    });
+
+    it('applies even to /api/health, which needs no authentication', async () => {
+      const response = await app.inject({ method: 'GET', url: '/api/health' });
+      expect(response.headers['cache-control']).toBe('private, no-store');
+    });
+
+    it('does not apply to a non-API path', async () => {
+      const productionApp = await buildApp({
+        serveClient: true,
+        clientRoot: new URL('./fixtures/web/', import.meta.url),
+      });
+      try {
+        const response = await productionApp.inject({ method: 'GET', url: '/writer/anything' });
+        expect(response.headers['cache-control']).not.toBe('private, no-store');
+      } finally {
+        await productionApp.close();
+      }
+    });
+  });
+
+  describe('database readiness on /api/health', () => {
+    it('reports healthy when no readiness probe is configured, matching every route registered without persistence', async () => {
+      const response = await app.inject({ method: 'GET', url: '/api/health' });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ status: 'ok' });
+    });
+
+    it('reports healthy when the probe resolves true, and unavailable when it resolves false', async () => {
+      let ready = true;
+      const probedApp = await buildApp({ databaseReady: async () => ready });
+      try {
+        const healthy = await probedApp.inject({ method: 'GET', url: '/api/health' });
+        expect(healthy.statusCode).toBe(200);
+        expect(healthy.json()).toEqual({ status: 'ok' });
+
+        ready = false;
+        const unhealthy = await probedApp.inject({ method: 'GET', url: '/api/health' });
+        expect(unhealthy.statusCode).toBe(503);
+        expect(unhealthy.json()).toEqual({ status: 'unavailable' });
+      } finally {
+        await probedApp.close();
       }
     });
   });

@@ -354,10 +354,19 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   return (
     <main className={dark ? 'application dark' : 'application'}>
       <header className="titlebar">
-        <div className="brand">
+        {/*
+          A plain anchor, not the router's `Link`: App is deliberately rendered as a
+          router-agnostic, lazily-loaded unit (see the route component's `lazy(...)` import and
+          this file's own standalone test suite, neither of which provide router context), and
+          the only way out of a screenplay before this was the browser's own back button. A full
+          navigation to /projects is a small cost for a control used rarely and deliberately,
+          against the alternative of adding router context to a component that has never needed
+          it. The accessible name leads with the visible "Finaler Draft" text per WCAG 2.5.3.
+        */}
+        <a aria-label="Finaler Draft — back to your projects" className="brand" href="/projects">
           <span className="brand-mark">F</span>
           <span>Finaler Draft</span>
-        </div>
+        </a>
         <div className="document-title">
           <span
             className={projection.valid ? 'save-dot' : 'save-dot attention'}

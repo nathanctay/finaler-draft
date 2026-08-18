@@ -4,6 +4,11 @@ buildCommand = "pnpm build"
 
 [deploy]
 startCommand = "pnpm start"
+# Runs in its own container, ahead of the start command, with the same environment variables
+# (including DATABASE_URL) -- this is what actually prevents the "missing migration" class of
+# incident the healthcheck's databaseReady probe can only detect after the fact. If this command
+# fails, Railway does not proceed to start the new deployment at all.
+preDeployCommand = ["pnpm --filter @finaler-draft/database db:migrate"]
 healthcheckPath = "/api/health"
 healthcheckTimeout = 100
 restartPolicyType = "ON_FAILURE"

@@ -30,6 +30,7 @@ describe('createAuth', () => {
       auth: { marker: 'auth' },
       database: { marker: 'database' },
       pool: { marker: 'pool' },
+      trustedOrigins: ['https://app.example.test', 'https://writer.example.test'],
     });
     expect(drizzleAdapter).toHaveBeenCalledWith(
       { marker: 'database' },
@@ -39,6 +40,11 @@ describe('createAuth', () => {
       expect.objectContaining({
         basePath: '/api/auth',
         trustedOrigins: ['https://app.example.test', 'https://writer.example.test'],
+        // Railway sends the client's real IP as `X-Real-IP`, not the `X-Forwarded-For` Better
+        // Auth's rate limiter reads by default, so without this the rate limiter cannot resolve
+        // a per-client IP behind Railway's proxy and falls back to one shared bucket for every
+        // client.
+        advanced: { ipAddress: { ipAddressHeaders: ['x-real-ip'] } },
         emailAndPassword: expect.objectContaining({
           enabled: true,
           minPasswordLength: 12,
@@ -50,7 +56,7 @@ describe('createAuth', () => {
   });
 
   it('uses only the server origin when no separate client origin is configured', () => {
-    createAuth({
+    const result = createAuth({
       DATABASE_URL: 'postgresql://localhost/finaler',
       BETTER_AUTH_SECRET: 'x'.repeat(32),
       BETTER_AUTH_URL: 'http://localhost:3001',
@@ -58,5 +64,6 @@ describe('createAuth', () => {
     expect(betterAuth).toHaveBeenCalledWith(
       expect.objectContaining({ trustedOrigins: ['http://localhost:3001'] }),
     );
+    expect(result.trustedOrigins).toEqual(['http://localhost:3001']);
   });
 });
