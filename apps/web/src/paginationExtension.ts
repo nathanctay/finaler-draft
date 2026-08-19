@@ -41,6 +41,7 @@ import { Plugin, PluginKey } from '@tiptap/pm/state';
 import { DecorationSet } from '@tiptap/pm/view';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
 import { paginateScreenplay } from '@finaler-draft/layout';
+import { DEFAULT_DOCUMENT_SETTINGS, type DocumentSettings } from '@finaler-draft/screenplay';
 import { buildPaginationDecorations } from './pagination.js';
 import { projectDocumentScreenplay } from './screenplayEditor.js';
 
@@ -72,13 +73,16 @@ export const paginationPluginKey = new PluginKey<PaginationState>('screenplayPag
  *    reachable in practice, and the layout package must not be extended to avoid it (see
  *    progress/page-rendering.md's "do not modify packages/layout").
  */
-function computePaginationState(doc: ProseMirrorNode): PaginationState {
+function computePaginationState(
+  doc: ProseMirrorNode,
+  documentSettings: DocumentSettings,
+): PaginationState {
   const projection = projectDocumentScreenplay(doc);
   if (!projection.valid) {
     return { decorations: DecorationSet.empty, pageCount: 0 };
   }
   try {
-    const layout = paginateScreenplay(projection.screenplay.blocks);
+    const layout = paginateScreenplay(projection.screenplay.blocks, documentSettings);
     return { decorations: buildPaginationDecorations(doc, layout), pageCount: layout.pages.length };
   } catch (error) {
     console.error('Screenplay pagination failed; rendering without page decorations.', error);
@@ -86,8 +90,26 @@ function computePaginationState(doc: ProseMirrorNode): PaginationState {
   }
 }
 
-export const PaginationExtension = Extension.create({
+export type PaginationExtensionOptions = {
+  /**
+   * The loaded screenplay's own settings — plan.md: "These values are document state, not
+   * application preferences." Defaults to the specification's current fixed values so an editor
+   * built without `.configure({ documentSettings })` (every existing call site before document
+   * settings existed, including this extension's own tests) keeps pagination behavior unchanged.
+   * `App.tsx` configures this from the loaded screenplay's real `documentSettings` when it builds
+   * the editor, and again whenever a different screenplay (and thus a different
+   * `documentSettings`) is loaded, since `useEditor`'s extensions are only read once per editor
+   * instance and `App` remounts a new editor per screenplay (see its own top-of-file reasoning).
+   */
+  documentSettings: DocumentSettings;
+};
+
+export const PaginationExtension = Extension.create<PaginationExtensionOptions>({
+  addOptions() {
+    return { documentSettings: DEFAULT_DOCUMENT_SETTINGS };
+  },
   addProseMirrorPlugins() {
+    const { documentSettings } = this.options;
     return [
       new Plugin({
         key: paginationPluginKey,
@@ -110,7 +132,7 @@ export const PaginationExtension = Extension.create({
               : paginationState;
           },
           init(_config, instance) {
-            return computePaginationState(instance.doc);
+            return computePaginationState(instance.doc, documentSettings);
           },
         },
         view(editorView) {
@@ -127,7 +149,10 @@ export const PaginationExtension = Extension.create({
               if (editorView.isDestroyed) {
                 return;
               }
-              const paginationState = computePaginationState(editorView.state.doc);
+              const paginationState = computePaginationState(
+                editorView.state.doc,
+                documentSettings,
+              );
               editorView.dispatch(
                 editorView.state.tr.setMeta(paginationPluginKey, paginationState),
               );

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createFileRoute, Link, useParams, useRouter } from '@tanstack/react-router';
+import { createDefaultTitlePage, DEFAULT_DOCUMENT_SETTINGS } from '@finaler-draft/screenplay';
 import { api, type ScreenplaySummary } from '../../../api.js';
 import { DeletedRow } from '../../../components/DeletedRow.js';
 import { OverflowMenu } from '../../../components/OverflowMenu.js';
@@ -62,13 +63,18 @@ function ProjectPage() {
   const create = useMutation({
     mutationFn: async () => {
       const id = crypto.randomUUID();
+      // plan.md's "Title page": "A new screenplay gets a dedicated title page by default."
+      // createDefaultTitlePage seeds only real content (the title just typed, and the standard
+      // "written by" credit) -- see its own doc comment for why author/contact stay absent
+      // rather than holding placeholder strings.
       return api.createScreenplay(projectId, title, {
         annotations: [],
         blocks: [],
         id,
         schemaVersion: 1,
         title,
-        titlePages: [],
+        titlePages: [createDefaultTitlePage(crypto.randomUUID(), title)],
+        documentSettings: DEFAULT_DOCUMENT_SETTINGS,
       });
     },
     onSuccess: (script) => {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_DOCUMENT_SETTINGS } from '@finaler-draft/screenplay';
 import { applyPageGeometryCssVariables, pageGeometryCssVariables } from './pageGeometryCss.js';
 
 describe('pageGeometryCssVariables', () => {
@@ -37,12 +38,28 @@ describe('pageGeometryCssVariables', () => {
     // 1.5in left margin -- styles.css is responsible for the calc(), not this module.
     expect(variables['--fd-character-indent']).not.toBe('2.2in');
   });
+
+  it("reflects a document's own settings for the two elements plan.md allows adjusting, leaving everything else at the specification's fixed values", () => {
+    const variables = pageGeometryCssVariables({
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      characterIndentIn: 3.0,
+      parentheticalIndentIn: 2.5,
+      parentheticalWidthIn: 3.0,
+    });
+
+    expect(variables['--fd-character-indent']).toBe('3in');
+    expect(variables['--fd-parenthetical-indent']).toBe('2.5in');
+    expect(variables['--fd-parenthetical-width']).toBe('3in');
+    // Unaffected: dialogue is not one of the two adjustable elements.
+    expect(variables['--fd-dialogue-indent']).toBe('2.5in');
+    expect(variables['--fd-dialogue-width']).toBe('3.5in');
+  });
 });
 
 describe('applyPageGeometryCssVariables', () => {
   it('sets every geometry variable on the target element', () => {
     const target = document.createElement('div');
-    applyPageGeometryCssVariables(target);
+    applyPageGeometryCssVariables(undefined, target);
 
     const variables = pageGeometryCssVariables();
     for (const [name, value] of Object.entries(variables)) {

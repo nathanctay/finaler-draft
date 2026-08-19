@@ -495,6 +495,162 @@ select:focus-visible,
   line-height: 1.35;
 }
 
+/*
+ * `.pages` stacks the title page (if any) above the manuscript `.page`, vertically. `.editor-region`
+ * is a flex row centering its one child horizontally, so a second visible sibling needs its own
+ * column container to appear above rather than beside `.page`. Deliberately carries no page
+ * geometry of its own: `.page`'s own inline style (App.tsx) still carries `--fd-page-gap` and
+ * `--fd-page-stack-min-height` directly, unmoved, because App.test.tsx and
+ * page-rendering-persistence.spec.ts read them straight off `.page`.
+ */
+.pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.pages > * + * {
+  margin-top: var(--fd-page-gap, 0.5in);
+}
+
+/*
+ * The title page (plan.md's "Title page"): a dedicated, non-paginating page rendered above the
+ * manuscript. Never a child of `.page` and never touches `.script-body`/ProseMirror -- see
+ * titlePageEditor.tsx's own module comment for why the layout package and pagination plugin must
+ * structurally never be able to see it. Sized and painted like `.page` (same physical page, same
+ * paper) but always exactly one page tall: a title page never lengthens with body content, so it
+ * needs no min-height arithmetic the way `.page`'s multi-page stack does.
+ *
+ * Per "Manuscript and interface are separate type systems" in plan.md, the title page is part of
+ * the manuscript, not the interface: it keeps the fixed 12pt Courier typeface, type size, and
+ * line-height every other page uses, with no size/typeface override anywhere below -- only
+ * `font-weight` varies (as it already does for scene headings and character cues in
+ * `.script-body`), and casing is never CSS-transformed, matching how the rest of the manuscript
+ * preserves authored text exactly rather than restyling it.
+ */
+.title-page {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  flex-shrink: 0;
+  width: var(--fd-page-width);
+  height: var(--fd-page-height);
+  padding: var(--fd-page-margin-top) var(--fd-page-margin-right) var(--fd-page-margin-top)
+    var(--fd-page-margin-left);
+  background-color: white;
+  box-shadow: 0 1px 5px var(--shadow-02);
+  font-family: var(--fd-typeface);
+  font-size: var(--fd-type-size);
+  line-height: var(--fd-line-height);
+  transform-origin: top center;
+}
+
+.title-page-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-top: 2in;
+  text-align: center;
+}
+
+.title-page-title {
+  font-weight: 700;
+}
+
+.title-page-credit,
+.title-page-source,
+.title-page-draft-date {
+  margin-top: calc(2 * var(--fd-type-size) * var(--fd-line-height));
+}
+
+.title-page-authors {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.title-page-contact {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+}
+
+.title-page-line {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.title-page-line-remove {
+  border: 0;
+  background: transparent;
+  color: var(--text-07);
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.title-page-line-add {
+  align-self: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-09);
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.title-page-contact .title-page-line-add {
+  align-self: flex-end;
+}
+
+[data-title-page-field] {
+  min-width: 1em;
+  outline: none;
+  white-space: pre-wrap;
+}
+
+/*
+ * The same placeholder-hint convention `.script-body [data-screenplay-block]:empty::after` uses
+ * for empty screenplay text blocks (see that rule and titlePageEditor.tsx's own comment for why
+ * `contentEditable` rather than `<input>` is what makes this convention work at all: `:empty`
+ * never matches an `<input>` regardless of its value). None of this text is stored -- it exists
+ * only while the corresponding field is genuinely empty.
+ */
+[data-title-page-field]:empty::after {
+  color: var(--text-04);
+}
+
+[data-title-page-field='title']:empty::after {
+  content: 'Title';
+}
+
+[data-title-page-field='credit']:empty::after {
+  content: 'written by';
+}
+
+[data-title-page-field='author']:empty::after {
+  content: 'Author name';
+}
+
+[data-title-page-field='source']:empty::after {
+  content: 'Based on...';
+}
+
+[data-title-page-field='draft-date']:empty::after {
+  content: 'Draft date';
+}
+
+[data-title-page-field='contact']:empty::after {
+  content: 'Name, address, phone, email';
+}
+
+.dark .title-page {
+  color: var(--dark-text-09);
+}
+
 .script-body {
   /* .script-body must be the first in-flow child of .page: .page-number is the only sibling
      before it, and it is position: absolute, so it contributes nothing to flow. .page's

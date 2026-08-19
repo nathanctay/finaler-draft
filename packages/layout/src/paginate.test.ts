@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ScreenplayBlock } from '@finaler-draft/screenplay';
+import { DEFAULT_DOCUMENT_SETTINGS, type ScreenplayBlock } from '@finaler-draft/screenplay';
 import { paginateScreenplay } from './paginate.js';
 import { UnsupportedBlockError } from './model.js';
 import type { AuthoredLine, LayoutResult } from './model.js';
@@ -253,6 +253,29 @@ describe("paginateScreenplay: dialogue orphan avoidance and MORE/CONT'D splittin
     for (const line of generated) {
       expect(line).toMatchObject({ sourceBlockId: 'c0' });
     }
+  });
+
+  it("suppresses (MORE) and CONT'D entirely when the document setting is off, still placing every dialogue line", () => {
+    // Identical fixture to "splits a long speech with (MORE) and a CONT'D heading..." above --
+    // the only difference is the setting, so this isolates exactly what the toggle changes.
+    const blocks = [
+      actionBlock('a0', textForActionLineCount(50)),
+      characterBlock('c0', 'ADA'),
+      dialogueBlock('d0', textForDialogueLineCount(4)),
+    ];
+    const result = paginateScreenplay(blocks, {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      autoMoreContinued: false,
+    });
+
+    expect(result.pages).toHaveLength(2);
+    const generated = result.pages.flatMap((p) => p.lines).filter((l) => l.kind === 'generated');
+    expect(generated).toHaveLength(0);
+
+    const dialogueLines = result.pages
+      .flatMap((p) => p.lines)
+      .filter((l) => l.kind === 'authored' && l.blockId === 'd0');
+    expect(dialogueLines).toHaveLength(4);
   });
 
   it('never splits a parenthetical across pages and never leaves it ending a page', () => {

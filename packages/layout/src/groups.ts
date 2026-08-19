@@ -8,7 +8,11 @@
  */
 
 import { BLANK_LINES_BEFORE } from '@finaler-draft/screenplay/pageFormat';
-import type { ScreenplayBlock } from '@finaler-draft/screenplay';
+import {
+  DEFAULT_DOCUMENT_SETTINGS,
+  type DocumentSettings,
+  type ScreenplayBlock,
+} from '@finaler-draft/screenplay';
 import type { AuthoredLine, BlankLine } from './model.js';
 import { UnsupportedBlockError } from './model.js';
 import { wrapBlock } from './wrap.js';
@@ -59,8 +63,17 @@ type OpenSpeech = {
  * `dual_dialogue` immediately, before any page-breaking is attempted — plan.md records its column
  * geometry as unsettled, and a wrong guess that silently produces plausible page numbers is worse
  * than a refusal.
+ *
+ * `documentSettings` defaults to the specification's current fixed values, so every existing
+ * caller keeps producing identical output unchanged. Only `characterIndentIn` and
+ * `parentheticalWidthIn` are actually read here (passed straight through to `wrapBlock`); the
+ * rest of `DocumentSettings` (page-number style, scene numbers, `(MORE)`/`CONT'D`) belongs to
+ * later stages of pagination or to rendering, not to grouping.
  */
-export function buildGroups(blocks: readonly ScreenplayBlock[]): Group[] {
+export function buildGroups(
+  blocks: readonly ScreenplayBlock[],
+  documentSettings: DocumentSettings = DEFAULT_DOCUMENT_SETTINGS,
+): Group[] {
   const groups: Group[] = [];
   let openSpeech: OpenSpeech | undefined;
 
@@ -113,7 +126,7 @@ export function buildGroups(blocks: readonly ScreenplayBlock[]): Group[] {
         closeSpeech();
         const lines = [
           ...blanksBefore(BLANK_LINES_BEFORE.scene_heading),
-          ...wrapBlock(block.id, 'scene_heading', block.text),
+          ...wrapBlock(block.id, 'scene_heading', block.text, documentSettings),
         ];
         groups.push({ kind: 'sceneHeading', lines });
         break;
@@ -124,7 +137,7 @@ export function buildGroups(blocks: readonly ScreenplayBlock[]): Group[] {
         closeSpeech();
         const lines = [
           ...blanksBefore(BLANK_LINES_BEFORE[block.type]),
-          ...wrapBlock(block.id, block.type, block.text),
+          ...wrapBlock(block.id, block.type, block.text, documentSettings),
         ];
         groups.push({ kind: 'simple', lines });
         break;
@@ -135,7 +148,7 @@ export function buildGroups(blocks: readonly ScreenplayBlock[]): Group[] {
           leadingBlank: blanksBefore(BLANK_LINES_BEFORE.character),
           characterBlockId: block.id,
           characterText: block.text,
-          characterLines: wrapBlock(block.id, 'character', block.text),
+          characterLines: wrapBlock(block.id, 'character', block.text, documentSettings),
           units: [],
         };
         break;
@@ -144,7 +157,7 @@ export function buildGroups(blocks: readonly ScreenplayBlock[]): Group[] {
         const speech = openSpeech ?? openOrphanSpeech();
         speech.units.push({
           element: 'parenthetical',
-          lines: wrapBlock(block.id, 'parenthetical', block.text),
+          lines: wrapBlock(block.id, 'parenthetical', block.text, documentSettings),
         });
         break;
       }
@@ -152,7 +165,7 @@ export function buildGroups(blocks: readonly ScreenplayBlock[]): Group[] {
         const speech = openSpeech ?? openOrphanSpeech();
         speech.units.push({
           element: 'dialogue',
-          lines: wrapBlock(block.id, 'dialogue', block.text),
+          lines: wrapBlock(block.id, 'dialogue', block.text, documentSettings),
         });
         break;
       }

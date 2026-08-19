@@ -4,7 +4,13 @@ import { AllSelection, TextSelection } from '@tiptap/pm/state';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
-import type { Screenplay, ScreenplayBlock } from '@finaler-draft/screenplay';
+import {
+  DEFAULT_DOCUMENT_SETTINGS,
+  createDefaultTitlePage,
+  type Screenplay,
+  type ScreenplayBlock,
+  type TitlePage,
+} from '@finaler-draft/screenplay';
 import { App } from './App.js';
 import { ApiError, api, type PersistedScreenplay } from './api.js';
 import { pageStackMinHeightIn } from './pagination.js';
@@ -30,7 +36,12 @@ function getBlock(canvas: HTMLElement, id: string): HTMLElement {
   return block;
 }
 
-function persistedScreenplay(id: string, title: string, text: string): PersistedScreenplay {
+function persistedScreenplay(
+  id: string,
+  title: string,
+  text: string,
+  documentSettings: Screenplay['documentSettings'] = DEFAULT_DOCUMENT_SETTINGS,
+): PersistedScreenplay {
   return {
     id,
     projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
@@ -47,6 +58,7 @@ function persistedScreenplay(id: string, title: string, text: string): Persisted
       schemaVersion: 1,
       title,
       titlePages: [],
+      documentSettings,
     },
     title,
     version: 1,
@@ -125,7 +137,9 @@ describe('local semantic screenplay editor', () => {
       />,
     );
     expect(
-      await screen.findByText(/contains title pages, notes, dual dialogue, or page breaks/i),
+      await screen.findByText(
+        /contains more than one title page, notes, dual dialogue, or page breaks/i,
+      ),
     ).toBeVisible();
     expect(screen.getByRole('textbox', { name: 'Screenplay editing canvas' })).not.toHaveAttribute(
       'contenteditable',
@@ -164,6 +178,60 @@ describe('local semantic screenplay editor', () => {
     expect(save).not.toHaveBeenCalled();
     save.mockRestore();
   });
+
+  it("applies a loaded screenplay's own document settings to the rendered page geometry, not just the specification's defaults", async () => {
+    const custom = persistedScreenplay(
+      '3c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
+      'Custom geometry',
+      'Custom-geometry content.',
+      {
+        ...DEFAULT_DOCUMENT_SETTINGS,
+        characterIndentIn: 3.2,
+        parentheticalIndentIn: 2.6,
+        parentheticalWidthIn: 2.4,
+      },
+    );
+
+    render(<App initial={custom} key={custom.id} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    expect(document.documentElement.style.getPropertyValue('--fd-character-indent')).toBe('3.2in');
+    expect(document.documentElement.style.getPropertyValue('--fd-parenthetical-indent')).toBe(
+      '2.6in',
+    );
+    expect(document.documentElement.style.getPropertyValue('--fd-parenthetical-width')).toBe(
+      '2.4in',
+    );
+  });
+
+  it('moves the cursor to the end of the document on a click below the last element, since a near-empty screenplay is mostly unclickable blank page', async () => {
+    render(<App />);
+    const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const page = canvas.closest('.page');
+    if (!page) {
+      throw new Error('Missing .page ancestor of the editing canvas.');
+    }
+
+    // Starts on the first block (a scene heading), not the last (a shot) -- so the assertion
+    // below actually demonstrates the click moved the cursor, rather than it having started there.
+    expect(screen.getByRole('combobox', { name: 'Active screenplay element' })).toHaveValue(
+      'scene_heading',
+    );
+
+    // jsdom performs no layout, so every element's real getBoundingClientRect() is zeroed;
+    // this stands in for the near-empty document's actual content ending a few lines down the
+    // page while the click lands further down, in the page's otherwise-blank remainder.
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 500, 100));
+
+    fireEvent.mouseDown(page, { clientY: 500 });
+
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Active screenplay element' })).toHaveValue(
+        'shot',
+      ),
+    );
+  });
+
   it('derives Navigator scenes and keeps the local draft status accurate', async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -546,6 +614,7 @@ describe('local semantic screenplay editor', () => {
       schemaVersion: 1,
       title: 'Three full pages',
       titlePages: [],
+      documentSettings: DEFAULT_DOCUMENT_SETTINGS,
     };
 
     const { container } = render(
@@ -615,5 +684,111 @@ describe('local semantic screenplay editor', () => {
     await user.click(zoomOut);
     // Clamped at 70, the existing floor -- a relocation must preserve the original range.
     expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('70%');
+  });
+});
+
+describe('title page editing', () => {
+  const titlePageId = '00000000-0000-4000-8000-0000000000f1';
+
+  function screenplayWithTitlePages(titlePages: TitlePage[]): PersistedScreenplay {
+    const base = persistedScreenplay(
+      '11111111-0000-4000-8000-000000000001',
+      'Custom Title',
+      'INT. APARTMENT - MORNING',
+    );
+    return { ...base, screenplay: { ...base.screenplay, titlePages } };
+  }
+
+  it("renders a screenplay's default title page and lets the writer edit it", async () => {
+    const initial = screenplayWithTitlePages([createDefaultTitlePage(titlePageId, 'Custom Title')]);
+    render(<App initial={initial} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    expect(screen.getByRole('article', { name: 'Title page' })).toBeVisible();
+    expect(screen.getByRole('textbox', { name: 'Title page: title' })).toHaveTextContent(
+      'Custom Title',
+    );
+    expect(screen.getByRole('textbox', { name: 'Title page: written by' })).toHaveTextContent(
+      'written by',
+    );
+    // authors/contact start absent (createDefaultTitlePage's own contract): no line exists yet
+    // to render, only the affordance to add one.
+    expect(
+      screen.queryByRole('textbox', { name: 'Title page: author line 1' }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add author line' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Add contact line' })).toBeVisible();
+  });
+
+  it('autosaves a title-page edit, preserving the rest of the title page exactly', async () => {
+    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
+    const initial = screenplayWithTitlePages([
+      {
+        id: titlePageId,
+        title: 'Custom Title',
+        authors: ['Morgan Vale'],
+        credit: 'written by',
+        source: 'a short story by Iris Kwan',
+        draftDate: 'August 2026',
+        contact: ['morgan@example.test'],
+      },
+    ]);
+    render(<App initial={initial} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    // Every field is present before the edit, including the two the default-creation path never
+    // sets (source, draftDate) -- proving this is real editing support for the whole schema, not
+    // merely for the four fields plan.md's default lists.
+    expect(screen.getByRole('textbox', { name: 'Title page: based on' })).toHaveTextContent(
+      'a short story by Iris Kwan',
+    );
+    expect(screen.getByRole('textbox', { name: 'Title page: draft date' })).toHaveTextContent(
+      'August 2026',
+    );
+
+    const draftDateField = screen.getByRole('textbox', { name: 'Title page: draft date' });
+    draftDateField.textContent = 'September 2026';
+    fireEvent.input(draftDateField);
+
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    const savedScreenplay = save.mock.calls.at(-1)?.[2] as Screenplay;
+    expect(savedScreenplay.titlePages).toEqual([
+      {
+        id: titlePageId,
+        title: 'Custom Title',
+        authors: ['Morgan Vale'],
+        credit: 'written by',
+        source: 'a short story by Iris Kwan',
+        draftDate: 'September 2026',
+        contact: ['morgan@example.test'],
+      },
+    ]);
+    save.mockRestore();
+  });
+
+  it('does not autosave a freshly loaded title page before any edit', async () => {
+    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
+    const initial = screenplayWithTitlePages([createDefaultTitlePage(titlePageId, 'Custom Title')]);
+    render(<App initial={initial} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await new Promise((resolve) => window.setTimeout(resolve, 700));
+    expect(save).not.toHaveBeenCalled();
+    save.mockRestore();
+  });
+
+  it('still treats a screenplay with more than one title page as unsupported and read-only', async () => {
+    const initial = screenplayWithTitlePages([
+      createDefaultTitlePage(titlePageId, 'Custom Title'),
+      createDefaultTitlePage('00000000-0000-4000-8000-0000000000f2', 'Alternate Title'),
+    ]);
+    render(<App initial={initial} />);
+
+    expect(
+      await screen.findByText(
+        /contains more than one title page, notes, dual dialogue, or page breaks/i,
+      ),
+    ).toBeVisible();
+    expect(screen.queryByRole('article', { name: 'Title page' })).not.toBeInTheDocument();
   });
 });

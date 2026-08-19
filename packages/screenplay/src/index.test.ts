@@ -1,14 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { MARGIN_LEFT_IN, MARGIN_RIGHT_IN, PAGE_WIDTH_IN } from './pageFormat.js';
 import { minimalScreenplayFixture, screenplayFixture } from './fixtures.js';
 import {
   SCREENPLAY_SCHEMA_VERSION,
+  DEFAULT_DOCUMENT_SETTINGS,
   MAX_ANNOTATIONS,
   MAX_AUTHORED_TEXT_LENGTH,
   MAX_CANONICAL_NODES,
   MAX_DUAL_DIALOGUE_COLUMN_BLOCKS,
   MAX_ROOT_BLOCKS,
   MAX_TOTAL_AUTHORED_TEXT_LENGTH,
+  createDefaultTitlePage,
   deriveScenes,
   parseScreenplay,
   safeParseScreenplay,
@@ -452,5 +455,134 @@ describe('screenplaySchema', () => {
 
   it('exposes the schema for consumers that need detailed validation errors', () => {
     expect(screenplaySchema.safeParse(minimalScreenplayFixture).success).toBe(true);
+  });
+
+  describe('documentSettings', () => {
+    // Every fixture and test-construction site across the codebase predates this field and omits
+    // it -- that is deliberate (see the field's comment in index.ts): this is what makes every
+    // one of them keep validating unchanged.
+    it("defaults to the specification's current fixed values when omitted", () => {
+      const { documentSettings, ...withoutDocumentSettings } = minimalScreenplayFixture;
+      void documentSettings;
+
+      const parsed = parseScreenplay(withoutDocumentSettings);
+
+      expect(parsed.documentSettings).toEqual(DEFAULT_DOCUMENT_SETTINGS);
+    });
+
+    it('accepts an explicit, fully custom, in-bounds set of settings', () => {
+      const custom = {
+        characterIndentIn: 3.5,
+        parentheticalIndentIn: 3.0,
+        parentheticalWidthIn: 2.2,
+        pageNumberStyle: 'roman' as const,
+        sceneNumbersEnabled: true,
+        autoMoreContinued: false,
+      };
+
+      const parsed = parseScreenplay({ ...minimalScreenplayFixture, documentSettings: custom });
+
+      expect(parsed.documentSettings).toEqual(custom);
+    });
+
+    it('rejects an indent left of the physical left margin', () => {
+      const result = safeParseScreenplay({
+        ...minimalScreenplayFixture,
+        documentSettings: { ...DEFAULT_DOCUMENT_SETTINGS, characterIndentIn: MARGIN_LEFT_IN - 0.1 },
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects a character indent that leaves no room for the cue before the right margin', () => {
+      const result = safeParseScreenplay({
+        ...minimalScreenplayFixture,
+        documentSettings: {
+          ...DEFAULT_DOCUMENT_SETTINGS,
+          characterIndentIn: PAGE_WIDTH_IN - MARGIN_RIGHT_IN,
+        },
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects a parenthetical width so narrow no text could fit', () => {
+      const result = safeParseScreenplay({
+        ...minimalScreenplayFixture,
+        documentSettings: { ...DEFAULT_DOCUMENT_SETTINGS, parentheticalWidthIn: 0.1 },
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects a parenthetical indent and width that together cross the right margin, even though each is individually in bounds', () => {
+      const rightEdgeIn = PAGE_WIDTH_IN - MARGIN_RIGHT_IN;
+      const result = safeParseScreenplay({
+        ...minimalScreenplayFixture,
+        documentSettings: {
+          ...DEFAULT_DOCUMENT_SETTINGS,
+          parentheticalIndentIn: rightEdgeIn - 0.5,
+          parentheticalWidthIn: 1,
+        },
+      });
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues[0]?.path).toEqual(['documentSettings', 'parentheticalWidthIn']);
+      }
+    });
+
+    it('rejects a page-number style outside the two named values', () => {
+      const result = safeParseScreenplay({
+        ...minimalScreenplayFixture,
+        documentSettings: { ...DEFAULT_DOCUMENT_SETTINGS, pageNumberStyle: 'ordinal' },
+      });
+
+      expect(result.success).toBe(false);
+    });
+
+    it('rejects an unrecognized document-settings key', () => {
+      const result = safeParseScreenplay({
+        ...minimalScreenplayFixture,
+        documentSettings: { ...DEFAULT_DOCUMENT_SETTINGS, dialogueWidthIn: 4 },
+      });
+
+      expect(result.success).toBe(false);
+    });
+  });
+});
+
+describe('createDefaultTitlePage', () => {
+  const id = uuidFor(1);
+
+  it('holds only real content: the given title and the literal "written by" credit', () => {
+    expect(createDefaultTitlePage(id, 'The Last Stop')).toEqual({
+      id,
+      title: 'The Last Stop',
+      credit: 'written by',
+    });
+  });
+
+  it('omits authors and contact rather than storing placeholder text or an empty array', () => {
+    const titlePage = createDefaultTitlePage(id, 'The Last Stop');
+
+    expect(titlePage).not.toHaveProperty('authors');
+    expect(titlePage).not.toHaveProperty('contact');
+    expect(titlePage).not.toHaveProperty('source');
+    expect(titlePage).not.toHaveProperty('draftDate');
+  });
+
+  it('validates as a title page on a real screenplay', () => {
+    const result = safeParseScreenplay({
+      ...minimalScreenplayFixture,
+      titlePages: [createDefaultTitlePage(id, 'The Last Stop')],
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.titlePages).toEqual([
+        { id, title: 'The Last Stop', credit: 'written by' },
+      ]);
+    }
   });
 });

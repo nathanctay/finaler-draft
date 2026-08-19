@@ -1,9 +1,10 @@
-import type { Screenplay } from './index.js';
+import { DEFAULT_DOCUMENT_SETTINGS, type Screenplay } from './index.js';
 
 export const screenplayFixture: Screenplay = {
   schemaVersion: 1,
   id: 'e1f8e6a8-e7bb-42bd-b2fa-0805d4064201',
   title: 'The Last Stop',
+  documentSettings: DEFAULT_DOCUMENT_SETTINGS,
   titlePages: [
     {
       id: 'd2df4da9-1c58-421d-86ba-9988a805eea4',
@@ -99,6 +100,7 @@ export const minimalScreenplayFixture: Screenplay = {
   schemaVersion: 1,
   id: 'bc1527f9-5cd9-4e76-a3b4-271b508c3a5d',
   title: 'Untitled Screenplay',
+  documentSettings: DEFAULT_DOCUMENT_SETTINGS,
   titlePages: [],
   blocks: [],
   annotations: [],
