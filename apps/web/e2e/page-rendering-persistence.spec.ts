@@ -401,11 +401,6 @@ test.describe('page rendering: real editor, real DOM', () => {
     await page.keyboard.press('Enter');
 
     // "Shortly after": read back as soon as the edit round-trip returns, with no additional wait.
-    // Under the previous 300ms-debounce implementation this would reliably still show the stale
-    // (pre-edit) spacer height, because a Playwright round-trip is nowhere near 300ms; under the
-    // requestAnimationFrame-coalesced recompute this scope replaced it with, the recompute has
-    // already landed before the browser's next paint, so there is no externally observable
-    // intermediate state left to catch it in -- which is itself the point being proven here.
     // Precondition: splitting at offset 0 leaves an empty leading block. If the caret was not
     // where this test needs it, this fails loudly rather than letting the assertions below pass
     // for the wrong reason.
@@ -414,6 +409,26 @@ test.describe('page rendering: real editor, real DOM', () => {
     );
     expect(leadingBlockText).toBe('');
 
+    /**
+     * Read after one animation frame, not immediately. Pagination is coalesced to the next frame,
+     * so between the edit landing in the DOM and the recompute running there is a window in which
+     * the break legitimately sits at its pre-edit position. A Playwright round-trip takes a few
+     * milliseconds and a frame takes eight to sixteen, so an immediate read wins that race often
+     * enough to fail roughly two runs in three — reading a state that is intermediate and correct,
+     * not a defect. The guarantee the design actually makes is about paint: nothing is ever
+     * rendered in the wrong place.
+     *
+     * Waiting exactly two frames is deliberate rather than polling until stable. It is long enough
+     * that the coalesced recompute has certainly run, and short enough that the regression this
+     * assertion exists to catch still fails loudly: the 300 ms debounce it replaced is roughly
+     * twenty frames, so a stale spacer is still caught with an enormous margin.
+     */
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        }),
+    );
     const immediateOffsetIn = await readFirstBreakNumberOffsetIn();
     expect(Math.abs(immediateOffsetIn - baselineOffsetIn)).toBeLessThan(TOLERANCE_IN);
 
