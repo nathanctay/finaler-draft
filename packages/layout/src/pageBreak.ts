@@ -37,6 +37,7 @@ import {
   MARGIN_TOP_IN,
   PAGE_HEIGHT_IN,
 } from '@finaler-draft/screenplay/pageFormat';
+import { DEFAULT_DOCUMENT_SETTINGS, type DocumentSettings } from '@finaler-draft/screenplay';
 import type { AuthoredLine, GeneratedLine, LayoutResult, Page, PageLine } from './model.js';
 import type { Group, SceneHeadingGroup, SimpleGroup, SpeechGroup } from './groups.js';
 
@@ -221,13 +222,22 @@ function continuedLine(sourceBlockId: string, characterText: string | undefined)
   };
 }
 
-/** Places the remainder of a speech after a `(MORE)`/`CONT'D` split, splitting again if it still doesn't fit. */
+/**
+ * Places the remainder of a speech after a dialogue split, splitting again if it still doesn't
+ * fit. `autoMoreContinued` gates only whether the generated `(MORE)`/`CONT'D` marker lines
+ * themselves are emitted (plan.md: "A document setting to suppress automatic `(MORE)` and
+ * `CONT'D` entirely... Default on") — the split point and page-break decisions are unchanged
+ * either way, so a page that would have ended with a `(MORE)` line simply ends one line short of
+ * capacity when the setting is off, rather than this function re-deriving a different optimum
+ * room reservation for a case plan.md does not specify page-fill behavior for.
+ */
 function placeSpeechContinuation(
   builder: PageBuilder,
   characterBlockId: string,
   characterText: string | undefined,
   remaining: readonly AuthoredLine[],
   allowFreshBreak: boolean,
+  autoMoreContinued: boolean,
 ): void {
   if (remaining.length === 0) {
     return;
@@ -241,17 +251,37 @@ function placeSpeechContinuation(
   const cut = room >= 2 ? findDialogueSplitIndex(remaining, room - 1) : undefined;
   if (cut !== undefined) {
     builder.pushMany(remaining.slice(0, cut));
-    builder.push(moreLine(characterBlockId));
+    if (autoMoreContinued) {
+      builder.push(moreLine(characterBlockId));
+    }
     builder.breakPage();
-    builder.push(continuedLine(characterBlockId, characterText));
-    placeSpeechContinuation(builder, characterBlockId, characterText, remaining.slice(cut), true);
+    if (autoMoreContinued) {
+      builder.push(continuedLine(characterBlockId, characterText));
+    }
+    placeSpeechContinuation(
+      builder,
+      characterBlockId,
+      characterText,
+      remaining.slice(cut),
+      true,
+      autoMoreContinued,
+    );
     return;
   }
 
   if (allowFreshBreak) {
     builder.breakPage();
-    builder.push(continuedLine(characterBlockId, characterText));
-    placeSpeechContinuation(builder, characterBlockId, characterText, remaining, false);
+    if (autoMoreContinued) {
+      builder.push(continuedLine(characterBlockId, characterText));
+    }
+    placeSpeechContinuation(
+      builder,
+      characterBlockId,
+      characterText,
+      remaining,
+      false,
+      autoMoreContinued,
+    );
     return;
   }
 
@@ -266,7 +296,12 @@ function placeSpeechContinuation(
  * no character cue to attribute a `(MORE)`/`CONT'D` pair to — see `buildGroups`'s orphan-speech
  * handling), the whole speech moves to the next page.
  */
-function placeSpeechGroup(builder: PageBuilder, group: SpeechGroup, allowFreshBreak = true): void {
+function placeSpeechGroup(
+  builder: PageBuilder,
+  group: SpeechGroup,
+  autoMoreContinued: boolean,
+  allowFreshBreak = true,
+): void {
   const contentLines: AuthoredLine[] = [
     ...group.characterLines,
     ...group.units.flatMap((unit) => unit.lines),
@@ -293,15 +328,20 @@ function placeSpeechGroup(builder: PageBuilder, group: SpeechGroup, allowFreshBr
         }
       }
       builder.pushMany(effectiveContent.slice(0, cut));
-      builder.push(moreLine(group.characterBlockId));
+      if (autoMoreContinued) {
+        builder.push(moreLine(group.characterBlockId));
+      }
       builder.breakPage();
-      builder.push(continuedLine(group.characterBlockId, group.characterText));
+      if (autoMoreContinued) {
+        builder.push(continuedLine(group.characterBlockId, group.characterText));
+      }
       placeSpeechContinuation(
         builder,
         group.characterBlockId,
         group.characterText,
         effectiveContent.slice(cut),
         true,
+        autoMoreContinued,
       );
       return;
     }
@@ -309,7 +349,7 @@ function placeSpeechGroup(builder: PageBuilder, group: SpeechGroup, allowFreshBr
 
   if (allowFreshBreak) {
     builder.breakPage();
-    placeSpeechGroup(builder, group, false);
+    placeSpeechGroup(builder, group, autoMoreContinued, false);
     return;
   }
 
@@ -318,8 +358,18 @@ function placeSpeechGroup(builder: PageBuilder, group: SpeechGroup, allowFreshBr
   placeLinesPlain(builder, effectiveLines(builder, withBlank));
 }
 
-export function layoutGroups(groups: readonly Group[]): LayoutResult {
+/**
+ * `documentSettings` defaults to the specification's current fixed values (`autoMoreContinued:
+ * true`), so every existing caller keeps producing identical output unchanged. Only
+ * `autoMoreContinued` is read here; the rest of `DocumentSettings` belongs to grouping
+ * (`buildGroups`) or to rendering, not to page breaking.
+ */
+export function layoutGroups(
+  groups: readonly Group[],
+  documentSettings: DocumentSettings = DEFAULT_DOCUMENT_SETTINGS,
+): LayoutResult {
   const builder = new PageBuilder();
+  const { autoMoreContinued } = documentSettings;
 
   for (let index = 0; index < groups.length; index += 1) {
     // Non-null: the `for` bound above already guarantees `index` is in range.
@@ -340,7 +390,7 @@ export function layoutGroups(groups: readonly Group[]): LayoutResult {
         break;
       }
       case 'speech': {
-        placeSpeechGroup(builder, group);
+        placeSpeechGroup(builder, group, autoMoreContinued);
         break;
       }
     }

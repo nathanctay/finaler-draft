@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ELEMENT_INDENTS, MARGIN_LEFT_IN, PAGE_WIDTH_IN, MARGIN_RIGHT_IN } from './pageFormat.js';
 
 export const SCREENPLAY_SCHEMA_VERSION = 1 as const;
 export const MAX_SCREENPLAY_TITLE_LENGTH = 250;
@@ -27,6 +28,96 @@ const titlePageSchema = z
     contact: z.array(screenplayTextSchema).max(MAX_TITLE_PAGE_LINES).optional(),
   })
   .strict();
+
+/**
+ * plan.md's "Document settings" section: "These values are document state, not application
+ * preferences. They live in the canonical screenplay, travel with it through export and import,
+ * and are inputs to the layout package." Only the six values that section lists as adjustable are
+ * here -- plan.md is explicit that the typeface, type size, and pitch are "not adjustable, ever,"
+ * and (separately, in "Element indents") that action/dialogue/scene-heading/shot widths are
+ * specification, not settings. Only `character`'s indent and `parenthetical`'s indent and width
+ * move; everything else in `ELEMENT_INDENTS` stays fixed.
+ *
+ * No field is optional: a screenplay either has a complete, valid set of document settings or
+ * none of this validates. Partial settings would leave pagination to guess at what wasn't
+ * specified, which is exactly the kind of silent, ambiguous behavior schema validation elsewhere
+ * in this file exists to prevent.
+ */
+const MAX_ADJUSTABLE_INDENT_IN = PAGE_WIDTH_IN - MARGIN_RIGHT_IN;
+
+/**
+ * Sanity floors, not specification values: plan.md places no lower bound on how far a writer may
+ * push these (the parenthetical-indent-vs-character-indent warning it does specify is a UI
+ * warning, not a schema constraint -- "A warning, not a block"). These exist only to reject a
+ * setting so extreme no element could hold any text at all, which would otherwise let a
+ * malformed or adversarial document setting silently corrupt every page's pagination.
+ */
+const MIN_CHARACTER_CUE_ROOM_IN = 1; // room for at least ten characters before the right margin
+const MIN_PARENTHETICAL_ROOM_IN = 0.3; // room for at least three characters
+
+function requiredElementIndentValue(
+  element: keyof typeof ELEMENT_INDENTS,
+  field: 'leftIn' | 'widthIn',
+): number {
+  const value = ELEMENT_INDENTS[element][field];
+  if (value === undefined) {
+    throw new Error(
+      `ELEMENT_INDENTS.${element}.${field} is unset; the document-settings default derivation is stale.`,
+    );
+  }
+  return value;
+}
+
+const documentSettingsSchema = z
+  .object({
+    characterIndentIn: z
+      .number()
+      .min(MARGIN_LEFT_IN)
+      .max(MAX_ADJUSTABLE_INDENT_IN - MIN_CHARACTER_CUE_ROOM_IN),
+    parentheticalIndentIn: z
+      .number()
+      .min(MARGIN_LEFT_IN)
+      .max(MAX_ADJUSTABLE_INDENT_IN - MIN_PARENTHETICAL_ROOM_IN),
+    parentheticalWidthIn: z
+      .number()
+      .min(MIN_PARENTHETICAL_ROOM_IN)
+      .max(MAX_ADJUSTABLE_INDENT_IN - MARGIN_LEFT_IN),
+    // "Roman numerals are available as a document setting" (plan.md, "Page numbering"). Position
+    // is deliberately not a field here -- plan.md's "Page numbering" section states only a fixed
+    // top-right position with no alternative ever described, which does not match "Document
+    // settings"' listing of "page-number position" as adjustable. Treated as an unresolved
+    // discrepancy in plan.md rather than an invented control; see this scope's progress log.
+    pageNumberStyle: z.enum(['arabic', 'roman']),
+    sceneNumbersEnabled: z.boolean(),
+    autoMoreContinued: z.boolean(),
+  })
+  .strict()
+  .refine(
+    (settings) =>
+      settings.parentheticalIndentIn + settings.parentheticalWidthIn <= MAX_ADJUSTABLE_INDENT_IN,
+    {
+      message: 'Parenthetical indent plus width must not cross the right margin.',
+      path: ['parentheticalWidthIn'],
+    },
+  );
+
+export type DocumentSettings = z.infer<typeof documentSettingsSchema>;
+
+/**
+ * The specification's current fixed values, unchanged from `pageFormat.ts`'s `ELEMENT_INDENTS`
+ * and the `(MORE)`/`CONT'D` and scene-number defaults plan.md states directly ("disabled by
+ * default" for scene numbers; "defaulting to on" for automatic `(MORE)`/`CONT'D`). Every new
+ * screenplay gets these, so existing pagination behavior is unchanged until a writer -- or,
+ * before the document-settings dialog exists, a direct API caller -- sets something different.
+ */
+export const DEFAULT_DOCUMENT_SETTINGS: DocumentSettings = {
+  characterIndentIn: requiredElementIndentValue('character', 'leftIn'),
+  parentheticalIndentIn: requiredElementIndentValue('parenthetical', 'leftIn'),
+  parentheticalWidthIn: requiredElementIndentValue('parenthetical', 'widthIn'),
+  pageNumberStyle: 'arabic',
+  sceneNumbersEnabled: false,
+  autoMoreContinued: true,
+};
 
 const sceneHeadingSchema = z
   .object({
@@ -106,6 +197,28 @@ export type ScreenplayBlock = z.infer<typeof screenplayBlockSchema>;
 export type DialogueColumn = z.infer<typeof dialogueColumnSchema>;
 export type TitlePage = z.infer<typeof titlePageSchema>;
 export type SceneHeadingBlock = z.infer<typeof sceneHeadingSchema>;
+
+/**
+ * The title page a new screenplay is given by default, per plan.md's "Title page" section: "A
+ * new screenplay gets a dedicated title page by default." Stores only real content, never a
+ * placeholder string a writer must remember to overwrite before it round-trips or prints:
+ *
+ *  - `title` is the screenplay title the writer already supplied at creation -- the correct
+ *    value, not a placeholder.
+ *  - `credit` is the literal "written by", standard on essentially every screenplay and not
+ *    specific to any one document.
+ *  - `authors` and `contact` start absent, not `[]`. The editor renders a placeholder hint on the
+ *    empty field -- the same `:empty::after` convention `styles.css` already uses for empty
+ *    screenplay text blocks -- rather than storing literal text like "Author name" that would
+ *    round-trip and print as real content if the writer never touches it. Omitting the keys
+ *    (rather than `[]`) also matches the convention `apps/web/src/titlePageEditor.ts` uses when
+ *    projecting the title-page editor's state back to canonical form ("no entries" -> key
+ *    omitted), so a freshly created title page round-trips through the editor unchanged even
+ *    before a writer adds an author or contact line.
+ */
+export function createDefaultTitlePage(id: string, title: string): TitlePage {
+  return { id, title, credit: 'written by' };
+}
 
 /** A JavaScript string index, measured in UTF-16 code units. */
 export type Utf16CodeUnitOffset = number;
@@ -236,6 +349,12 @@ export const screenplaySchema = z
     id: stableIdSchema,
     title: titleSchema,
     titlePages: z.array(titlePageSchema).max(MAX_TITLE_PAGES),
+    // Defaulted, not required: nothing writes a real (dialog-set) value yet -- the editor round
+    // trip, the layout package, and the document-settings dialog itself are later increments of
+    // this same scope (see progress/title-page-and-document-settings.md) -- so every existing
+    // construction site across the codebase that predates this field keeps validating unchanged,
+    // getting the specification's current fixed values exactly as if this field didn't exist yet.
+    documentSettings: documentSettingsSchema.default(() => ({ ...DEFAULT_DOCUMENT_SETTINGS })),
     blocks: z.array(screenplayBlockSchema).max(MAX_ROOT_BLOCKS),
     annotations: z.array(annotationSchema).max(MAX_ANNOTATIONS),
   })

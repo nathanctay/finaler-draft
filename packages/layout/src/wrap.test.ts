@@ -303,4 +303,52 @@ describe('wrapBlock', () => {
     expect(lines).toHaveLength(2);
     expect(lines[0]?.text).toBe('x'.repeat(20));
   });
+
+  describe('adjustable geometry (document settings)', () => {
+    it('derives a wider character budget from a document setting that moves the indent left', () => {
+      // 3.0 in indent instead of the 3.7 in default -- (7.5 - 3.0) * 10 = 45, not 38.
+      const text = 'x'.repeat(40);
+      const lines = wrapBlock(BLOCK_ID, 'character', text, {
+        characterIndentIn: 3.0,
+        parentheticalWidthIn: 2.0,
+      });
+      expect(lines).toHaveLength(1);
+      expect(lines[0]?.text).toBe(text);
+    });
+
+    it('derives a narrower character budget from a document setting that moves the indent right', () => {
+      // 4.5 in indent instead of the 3.7 in default -- (7.5 - 4.5) * 10 = 30, not 38.
+      const text = 'x'.repeat(31);
+      const lines = wrapBlock(BLOCK_ID, 'character', text, {
+        characterIndentIn: 4.5,
+        parentheticalWidthIn: 2.0,
+      });
+      expect(lines).toHaveLength(2);
+      expect(lines[0]?.text).toBe('x'.repeat(30));
+    });
+
+    it('derives a wider parenthetical budget from a document setting that widens it', () => {
+      // 3.0 in width instead of the 2.0 in default -- 3.0 * 10 = 30, not 20.
+      const text = 'x'.repeat(25);
+      const lines = wrapBlock(BLOCK_ID, 'parenthetical', text, {
+        characterIndentIn: 3.7,
+        parentheticalWidthIn: 3.0,
+      });
+      expect(lines).toHaveLength(1);
+      expect(lines[0]?.text).toBe(text);
+    });
+
+    it('leaves every other element budget unaffected by document settings, since only character and parenthetical are adjustable', () => {
+      const dialogueText = 'x'.repeat(36);
+      const transitionText = 'x'.repeat(65);
+      const custom = { characterIndentIn: 5.0, parentheticalWidthIn: 3.5 };
+
+      expect(wrapBlock(BLOCK_ID, 'dialogue', dialogueText, custom)).toEqual(
+        wrapBlock(BLOCK_ID, 'dialogue', dialogueText),
+      );
+      expect(wrapBlock(BLOCK_ID, 'transition', transitionText, custom)).toEqual(
+        wrapBlock(BLOCK_ID, 'transition', transitionText),
+      );
+    });
+  });
 });

@@ -1,5 +1,14 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react';
+import {
+  DEFAULT_DOCUMENT_SETTINGS,
   deriveScenes,
   type DerivedScene,
   type Screenplay,
@@ -21,6 +30,13 @@ import {
 import { PaginationExtension, paginationPluginKey } from './paginationExtension.js';
 import { PAGE_GAP_IN, pageStackMinHeightIn } from './pagination.js';
 import { ApiError, api, type PersistedScreenplay } from './api.js';
+import { applyPageGeometryCssVariables } from './pageGeometryCss.js';
+import { TitlePageView } from './titlePageEditor.js';
+import {
+  titlePageFromState,
+  titlePageStateFromTitlePage,
+  type TitlePageState,
+} from './titlePageState.js';
 
 type Panel = 'navigator' | 'inspector';
 
@@ -127,6 +143,7 @@ const legacyInitial: PersistedScreenplay = {
     schemaVersion: 1,
     title: 'The Long Way Home',
     titlePages: [],
+    documentSettings: DEFAULT_DOCUMENT_SETTINGS,
   } satisfies Screenplay,
 };
 
@@ -168,13 +185,18 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   });
   const [version, setVersion] = useState(initial.version);
   const [saveState, setSaveState] = useState<'saved' | 'saving' | 'failed' | 'conflict'>('saved');
-  const initialContent = useMemo(() => {
+  // `editorContentFromScreenplay` throws for canonical features this text-block editor cannot
+  // faithfully preserve (more than one title page, notes, dual dialogue, page breaks); `undefined`
+  // here means "read-only", same meaning `initialContent` carried before the title page split out
+  // of it (see the two derived constants below).
+  const initialProjection = useMemo(() => {
     try {
       return editorContentFromScreenplay(initial.screenplay);
     } catch {
       return undefined;
     }
   }, [initial.screenplay]);
+  const initialContent = initialProjection?.body;
   const editorContent = useMemo(() => {
     if (initialContent === undefined || initialContent.content.length > 0) {
       return initialContent;
@@ -189,6 +211,17 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
       type: 'screenplayDocument' as const,
     };
   }, [initialContent]);
+  // The title page lives in its own React state, not in the ProseMirror document: it never
+  // paginates with the body and is never numbered (plan.md's "Title page"), and the layout
+  // package/pagination plugin structurally cannot see it this way (see screenplayEditor.ts's
+  // `projectDocumentScreenplay` comment). `useState`'s lazy initializer runs once, matching every
+  // other per-screenplay state here -- `App` remounts a fresh instance per screenplay (see the
+  // route-navigation test in App.test.tsx), so `initial` never changes under a mounted instance.
+  const [titlePageState, setTitlePageState] = useState<TitlePageState | undefined>(() =>
+    initialProjection?.titlePage
+      ? titlePageStateFromTitlePage(initialProjection.titlePage)
+      : undefined,
+  );
   const inFlight = useRef(false);
   const latestProjection = useRef<LocalScreenplayProjection | undefined>(undefined);
   const savedWire = useRef(JSON.stringify(initial.screenplay));
@@ -200,10 +233,33 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   useEffect(() => {
     saveStateRef.current = saveState;
   }, [saveState]);
+  // `main.tsx` applies the specification's fixed defaults once at bootstrap, before any
+  // screenplay has loaded (see that module's own comment for why). Once one has, its own
+  // `documentSettings` -- character indent, parenthetical indent and width, per plan.md's
+  // "Document settings" section -- take over, here rather than in `main.tsx`, because those
+  // values are document state, not an application-wide default. `App` remounts a fresh editor per
+  // screenplay (see the route-navigation test this file's own test suite carries), so this runs
+  // exactly once per loaded document.
+  useEffect(() => {
+    applyPageGeometryCssVariables(initial.screenplay.documentSettings);
+  }, [initial.screenplay.documentSettings]);
   const updateZoom = (amount: number) =>
     setZoom((current) => Math.min(150, Math.max(70, current + amount)));
   const togglePanel = (panel: Panel) =>
     setPanels((current) => ({ ...current, [panel]: !current[panel] }));
+
+  // Shared by `syncEditorState` (body edits, via Tiptap's own callbacks) and
+  // `updateTitlePageState` (title-page edits, which never touch the ProseMirror document and so
+  // never fire a Tiptap callback at all) -- both need to record the latest projection and, when
+  // the edit actually changed something, schedule a save from it.
+  const applyProjection = (nextProjection: LocalScreenplayProjection, changed: boolean) => {
+    latestProjection.current = nextProjection;
+    setProjection(nextProjection);
+    if (changed) {
+      editSequence.current += 1;
+      scheduleSave(nextProjection);
+    }
+  };
 
   const syncEditorState = (editorInstance: Editor, changed = false) => {
     const currentBlock = getActiveScreenplayBlock(editorInstance);
@@ -211,13 +267,13 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
       setActiveBlockId(currentBlock.id);
       setActiveElement(currentBlock.element);
     }
-    const nextProjection = projectLocalScreenplay(editorInstance, initial.id, initial.title);
-    latestProjection.current = nextProjection;
-    setProjection(nextProjection);
-    if (changed) {
-      editSequence.current += 1;
-      scheduleSave(nextProjection);
-    }
+    const nextProjection = projectLocalScreenplay(
+      editorInstance,
+      initial.id,
+      initial.title,
+      titlePageState ? [titlePageFromState(titlePageState)] : [],
+    );
+    applyProjection(nextProjection, changed);
   };
 
   const scheduleSave = (nextProjection: LocalScreenplayProjection) => {
@@ -301,7 +357,10 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
         role: 'textbox',
       },
     },
-    extensions: [...screenplayExtensions, PaginationExtension],
+    extensions: [
+      ...screenplayExtensions,
+      PaginationExtension.configure({ documentSettings: initial.screenplay.documentSettings }),
+    ],
     onCreate: ({ editor: editorInstance }) => {
       syncEditorState(editorInstance);
       syncPageCount(editorInstance);
@@ -320,10 +379,35 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
       setActiveBlockId(currentBlock.id);
       setActiveElement(currentBlock.element);
     }
-    const nextProjection = projectLocalScreenplay(editor, initial.id, initial.title);
+    const nextProjection = projectLocalScreenplay(
+      editor,
+      initial.id,
+      initial.title,
+      titlePageState ? [titlePageFromState(titlePageState)] : [],
+    );
     latestProjection.current = nextProjection;
     setProjection(nextProjection);
-  }, [editor, initial.id, initial.title]);
+    // `titlePageState` is a real dependency (it feeds `projectLocalScreenplay` above): this
+    // mainly re-seeds `projection` once when `editor` first becomes available (the same moment
+    // `onCreate` also does), but including it keeps that honest if it ever changes before then,
+    // rather than asserting -- via an exhaustive-deps suppression -- a timing guarantee this
+    // effect does not actually need to rely on.
+  }, [editor, initial.id, initial.title, titlePageState]);
+
+  // Title-page edits happen in separate React state, never inside the ProseMirror document (see
+  // the `titlePageState` comment above), so they never fire `onUpdate`/`onTransaction` the way
+  // `syncEditorState` relies on. This is the title-page equivalent, called directly from
+  // `TitlePageView`'s `onChange`. Takes `next` directly rather than reading `titlePageState` back
+  // out of state, because `setTitlePageState` is asynchronous and the save this triggers must
+  // reflect the edit that just happened, not whatever the closure captured before it.
+  const updateTitlePageState = (next: TitlePageState) => {
+    setTitlePageState(next);
+    if (!editor) return;
+    const nextProjection = projectLocalScreenplay(editor, initial.id, initial.title, [
+      titlePageFromState(next),
+    ]);
+    applyProjection(nextProjection, true);
+  };
 
   const scenes = useMemo(
     () => (projection.valid ? deriveScenes(projection.screenplay.blocks) : []),
@@ -339,6 +423,26 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     const position = findScreenplayBlockPosition(editor, scene.id);
     if (position !== undefined) {
       editor.commands.focus(position + 1, { scrollIntoView: false });
+    }
+  };
+
+  // A near-empty screenplay is nearly all blank page: `.script-body` is content-sized (see
+  // styles.css), so its actual DOM box ends a few lines down while `.page` still paints the full
+  // manuscript height beneath it. A click in that gap lands outside the editable content
+  // entirely and, unhandled, does nothing -- there is no text there for the browser's native
+  // contenteditable click-to-position behavior to find. Redirecting it to the end of the
+  // document is the closest point on the page to where the writer actually clicked, in the only
+  // direction that makes sense for a click below everything that has been written. A click
+  // already inside the editable content is left alone, so ProseMirror's own (more precise)
+  // click-to-position handling is never second-guessed.
+  const handlePageMouseDown = (event: ReactMouseEvent<HTMLElement>) => {
+    if (!editor || editor.view.dom.contains(event.target as Node)) {
+      return;
+    }
+    const contentBottom = editor.view.dom.getBoundingClientRect().bottom;
+    if (event.clientY > contentBottom) {
+      event.preventDefault();
+      editor.commands.focus('end', { scrollIntoView: false });
     }
   };
 
@@ -372,7 +476,7 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
             className={projection.valid ? 'save-dot' : 'save-dot attention'}
             aria-label="Local draft"
           />
-          {initial.title} <span className="title-type">Screenplay · v{version}</span>
+          {initial.title} <span className="title-type">Screenplay</span>
         </div>
         <span className="account-button" aria-label="Signed-in writer">
           FD
@@ -509,22 +613,40 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
             <span>5</span>
             <span>6</span>
           </div>
-          <article
-            className={continuousScroll ? 'page continuous' : 'page'}
-            style={
-              {
-                transform: `scale(${zoom / 100})`,
-                '--fd-page-gap': `${PAGE_GAP_IN}in`,
-                '--fd-page-stack-min-height': `${pageStackMinHeightIn(pageCount)}in`,
-              } as CSSProperties
-            }
-            aria-label={`${initial.title} screenplay canvas`}
-          >
-            <div className="page-number">DRAFT</div>
-            <div className={showLabels ? 'script-body show-element-labels' : 'script-body'}>
-              <EditorContent editor={editor} />
-            </div>
-          </article>
+          <div className="pages">
+            {titlePageState && (
+              // The title page is manuscript content (plan.md's "Title page"), so it scales with
+              // zoom the same way `.page` does below -- the one crossing plan.md's "Manuscript and
+              // interface are separate type systems" allows. The zoom style is passed directly
+              // rather than lifted onto a shared wrapper: `.page`'s own inline style already
+              // carries `--fd-page-stack-min-height` (read directly off `.page` by
+              // App.test.tsx/page-rendering-persistence.spec.ts), which a wrapper would have had to
+              // keep carrying anyway, so nothing is gained by moving it and something would be put
+              // at risk.
+              <TitlePageView
+                onChange={updateTitlePageState}
+                state={titlePageState}
+                style={{ transform: `scale(${zoom / 100})` } as CSSProperties}
+              />
+            )}
+            <article
+              className={continuousScroll ? 'page continuous' : 'page'}
+              style={
+                {
+                  transform: `scale(${zoom / 100})`,
+                  '--fd-page-gap': `${PAGE_GAP_IN}in`,
+                  '--fd-page-stack-min-height': `${pageStackMinHeightIn(pageCount)}in`,
+                } as CSSProperties
+              }
+              aria-label={`${initial.title} screenplay canvas`}
+              onMouseDown={handlePageMouseDown}
+            >
+              <div className="page-number">DRAFT</div>
+              <div className={showLabels ? 'script-body show-element-labels' : 'script-body'}>
+                <EditorContent editor={editor} />
+              </div>
+            </article>
+          </div>
         </section>
         {panels.inspector && (
           <aside className="panel inspector" aria-label="Inspector">
@@ -548,8 +670,8 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
               <h2>Scope</h2>
               <p className="muted">
                 {initialContent
-                  ? 'This editor supports screenplay text blocks. Notes, dual dialogue, page breaks, title pages, imports, exports, and print pagination are not editable here.'
-                  : 'This screenplay contains title pages, notes, dual dialogue, or page breaks. It is read-only until a compatible editor is available.'}
+                  ? 'This editor supports screenplay text blocks and a single title page. Notes, dual dialogue, page breaks, more than one title page, imports, exports, and print pagination are not editable here.'
+                  : 'This screenplay contains more than one title page, notes, dual dialogue, or page breaks. It is read-only until a compatible editor is available.'}
               </p>
             </section>
           </aside>

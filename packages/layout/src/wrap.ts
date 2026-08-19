@@ -12,6 +12,7 @@ import {
   PAGE_WIDTH_IN,
 } from '@finaler-draft/screenplay/pageFormat';
 import type { ScreenplayElementKind } from '@finaler-draft/screenplay/pageFormat';
+import { DEFAULT_DOCUMENT_SETTINGS, type DocumentSettings } from '@finaler-draft/screenplay';
 import type { AuthoredLine, Utf16CodeUnitOffset } from './model.js';
 
 /**
@@ -231,56 +232,83 @@ export function wrapBlockText(
 /**
  * `character` and `transition` have no `characters` figure in `ELEMENT_INDENTS` — plan.md states
  * wrap budgets directly only for action, scene heading, shot (60), dialogue (35), and
- * parenthetical (20). Leaving the other two unwrapped would let an over-long cue or transition
- * run past the right margin and off the page, silently corrupting the PDF: the worst failure
- * mode available. Their budgets are not missing, they are implied by the same geometry every
- * other element's budget already projects from character cells: no element may cross the right
- * margin at `PAGE_WIDTH_IN - MARGIN_RIGHT_IN` (7.5 in).
+ * parenthetical (20, itself `parentheticalWidthIn * NOMINAL_CHARACTERS_PER_INCH` at the
+ * specification's default 2.0 in width). Leaving `character`/`transition` unwrapped would let an
+ * over-long cue or transition run past the right margin and off the page, silently corrupting the
+ * PDF: the worst failure mode available. Their budgets are not missing, they are implied by the
+ * same geometry every other element's budget already projects from character cells: no element
+ * may cross the right margin at `PAGE_WIDTH_IN - MARGIN_RIGHT_IN` (7.5 in).
  *
- * This derivation multiplies by `NOMINAL_CHARACTERS_PER_INCH` — the specified nominal 10-pitch
- * grid every measurement in pageFormat.ts is written in terms of — and never
+ * `character` and `parenthetical` are, per plan.md's "Document settings" section, the two
+ * elements whose geometry a document setting may move (indent for both, width for parenthetical
+ * too) — every other element's budget above is specification, not a setting, and stays fixed.
+ * Both derivations below multiply by `NOMINAL_CHARACTERS_PER_INCH` — the specified nominal
+ * 10-pitch grid every measurement in pageFormat.ts is written in terms of — and never
  * `MEASURED_COURIER_PRIME_ADVANCE_EM`, which is the one constant this engine must never read.
- * `Math.round` only absorbs binary floating-point noise in the inch subtraction (e.g.
- * `7.5 - 3.7`); both results are exact integers by specification and are pinned by tests.
+ * `Math.round` only absorbs binary floating-point noise in the inch arithmetic (e.g. `7.5 - 3.7`);
+ * every result at the specification's default settings is an exact integer, pinned by tests.
  */
 
-/** `character` starts at `ELEMENT_INDENTS.character.leftIn` (3.7 in) and runs to the right margin. */
-const CHARACTER_CUE_LEFT_IN = ELEMENT_INDENTS.character.leftIn;
-if (CHARACTER_CUE_LEFT_IN === undefined) {
-  throw new Error(
-    'ELEMENT_INDENTS.character.leftIn is unset; the character wrap-budget derivation is stale.',
+/** `character` starts at its (adjustable) indent and runs to the right margin. */
+function characterWrapBudgetFor(characterIndentIn: number): number {
+  return Math.round(
+    (PAGE_WIDTH_IN - MARGIN_RIGHT_IN - characterIndentIn) * NOMINAL_CHARACTERS_PER_INCH,
   );
 }
 
-/** Derived, not normative: `(7.5 - 3.7) in * 10 chars/in = 38 characters`. */
-export const CHARACTER_WRAP_BUDGET = Math.round(
-  (PAGE_WIDTH_IN - MARGIN_RIGHT_IN - CHARACTER_CUE_LEFT_IN) * NOMINAL_CHARACTERS_PER_INCH,
+/** `parenthetical`'s budget is its (adjustable) width, in characters at the nominal pitch. */
+function parentheticalWrapBudgetFor(parentheticalWidthIn: number): number {
+  return Math.round(parentheticalWidthIn * NOMINAL_CHARACTERS_PER_INCH);
+}
+
+/**
+ * Derived at the specification's default settings, not normative on their own: `(7.5 - 3.7) in *
+ * 10 chars/in = 38 characters`. Retained as a plain constant (rather than requiring every caller
+ * to invoke `characterWrapBudgetFor(DEFAULT_DOCUMENT_SETTINGS.characterIndentIn)`) because it is
+ * still what a caller gets when no document settings are supplied, and existing tests pin it by
+ * name.
+ */
+export const CHARACTER_WRAP_BUDGET = characterWrapBudgetFor(
+  DEFAULT_DOCUMENT_SETTINGS.characterIndentIn,
 );
 
 /**
  * `transition` is right-aligned at the same right margin as the body and, per plan.md, may
  * extend left to the same left margin as the body — so its budget is exactly the body width in
  * characters. Reusing `BODY_WIDTH_CHARACTERS` avoids a second inch calculation for a figure the
- * specification already states directly.
+ * specification already states directly. Not adjustable: `transition` is not among the elements
+ * plan.md's "Document settings" section lists.
  */
 export const TRANSITION_WRAP_BUDGET = BODY_WIDTH_CHARACTERS;
 
 /**
- * Wraps one block's authored text according to its element's page-format budget — the direct
- * `ELEMENT_INDENTS` figure where one exists, or the derived `character`/`transition` budget
- * above otherwise. Every `ScreenplayElementKind` has a budget; none is left unwrapped.
+ * Wraps one block's authored text according to its element's page-format budget: the direct
+ * `ELEMENT_INDENTS` figure for the elements whose budget is fixed specification, or a budget
+ * derived from `geometry` for `character`/`parenthetical` (adjustable) and `transition` (fixed,
+ * but likewise implied rather than tabulated — see the module comment above). Every
+ * `ScreenplayElementKind` has a budget; none is left unwrapped.
+ *
+ * `geometry` defaults to the specification's current fixed values, so every caller that predates
+ * document settings — including every existing test in this package — keeps producing identical
+ * output unchanged.
  */
 export function wrapBlock(
   blockId: string,
   element: ScreenplayElementKind,
   text: string,
+  geometry: Pick<
+    DocumentSettings,
+    'characterIndentIn' | 'parentheticalWidthIn'
+  > = DEFAULT_DOCUMENT_SETTINGS,
 ): AuthoredLine[] {
   const budget =
     element === 'character'
-      ? CHARACTER_WRAP_BUDGET
+      ? characterWrapBudgetFor(geometry.characterIndentIn)
       : element === 'transition'
         ? TRANSITION_WRAP_BUDGET
-        : ELEMENT_INDENTS[element].characters;
+        : element === 'parenthetical'
+          ? parentheticalWrapBudgetFor(geometry.parentheticalWidthIn)
+          : ELEMENT_INDENTS[element].characters;
   if (budget === undefined) {
     throw new Error(`No wrap budget is available for element "${element}".`);
   }

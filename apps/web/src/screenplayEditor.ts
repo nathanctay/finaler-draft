@@ -7,6 +7,7 @@ import {
   safeParseScreenplay,
   type Screenplay,
   type ScreenplayBlock,
+  type TitlePage,
 } from '@finaler-draft/screenplay';
 
 export const screenplayElementTypes = [
@@ -202,11 +203,20 @@ function mapBlock(node: {
  * inside a ProseMirror `Plugin`, which only ever has a `state`/`doc`, never an `Editor` instance.
  * `projectEditorScreenplay` below is a thin convenience wrapper over this for call sites that do
  * have an `Editor` on hand.
+ *
+ * `titlePages` defaults to `[]`, not because a title page is unsupported (it is now editable --
+ * see `editorContentFromScreenplay` below), but because the title page lives in separate React
+ * state, not in this ProseMirror document (see `titlePageEditor.tsx`'s own comment for why: it
+ * never paginates and must stay structurally unable to). `paginationExtension.ts`'s call site
+ * never passes a title page for exactly that reason -- pagination only ever needs `blocks`, and
+ * passing `[]` there is not a loss, it is the correct input. `App.tsx`'s call site, which builds
+ * the screenplay that actually gets saved, passes the real value from its own title-page state.
  */
 export function projectDocumentScreenplay(
   doc: ProseMirrorNode,
   id = '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
   title = 'The Long Way Home',
+  titlePages: TitlePage[] = [],
 ): LocalScreenplayProjection {
   const blocks: ScreenplayBlock[] = [];
   let unsupportedNode: string | undefined;
@@ -235,7 +245,7 @@ export function projectDocumentScreenplay(
     id,
     schemaVersion: SCREENPLAY_SCHEMA_VERSION,
     title,
-    titlePages: [],
+    titlePages,
   });
 
   if (result.success) {
@@ -252,16 +262,30 @@ export function projectEditorScreenplay(
   editor: Editor,
   id = '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
   title = 'The Long Way Home',
+  titlePages: TitlePage[] = [],
 ): LocalScreenplayProjection {
-  return projectDocumentScreenplay(editor.state.doc, id, title);
+  return projectDocumentScreenplay(editor.state.doc, id, title, titlePages);
 }
 
 export const projectLocalScreenplay = projectEditorScreenplay;
 
-/** The text-block editor deliberately rejects canonical features it cannot faithfully preserve. */
-export function editorContentFromScreenplay(screenplay: Screenplay): EditorContent {
+export type ScreenplayEditorContent = {
+  /** The single title page this screenplay has, if any -- see `editorContentFromScreenplay`. */
+  titlePage: TitlePage | undefined;
+  body: EditorContent;
+};
+
+/**
+ * The text-block editor deliberately rejects canonical features it cannot faithfully preserve.
+ * A single title page is no longer one of them: it round-trips through separate React state (see
+ * `titlePageEditor.tsx`) rather than through this ProseMirror document, so it is returned
+ * alongside the body content rather than folded into it. More than one title page still fails
+ * closed -- this editor has no UI for a second one, and silently dropping it on save would not be
+ * a faithful round trip.
+ */
+export function editorContentFromScreenplay(screenplay: Screenplay): ScreenplayEditorContent {
   if (
-    screenplay.titlePages.length > 0 ||
+    screenplay.titlePages.length > 1 ||
     screenplay.annotations.length > 0 ||
     screenplay.blocks.some(
       (block: ScreenplayBlock) => block.type === 'dual_dialogue' || block.type === 'page_break',
@@ -272,17 +296,20 @@ export function editorContentFromScreenplay(screenplay: Screenplay): EditorConte
     );
   }
   return {
-    type: 'screenplayDocument',
-    content: screenplay.blocks.map((block: ScreenplayBlock) => {
-      if (!isScreenplayElementType(block.type) || !('text' in block)) {
-        throw new Error(`Unsupported screenplay block: ${block.type}.`);
-      }
-      return {
-        type: 'screenplayBlock',
-        attrs: { element: block.type, id: block.id },
-        ...(block.text === '' ? {} : { content: [{ type: 'text' as const, text: block.text }] }),
-      };
-    }),
+    titlePage: screenplay.titlePages[0],
+    body: {
+      type: 'screenplayDocument',
+      content: screenplay.blocks.map((block: ScreenplayBlock) => {
+        if (!isScreenplayElementType(block.type) || !('text' in block)) {
+          throw new Error(`Unsupported screenplay block: ${block.type}.`);
+        }
+        return {
+          type: 'screenplayBlock',
+          attrs: { element: block.type, id: block.id },
+          ...(block.text === '' ? {} : { content: [{ type: 'text' as const, text: block.text }] }),
+        };
+      }),
+    },
   };
 }
 
