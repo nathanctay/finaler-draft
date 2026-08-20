@@ -17,6 +17,9 @@ export default defineConfig({
   reporter: process.env.CI ? 'html' : 'list',
   use: {
     baseURL: 'http://127.0.0.1:4173',
+    // DIAGNOSTIC: testing whether font hinting is what rounds webfont glyph advances to whole
+    // pixels on the Linux runner (60 characters measuring 600px instead of 575.6px).
+    launchOptions: { args: ['--font-render-hinting=none'] },
     ...(browserChannel === undefined ? {} : { channel: browserChannel }),
     trace: 'on-first-retry',
   },
