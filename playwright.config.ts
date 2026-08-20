@@ -33,7 +33,13 @@ export default defineConfig({
     // until `playwright.persistence.config.ts` got the same flag).
     launchOptions: { args: ['--font-render-hinting=none'] },
     ...(browserChannel === undefined ? {} : { channel: browserChannel }),
-    trace: 'on-first-retry',
+    // `retain-on-failure`, not `on-first-retry`: retries are 0 locally, so `on-first-retry` meant
+    // a local failure produced no trace at all -- which is exactly the situation that blocked
+    // diagnosing the intermittent `app-shell.spec.ts` timeout (30s, cold first run after a build,
+    // roughly one run in ten, and every artifact overwritten by the next passing run before it
+    // could be read). A trace is only written when a test fails, so this costs nothing on a green
+    // run and is the difference between diagnosing the next occurrence and re-rolling for it.
+    trace: 'retain-on-failure',
   },
   webServer: {
     command:

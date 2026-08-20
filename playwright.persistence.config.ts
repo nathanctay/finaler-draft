@@ -17,7 +17,8 @@ export default defineConfig({
     // boxes, and `page-rendering-persistence.spec.ts` fails by exactly one and two line heights
     // (0.167in and 0.333in at six lines per inch).
     launchOptions: { args: ['--font-render-hinting=none'] },
-    trace: 'on-first-retry',
+    // See `playwright.config.ts` for why this is `retain-on-failure` rather than `on-first-retry`.
+    trace: 'retain-on-failure',
   },
   webServer: {
     command:

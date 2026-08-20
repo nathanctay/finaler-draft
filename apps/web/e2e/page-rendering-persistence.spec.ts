@@ -7,6 +7,7 @@ import {
   PAGE_HEIGHT_IN,
 } from '@finaler-draft/screenplay/pageFormat';
 import { PAGE_GAP_IN, pageStackMinHeightIn } from '../src/pagination.js';
+import { requireCourierPrime } from './requireCourierPrime.js';
 
 /**
  * The real-editor replacement for the synthetic multi-page fixture this spec used to build (see
@@ -58,19 +59,6 @@ function fourPageMixedAnchorFixture(): ScreenplayBlock[] {
     { id: 'block-2', type: 'action', text: linesOfLength(ACTION_BUDGET, 55) },
     { id: 'block-3', type: 'action', text: linesOfLength(ACTION_BUDGET, 20) },
   ];
-}
-
-async function requireCourierPrime(page: Page): Promise<void> {
-  const loaded = await page.evaluate(async () => {
-    await Promise.all([
-      document.fonts.load("16px 'Courier Prime'"),
-      document.fonts.load("700 16px 'Courier Prime'"),
-    ]);
-    return document.fonts.check("16px 'Courier Prime'");
-  });
-  if (!loaded) {
-    throw new Error('Courier Prime did not report as loaded.');
-  }
 }
 
 /** Copied from `persistence.spec.ts` (its own comment explains why this is the only route to a
@@ -169,8 +157,8 @@ test.describe('page rendering: real editor, real DOM', () => {
     page,
   }) => {
     test.setTimeout(60_000);
-    await requireCourierPrime(page);
     const { canvas } = await createAndOpenScreenplay(page);
+    await requireCourierPrime(page);
 
     const blocks = fourPageMixedAnchorFixture();
     await canvas.click();
@@ -317,8 +305,8 @@ test.describe('page rendering: real editor, real DOM', () => {
     page,
   }) => {
     test.setTimeout(60_000);
-    await requireCourierPrime(page);
     const { canvas } = await createAndOpenScreenplay(page);
+    await requireCourierPrime(page);
 
     const blocks = fourPageMixedAnchorFixture();
     await canvas.click();
@@ -453,8 +441,8 @@ test.describe('page rendering: real editor, real DOM', () => {
   test('turning scene numbers on paints both margins without moving a single block', async ({
     page,
   }) => {
-    await requireCourierPrime(page);
     const { canvas } = await createAndOpenScreenplay(page);
+    await requireCourierPrime(page);
     await canvas.click();
 
     // A new screenplay's first block is `action`, not a scene heading, so the element has to be
@@ -537,8 +525,8 @@ test.describe('page rendering: real editor, real DOM', () => {
     page,
   }) => {
     test.setTimeout(60_000);
-    await requireCourierPrime(page);
     await createAndOpenScreenplay(page);
+    await requireCourierPrime(page);
 
     // A speech that cannot fit at the foot of page 1 moves to page 2 whole, leaving page 1 short.
     // That is the case this test exists for: page 1's unused remainder is large, so the break's
