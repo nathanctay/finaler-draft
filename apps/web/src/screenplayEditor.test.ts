@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { Editor } from '@tiptap/core';
 import { TextSelection } from '@tiptap/pm/state';
-import { screenplayExtensions, type ScreenplayElementType } from './screenplayEditor.js';
+import { DEFAULT_DOCUMENT_SETTINGS } from '@finaler-draft/screenplay';
+import {
+  projectDocumentScreenplay,
+  screenplayExtensions,
+  type ScreenplayElementType,
+} from './screenplayEditor.js';
 
 /**
  * Pressing Enter is the only way a writer changes element while typing, so where the caret sits
@@ -130,6 +135,68 @@ describe('Enter', () => {
       { element: 'character', text: '' },
       { element: 'dialogue', text: '' },
     ]);
+    editor.destroy();
+    mount.remove();
+  });
+});
+
+describe('projectDocumentScreenplay', () => {
+  const sceneHeadingId = '00000000-0000-4000-8000-000000000301';
+
+  function buildDocFor(text: string) {
+    const mount = document.createElement('div');
+    document.body.append(mount);
+    const editor = new Editor({
+      content: {
+        type: 'screenplayDocument',
+        content: [
+          {
+            type: 'screenplayBlock',
+            attrs: { element: 'scene_heading', id: sceneHeadingId },
+            content: [{ type: 'text', text }],
+          },
+        ],
+      },
+      element: mount,
+      extensions: screenplayExtensions,
+    });
+    return { doc: editor.state.doc, editor, mount };
+  }
+
+  /**
+   * The regression this increment fixed: the function used to take four positional parameters
+   * with no `documentSettings` slot at all, so nothing ever reached `safeParseScreenplay` and the
+   * schema's own `.default()` silently produced `DEFAULT_DOCUMENT_SETTINGS` regardless of what
+   * the caller actually had. This is the narrowest possible reproduction of that bug, one level
+   * below the full autosave-path regression in `App.test.tsx`.
+   */
+  it('threads a supplied documentSettings through to the projected screenplay, not the schema defaults', () => {
+    const { doc, editor, mount } = buildDocFor('INT. WORKSHOP - NIGHT');
+    const custom = {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      characterIndentIn: 4.2,
+      sceneNumbersEnabled: true,
+    };
+
+    const projection = projectDocumentScreenplay(doc, { documentSettings: custom });
+
+    expect(projection.valid).toBe(true);
+    if (projection.valid) {
+      expect(projection.screenplay.documentSettings).toEqual(custom);
+    }
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('falls back to the schema default when no documentSettings is supplied, matching every pre-existing call site', () => {
+    const { doc, editor, mount } = buildDocFor('INT. WORKSHOP - NIGHT');
+
+    const projection = projectDocumentScreenplay(doc);
+
+    expect(projection.valid).toBe(true);
+    if (projection.valid) {
+      expect(projection.screenplay.documentSettings).toEqual(DEFAULT_DOCUMENT_SETTINGS);
+    }
     editor.destroy();
     mount.remove();
   });

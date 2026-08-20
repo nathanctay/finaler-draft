@@ -213,6 +213,37 @@ select:focus-visible,
   background: var(--surface-06);
 }
 
+/*
+ * The File menu (`App.tsx`) is an `OverflowMenu` wrapped in `.menu-file`, not a plain `<span>`
+ * like the five still-inert menubar labels beside it -- see plan.md's "Application shell" and
+ * this scope's own note that only File is activated this increment. Its trigger button is
+ * restyled here to match the visual weight of those plain spans (same height, padding, font
+ * size) rather than `OverflowMenu`'s own default pill-button look (`.overflow-menu-trigger`,
+ * used elsewhere for the row and account menus), so File does not visually stand out as a
+ * different kind of control from its still-inert neighbors.
+ */
+.menu-file .overflow-menu-trigger {
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 0;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/*
+ * `OverflowMenu`'s list is right-anchored (`right: 0`) because every other use of it -- the
+ * per-row overflow menu and the account menu -- sits near the right edge of its container, where
+ * dropping the list leftward is what keeps it on screen. The File menu is the opposite case: it
+ * is the leftmost control in the menubar, so a right-anchored list extends off the left edge of
+ * the viewport. Anchoring to the trigger's left edge instead is the correct behavior for a
+ * menubar menu, and matches how every desktop application's File menu opens.
+ */
+.menu-file .overflow-menu-list {
+  right: auto;
+  left: 0;
+}
+
 .menubar-spacer,
 .toolbar-spacer {
   flex: 1;
@@ -771,6 +802,47 @@ select:focus-visible,
 }
 
 /*
+ * Scene numbers (plan.md's "Scene numbers" and "Locked scripts"): a widget decoration
+ * (`pagination.ts`'s `computeSceneNumberDecorations`) inserts one `.scene-number` span just
+ * inside each numbered scene heading, carrying the number twice -- once for each margin, which is
+ * how a production script prints them so a page can be scanned from either edge.
+ *
+ * Both copies are absolutely positioned out into the page's own margins, so neither occupies a
+ * character cell in the heading's 60-character line. The character grid is normative and nothing
+ * here may perturb it: the widget contributes no layout width, so wrapping and pagination stay
+ * byte-identical whether the setting is on or off.
+ *
+ * This is a widget rather than a `::before`/`::after` pair on the block because `::before` is
+ * already the element-label overlay (a user-facing toolbar toggle) and `::after` is a single box,
+ * not two -- one pseudo-element cannot render a number at both margins, and taking `::before`
+ * would mean scene headings silently losing their label whenever numbering was on.
+ *
+ * Nothing here touches the block's own text: `sceneNumber` is never written into the document
+ * (see the decoration function's own comment), so toggling the setting or reordering scenes never
+ * changes what `canonical_hash` sees. `[data-screenplay-block]` already carries
+ * `position: relative`, so both copies anchor to the heading itself.
+ */
+.script-body [data-screenplay-block] .scene-number {
+  user-select: none;
+}
+
+.script-body [data-screenplay-block] .scene-number-left,
+.script-body [data-screenplay-block] .scene-number-right {
+  position: absolute;
+  top: 0;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.script-body [data-screenplay-block] .scene-number-left {
+  right: calc(100% + 0.5in);
+}
+
+.script-body [data-screenplay-block] .scene-number-right {
+  left: calc(100% + 0.5in);
+}
+
+/*
  * Every indent below is specified from the physical page edge (see
  * `@finaler-draft/screenplay/pageFormat`), not from the script-body content box. The content
  * box's own left/right edges already sit `--fd-page-margin-left` / `--fd-page-margin-right` in
@@ -1151,6 +1223,113 @@ select:focus-visible,
   background: var(--surface-05);
 }
 
+/*
+ * The document-settings dialog (`documentSettingsDialog.tsx`), reached from the File menu. A
+ * plain overlay + centered panel, matching the hand-built-popup approach `OverflowMenu` already
+ * establishes elsewhere in this app rather than the native `<dialog>` element -- see that
+ * component's own top-of-file comment for why (jsdom, this project's test environment, does not
+ * implement `HTMLDialogElement.showModal`).
+ */
+.dialog-overlay {
+  position: fixed;
+  z-index: 10;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 64px;
+  background: rgb(0 0 0 / 35%);
+}
+
+.dialog {
+  display: flex;
+  width: min(360px, calc(100vw - 32px));
+  max-height: calc(100vh - 96px);
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  border: 1px solid var(--border-03);
+  border-radius: 4px;
+  background: var(--surface-01);
+  padding: 20px;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 25%);
+}
+
+.dialog h2 {
+  margin: 0;
+  color: var(--text-17);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-09);
+  font-size: 12px;
+}
+
+.dialog-field input[type='number'] {
+  width: 100%;
+  border: 1px solid var(--border-04);
+  border-radius: 2px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.dialog-field-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.dialog-fieldset {
+  border: 1px solid var(--border-04);
+  border-radius: 2px;
+  padding: 8px 10px;
+}
+
+.dialog-fieldset legend {
+  padding: 0 4px;
+}
+
+.dialog-fieldset label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.dialog-warning {
+  margin: 0;
+  border-radius: 2px;
+  background: var(--surface-06);
+  padding: 6px 8px;
+  color: var(--text-17);
+  font-size: 11px;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.dialog-actions button {
+  border: 1px solid var(--border-04);
+  border-radius: 2px;
+  background: var(--surface-03);
+  padding: 6px 14px;
+  color: inherit;
+  font-size: 12px;
+}
+
+.dialog-actions button:hover,
+.dialog-actions button:focus-visible {
+  background: var(--surface-06);
+}
+
 .deleted-row {
   display: flex;
   align-items: center;
@@ -1371,7 +1550,8 @@ select:focus-visible,
 .dark .tool-button,
 .dark .menubar button,
 .dark .scene-list button,
-.dark .panel-heading button {
+.dark .panel-heading button,
+.dark .menu-file .overflow-menu-trigger {
   color: inherit;
 }
 

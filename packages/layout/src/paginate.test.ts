@@ -278,6 +278,80 @@ describe("paginateScreenplay: dialogue orphan avoidance and MORE/CONT'D splittin
     expect(dialogueLines).toHaveLength(4);
   });
 
+  /**
+   * The property the previous test does not actually check: plan.md says the setting "must not
+   * change where pages break" and, with it off, "the outgoing page fills to capacity" rather than
+   * leaving the `(MORE)` line's room unused. A test that only checks page count and total dialogue
+   * lines placed (the previous test) passes whether or not that room is reserved -- the earlier,
+   * buggy `pageBreak.ts` reserved a line for `(MORE)` unconditionally, so with the setting off it
+   * produced the *same* split point as with it on, then simply emitted nothing into the reserved
+   * row (page 1 landed at 54 lines, one short of capacity, not 55). This test instead compares the
+   * two settings against each other directly and checks the row counts, which is what actually
+   * distinguishes "fills to capacity" from "reserves and wastes a line."
+   */
+  it('fills every non-final outgoing page to the same capacity as when autoMoreContinued is on, moving no page break', () => {
+    // Same fixture as "splits a very long monologue more than once" above: 60 dialogue lines force
+    // two splits, so this exercises both placeSpeechGroup's first split and
+    // placeSpeechContinuation's second one.
+    const blocks = [
+      actionBlock('a0', textForActionLineCount(50)),
+      characterBlock('c0', 'ADA'),
+      dialogueBlock('d0', textForDialogueLineCount(60)),
+    ];
+    const withMarkers = paginateScreenplay(blocks);
+    const withoutMarkers = paginateScreenplay(blocks, {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      autoMoreContinued: false,
+    });
+
+    expect(withMarkers.pages).toHaveLength(3);
+    expect(withoutMarkers.pages).toHaveLength(3);
+
+    // Every page but the last ends at the identical row count regardless of the setting: the room
+    // a (MORE) line would have reserved goes to one more line of real dialogue instead of sitting
+    // empty, so the physical boundary between pages -- and therefore where the next page begins --
+    // never moves. (The last page is exempt for the same reason assertNoShortPagesExceptLast is:
+    // it simply ends where the content runs out.)
+    for (let index = 0; index < withMarkers.pages.length - 1; index += 1) {
+      expect(withoutMarkers.pages[index]?.lineCount, `page index ${index}`).toBe(
+        withMarkers.pages[index]?.lineCount,
+      );
+      expect(withoutMarkers.pages[index]?.bottomMarginIn, `page index ${index}`).toBeCloseTo(
+        withMarkers.pages[index]?.bottomMarginIn ?? Number.NaN,
+        10,
+      );
+    }
+
+    // The mechanism, not just the outcome: with the setting off, each non-final page carries
+    // exactly as many more authored dialogue lines as it had generated marker lines with the
+    // setting on -- one (a trailing `(MORE)`) on the document's first page, two (a leading
+    // `CONT'D` plus a trailing `(MORE)`) on a page that is itself a continuation of an earlier
+    // split, per generated line freed. A fix that reached the same lineCount some other way (e.g.
+    // by leaving the freed rows genuinely blank) fails this half even though the row-count
+    // assertions above would still pass.
+    for (let index = 0; index < withMarkers.pages.length - 1; index += 1) {
+      const onPage = withMarkers.pages[index]!;
+      const offPage = withoutMarkers.pages[index]!;
+      const generatedOnPage = onPage.lines.filter((l) => l.kind === 'generated').length;
+      const dialogueCountOn = onPage.lines.filter(
+        (l) => l.kind === 'authored' && l.blockId === 'd0',
+      ).length;
+      const dialogueCountOff = offPage.lines.filter(
+        (l) => l.kind === 'authored' && l.blockId === 'd0',
+      ).length;
+      expect(dialogueCountOff, `page index ${index}`).toBe(dialogueCountOn + generatedOnPage);
+    }
+
+    const generatedOff = withoutMarkers.pages
+      .flatMap((p) => p.lines)
+      .filter((l) => l.kind === 'generated');
+    expect(generatedOff).toHaveLength(0);
+    const dialogueTotalOff = withoutMarkers.pages
+      .flatMap((p) => p.lines)
+      .filter((l) => l.kind === 'authored' && l.blockId === 'd0').length;
+    expect(dialogueTotalOff).toBe(60);
+  });
+
   it('never splits a parenthetical across pages and never leaves it ending a page', () => {
     const blocks = [
       characterBlock('c0', 'ADA'),

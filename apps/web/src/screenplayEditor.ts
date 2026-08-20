@@ -5,6 +5,7 @@ import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
 import {
   SCREENPLAY_SCHEMA_VERSION,
   safeParseScreenplay,
+  type DocumentSettings,
   type Screenplay,
   type ScreenplayBlock,
   type TitlePage,
@@ -198,6 +199,21 @@ function mapBlock(node: {
 }
 
 /**
+ * Options for `projectDocumentScreenplay`/`projectEditorScreenplay`, gathered into one object
+ * rather than four positional parameters. Four positional arguments -- two of them (`titlePages`,
+ * `documentSettings`) structured values with no natural ordering relative to each other -- is a
+ * call-site hazard: a caller that transposes a pair still typechecks, since nothing about the
+ * call shape catches it. Every field is optional and defaults exactly as the old positional
+ * parameters did, so an existing call site that only ever passed `(editor)` needs no change.
+ */
+export type ProjectScreenplayOptions = {
+  documentSettings?: DocumentSettings;
+  id?: string;
+  title?: string;
+  titlePages?: TitlePage[];
+};
+
+/**
  * Projects a raw ProseMirror document into a canonical screenplay. Takes the document node
  * directly (not an `Editor`) so the pagination plugin (`paginationExtension.ts`) can call it from
  * inside a ProseMirror `Plugin`, which only ever has a `state`/`doc`, never an `Editor` instance.
@@ -211,13 +227,27 @@ function mapBlock(node: {
  * never passes a title page for exactly that reason -- pagination only ever needs `blocks`, and
  * passing `[]` there is not a loss, it is the correct input. `App.tsx`'s call site, which builds
  * the screenplay that actually gets saved, passes the real value from its own title-page state.
+ *
+ * `documentSettings` is left `undefined` when the caller doesn't supply one, rather than defaulted
+ * to `DEFAULT_DOCUMENT_SETTINGS` here: `safeParseScreenplay`'s own schema already defaults an
+ * absent `documentSettings` (see `packages/screenplay`'s `screenplaySchema`), so leaving it out of
+ * this object when the caller has none to give preserves that behavior for call sites that
+ * genuinely don't have a real value yet (`paginationExtension.ts`'s pagination-only projection,
+ * most test fixtures). Previously this parameter did not exist at all, so nothing was ever passed
+ * through to `safeParseScreenplay` -- meaning a real, writer-set `documentSettings` was silently
+ * discarded and replaced by the schema default on every save. `App.tsx`'s call sites now pass the
+ * loaded screenplay's real value explicitly, which is the fix.
  */
 export function projectDocumentScreenplay(
   doc: ProseMirrorNode,
-  id = '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
-  title = 'The Long Way Home',
-  titlePages: TitlePage[] = [],
+  options: ProjectScreenplayOptions = {},
 ): LocalScreenplayProjection {
+  const {
+    id = '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
+    title = 'The Long Way Home',
+    titlePages = [],
+    documentSettings,
+  } = options;
   const blocks: ScreenplayBlock[] = [];
   let unsupportedNode: string | undefined;
 
@@ -242,6 +272,7 @@ export function projectDocumentScreenplay(
   const result = safeParseScreenplay({
     annotations: [],
     blocks,
+    documentSettings,
     id,
     schemaVersion: SCREENPLAY_SCHEMA_VERSION,
     title,
@@ -260,11 +291,9 @@ export function projectDocumentScreenplay(
 
 export function projectEditorScreenplay(
   editor: Editor,
-  id = '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
-  title = 'The Long Way Home',
-  titlePages: TitlePage[] = [],
+  options: ProjectScreenplayOptions = {},
 ): LocalScreenplayProjection {
-  return projectDocumentScreenplay(editor.state.doc, id, title, titlePages);
+  return projectDocumentScreenplay(editor.state.doc, options);
 }
 
 export const projectLocalScreenplay = projectEditorScreenplay;

@@ -6,7 +6,7 @@ import {
   type LayoutResult,
   type PageLine,
 } from '@finaler-draft/layout';
-import type { ScreenplayBlock } from '@finaler-draft/screenplay';
+import { DEFAULT_DOCUMENT_SETTINGS, type ScreenplayBlock } from '@finaler-draft/screenplay';
 import { MARGIN_TOP_IN, PAGE_HEIGHT_IN } from '@finaler-draft/screenplay/pageFormat';
 import { screenplayExtensions } from './screenplayEditor.js';
 import {
@@ -16,6 +16,7 @@ import {
   computeBlockStarts,
   computePageBreaks,
   computePageTopBlocks,
+  computeSceneNumberDecorations,
   pageStackMinHeightIn,
   type PageBreak,
 } from './pagination.js';
@@ -306,6 +307,34 @@ describe('buildPageBreakWidget', () => {
       'page-break-cue-line page-break-continued',
     ]);
   });
+
+  it('renders Arabic numerals by default, matching every existing caller that omits the style', () => {
+    const widget = buildPageBreakWidget(base);
+    expect(widget.querySelector('.page-break-number')?.textContent).toBe('4.');
+  });
+
+  it('renders Roman numerals when documentSettings.pageNumberStyle is roman', () => {
+    const widget = buildPageBreakWidget(base, 'roman');
+    expect(widget.querySelector('.page-break-number')?.textContent).toBe('IV.');
+  });
+
+  it('renders every Roman numeral subtractive pair correctly, not just a single digit', () => {
+    // 1994 = MCMXCIV exercises all four subtractive pairs (CM, XC, IV) plus M -- the classic
+    // stress case for a greedy roman-numeral implementation.
+    expect(
+      buildPageBreakWidget({ ...base, pageNumber: 1994 }, 'roman').querySelector(
+        '.page-break-number',
+      )?.textContent,
+    ).toBe('MCMXCIV.');
+    expect(
+      buildPageBreakWidget({ ...base, pageNumber: 9 }, 'roman').querySelector('.page-break-number')
+        ?.textContent,
+    ).toBe('IX.');
+    expect(
+      buildPageBreakWidget({ ...base, pageNumber: 40 }, 'roman').querySelector('.page-break-number')
+        ?.textContent,
+    ).toBe('XL.');
+  });
 });
 
 describe('pageStackMinHeightIn', () => {
@@ -331,6 +360,61 @@ describe('buildPaginationDecorations', () => {
 
     // Page 1's own first block + page 2's first block = 2 page-top decorations, plus 1 widget.
     expect(found).toHaveLength(3);
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * A widget decoration's rendered DOM is not reachable from the `Decoration` object -- `toDOM`
+   * only runs once the view mounts it. So this level of test can only prove *how many*
+   * scene-number decorations exist, not what number each one carries; the exact numbering
+   * (including renumbering on reorder, and both margin copies) is proven against real rendered
+   * DOM in `paginationExtension.test.ts`, where the widget is actually queryable.
+   */
+  it('adds no scene-number decorations when sceneNumbersEnabled is off (the default)', () => {
+    const blocks: ScreenplayBlock[] = [
+      { id: 'h0', type: 'scene_heading', text: 'INT. APARTMENT - MORNING' },
+      actionBeat(0),
+      { id: 'h1', type: 'scene_heading', text: 'EXT. STREET - DAY' },
+    ];
+    const { doc, editor, mount } = buildDoc(blocks);
+    const layout = paginateScreenplay(blocks);
+    const blockStarts = computeBlockStarts(doc);
+    const expectedWithoutSceneNumbers =
+      computePageTopBlocks(doc, blockStarts, layout).length +
+      computePageBreaks(doc, blockStarts, layout).length;
+
+    const decorations = buildPaginationDecorations(doc, layout, DEFAULT_DOCUMENT_SETTINGS);
+
+    expect(decorations.find()).toHaveLength(expectedWithoutSceneNumbers);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('adds one scene-number decoration per non-empty scene heading when the setting is on, skipping an empty one', () => {
+    const blocks: ScreenplayBlock[] = [
+      { id: 'h0', type: 'scene_heading', text: 'INT. APARTMENT - MORNING' },
+      actionBeat(0),
+      { id: 'h1', type: 'scene_heading', text: 'EXT. STREET - DAY' },
+      { id: 'h2', type: 'scene_heading', text: '' }, // still being typed: no text yet
+    ];
+    const { doc, editor, mount } = buildDoc(blocks);
+    const layout = paginateScreenplay(blocks);
+    const blockStarts = computeBlockStarts(doc);
+    const expectedWithoutSceneNumbers =
+      computePageTopBlocks(doc, blockStarts, layout).length +
+      computePageBreaks(doc, blockStarts, layout).length;
+
+    // Two non-empty scene headings (h0, h1), not three: the blank one in progress (h2) consumes
+    // no number and gets no decoration -- see computeSceneNumberDecorations's own comment for why.
+    expect(computeSceneNumberDecorations(doc)).toHaveLength(2);
+
+    const decorations = buildPaginationDecorations(doc, layout, {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      sceneNumbersEnabled: true,
+    });
+
+    expect(decorations.find()).toHaveLength(expectedWithoutSceneNumbers + 2);
     editor.destroy();
     mount.remove();
   });

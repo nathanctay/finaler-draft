@@ -11,6 +11,7 @@ import {
   DEFAULT_DOCUMENT_SETTINGS,
   deriveScenes,
   type DerivedScene,
+  type DocumentSettings,
   type Screenplay,
   type ScreenplayBlock,
 } from '@finaler-draft/screenplay';
@@ -27,7 +28,11 @@ import {
   type LocalScreenplayProjection,
   type ScreenplayElementType,
 } from './screenplayEditor.js';
-import { PaginationExtension, paginationPluginKey } from './paginationExtension.js';
+import {
+  PaginationExtension,
+  paginationPluginKey,
+  updatePaginationDocumentSettings,
+} from './paginationExtension.js';
 import { PAGE_GAP_IN, pageStackMinHeightIn } from './pagination.js';
 import { ApiError, api, type PersistedScreenplay } from './api.js';
 import { applyPageGeometryCssVariables } from './pageGeometryCss.js';
@@ -37,6 +42,8 @@ import {
   titlePageStateFromTitlePage,
   type TitlePageState,
 } from './titlePageState.js';
+import { DocumentSettingsDialog } from './documentSettingsDialog.js';
+import { OverflowMenu } from './components/OverflowMenu.js';
 
 type Panel = 'navigator' | 'inspector';
 
@@ -183,7 +190,6 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     issues: ['Editor is starting.'],
     valid: false,
   });
-  const [version, setVersion] = useState(initial.version);
   const [saveState, setSaveState] = useState<'saved' | 'saving' | 'failed' | 'conflict'>('saved');
   // `editorContentFromScreenplay` throws for canonical features this text-block editor cannot
   // faithfully preserve (more than one title page, notes, dual dialogue, page breaks); `undefined`
@@ -222,6 +228,18 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
       ? titlePageStateFromTitlePage(initialProjection.titlePage)
       : undefined,
   );
+  // The live document settings a writer can change from the File menu's dialog (plan.md's
+  // "Document settings"). Seeded from the loaded screenplay, same as `titlePageState` above, and
+  // for the same reason: `App` remounts a fresh instance per screenplay, so a lazy initializer
+  // keyed to `initial` is correct and never needs to react to `initial` changing later. Kept in
+  // React state (rather than only inside the pagination plugin -- see `updateDocumentSettings`
+  // below) because it also drives the CSS geometry variables and the projection that gets saved,
+  // neither of which the plugin knows about.
+  const [documentSettings, setDocumentSettings] = useState<DocumentSettings>(
+    () => initial.screenplay.documentSettings,
+  );
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const fileMenuRef = useRef<HTMLDivElement>(null);
   const inFlight = useRef(false);
   const latestProjection = useRef<LocalScreenplayProjection | undefined>(undefined);
   const savedWire = useRef(JSON.stringify(initial.screenplay));
@@ -237,12 +255,22 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   // screenplay has loaded (see that module's own comment for why). Once one has, its own
   // `documentSettings` -- character indent, parenthetical indent and width, per plan.md's
   // "Document settings" section -- take over, here rather than in `main.tsx`, because those
-  // values are document state, not an application-wide default. `App` remounts a fresh editor per
-  // screenplay (see the route-navigation test this file's own test suite carries), so this runs
-  // exactly once per loaded document.
+  // values are document state, not an application-wide default.
+  //
+  // Keyed on the reactive `documentSettings` state (seeded from `initial.screenplay.documentSettings`,
+  // see that state's own comment), not on `initial.screenplay.documentSettings` directly: the two
+  // used to diverge in a way that only worked by accident -- `updateDocumentSettings` below calls
+  // `applyPageGeometryCssVariables` directly with the newly changed value for the writer to see the
+  // effect immediately, but if this effect stayed keyed to the frozen `initial` prop it would never
+  // re-fire on a later settings change, leaving no *second* authority correcting a stale value the
+  // way `syncEditorState`'s projection effect corrects a stale save. Keying on the live state instead
+  // means this effect is what keeps CSS geometry correct-by-construction across any future path that
+  // changes `documentSettings`, while `updateDocumentSettings`'s own direct call remains only an
+  // optimization against a frame of stale CSS between the state update and this effect's re-run --
+  // both calls end up idempotent with the same input the moment React settles.
   useEffect(() => {
-    applyPageGeometryCssVariables(initial.screenplay.documentSettings);
-  }, [initial.screenplay.documentSettings]);
+    applyPageGeometryCssVariables(documentSettings);
+  }, [documentSettings]);
   const updateZoom = (amount: number) =>
     setZoom((current) => Math.min(150, Math.max(70, current + amount)));
   const togglePanel = (panel: Panel) =>
@@ -267,12 +295,12 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
       setActiveBlockId(currentBlock.id);
       setActiveElement(currentBlock.element);
     }
-    const nextProjection = projectLocalScreenplay(
-      editorInstance,
-      initial.id,
-      initial.title,
-      titlePageState ? [titlePageFromState(titlePageState)] : [],
-    );
+    const nextProjection = projectLocalScreenplay(editorInstance, {
+      documentSettings,
+      id: initial.id,
+      title: initial.title,
+      titlePages: titlePageState ? [titlePageFromState(titlePageState)] : [],
+    });
     applyProjection(nextProjection, changed);
   };
 
@@ -315,7 +343,6 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
         nextProjection.screenplay,
       );
       versionRef.current = result.version;
-      setVersion(result.version);
       savedWire.current = wire;
       saveStateRef.current = 'saved';
       setSaveState('saved');
@@ -379,20 +406,20 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
       setActiveBlockId(currentBlock.id);
       setActiveElement(currentBlock.element);
     }
-    const nextProjection = projectLocalScreenplay(
-      editor,
-      initial.id,
-      initial.title,
-      titlePageState ? [titlePageFromState(titlePageState)] : [],
-    );
+    const nextProjection = projectLocalScreenplay(editor, {
+      documentSettings,
+      id: initial.id,
+      title: initial.title,
+      titlePages: titlePageState ? [titlePageFromState(titlePageState)] : [],
+    });
     latestProjection.current = nextProjection;
     setProjection(nextProjection);
-    // `titlePageState` is a real dependency (it feeds `projectLocalScreenplay` above): this
-    // mainly re-seeds `projection` once when `editor` first becomes available (the same moment
-    // `onCreate` also does), but including it keeps that honest if it ever changes before then,
-    // rather than asserting -- via an exhaustive-deps suppression -- a timing guarantee this
-    // effect does not actually need to rely on.
-  }, [editor, initial.id, initial.title, titlePageState]);
+    // `titlePageState` and `documentSettings` are real dependencies (both feed
+    // `projectLocalScreenplay` above): this mainly re-seeds `projection` once when `editor` first
+    // becomes available (the same moment `onCreate` also does), but including them keeps that
+    // honest if either ever changes before then, rather than asserting -- via an exhaustive-deps
+    // suppression -- a timing guarantee this effect does not actually need to rely on.
+  }, [documentSettings, editor, initial.id, initial.title, titlePageState]);
 
   // Title-page edits happen in separate React state, never inside the ProseMirror document (see
   // the `titlePageState` comment above), so they never fire `onUpdate`/`onTransaction` the way
@@ -403,10 +430,57 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   const updateTitlePageState = (next: TitlePageState) => {
     setTitlePageState(next);
     if (!editor) return;
-    const nextProjection = projectLocalScreenplay(editor, initial.id, initial.title, [
-      titlePageFromState(next),
-    ]);
+    const nextProjection = projectLocalScreenplay(editor, {
+      documentSettings,
+      id: initial.id,
+      title: initial.title,
+      titlePages: [titlePageFromState(next)],
+    });
     applyProjection(nextProjection, true);
+  };
+
+  // The document-settings dialog's own equivalent of `updateTitlePageState` above: settings
+  // changes never touch the ProseMirror document either, so nothing here can rely on Tiptap's own
+  // update callbacks. Takes `next` directly (not read back out of `documentSettings` state) for
+  // the identical reason `updateTitlePageState` does -- `setDocumentSettings` is asynchronous, and
+  // both the live repagination and the save this triggers must reflect the edit that just
+  // happened.
+  //
+  // Three independent things read `documentSettings`, updated here explicitly rather than by
+  // waiting on the `documentSettings`-keyed `useEffect` above: `updatePaginationDocumentSettings`
+  // repaginates the live document in place (no editor remount -- see paginationExtension.ts's own
+  // comment on why that matters for undo history) and has no `useEffect` equivalent at all, since it
+  // needs the live `Editor` instance, not just the settings value; the projection rebuild is what
+  // actually reaches the autosave path with the new value -- the fix for the bug where
+  // `documentSettings` was never threaded into `projectDocumentScreenplay` at all, so autosave
+  // silently wrote the schema's defaults over whatever a writer had stored -- and likewise has no
+  // effect equivalent, since re-running it on every unrelated render would be wrong. Only
+  // `applyPageGeometryCssVariables` genuinely has a second authority (the effect above): calling it
+  // here too is purely so the writer sees the geometry change the instant they make it, rather than
+  // waiting a render for the effect to catch up -- see that effect's own comment.
+  const updateDocumentSettings = (next: DocumentSettings) => {
+    setDocumentSettings(next);
+    if (!editor) return;
+    updatePaginationDocumentSettings(editor, next);
+    applyPageGeometryCssVariables(next);
+    const nextProjection = projectLocalScreenplay(editor, {
+      documentSettings: next,
+      id: initial.id,
+      title: initial.title,
+      titlePages: titlePageState ? [titlePageFromState(titlePageState)] : [],
+    });
+    applyProjection(nextProjection, true);
+  };
+
+  // "Escape to close with focus returned to the trigger" (plan.md's "Document settings" section,
+  // via the accessibility list it points to): the trigger is the File menu's own button, not the
+  // "Document settings…" menu item that opened this dialog (`OverflowMenu` already unmounts that
+  // item the moment it is selected, and closing this dialog is a separate action from opening the
+  // File menu). Queried through `fileMenuRef` rather than a ref threaded out of `OverflowMenu`
+  // itself, so the shared, independently-tested component stays untouched.
+  const closeSettingsDialog = () => {
+    setSettingsDialogOpen(false);
+    fileMenuRef.current?.querySelector<HTMLButtonElement>('.overflow-menu-trigger')?.focus();
   };
 
   const scenes = useMemo(
@@ -483,7 +557,25 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
         </span>
       </header>
       <nav className="menubar" aria-label="Application menu">
-        <span>File</span>
+        {/*
+          Only File is a working menu this increment (plan.md schedules activating the other five
+          alongside the Characters tab, a separate, out-of-scope item). It reuses OverflowMenu --
+          the same accessible popup-menu contract (Enter/Space to open, arrow keys between items,
+          Escape closes and returns focus to the trigger) the header's own account menu already
+          uses -- rather than a bespoke menu implementation for a single item.
+        */}
+        <div className="menu-file" ref={fileMenuRef}>
+          <OverflowMenu
+            items={[
+              {
+                label: 'Document settings…',
+                onSelect: () => setSettingsDialogOpen(true),
+              },
+            ]}
+            label="File menu"
+            triggerContent="File"
+          />
+        </div>
         <span>Edit</span>
         <span>View</span>
         <span>Format</span>
@@ -494,6 +586,13 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
           {dark ? 'Light canvas' : 'Dark canvas'}
         </button>
       </nav>
+      {settingsDialogOpen && (
+        <DocumentSettingsDialog
+          onChange={updateDocumentSettings}
+          onClose={closeSettingsDialog}
+          settings={documentSettings}
+        />
+      )}
       <section className="toolbar" aria-label="Screenplay tools">
         <ToolButton
           disabled={!editor?.can().undo()}
