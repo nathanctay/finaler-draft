@@ -14,6 +14,7 @@
     "node": "24.x"
   },
   "scripts": {
+    "prepare": "git config core.hooksPath .githooks || true",
     "dev": "pnpm --parallel --stream --filter @finaler-draft/api --filter @finaler-draft/web dev",
     "start": "pnpm --filter @finaler-draft/api start",
     "build": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/server-config build && pnpm --filter @finaler-draft/screenplay build && pnpm --filter @finaler-draft/database build && pnpm --filter @finaler-draft/layout build && pnpm --filter @finaler-draft/web build && pnpm --filter @finaler-draft/api build",

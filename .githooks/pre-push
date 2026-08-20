@@ -1,0 +1,27 @@
+#!/bin/sh
+#
+# Fast local backstop for the gates CI enforces on every pull request
+# (.github/workflows/quality.yml). CI remains the authority: it runs the full
+# list, including the build, the browser suites, and the database-backed
+# persistence suite, none of which belong in a hook a writer waits on.
+#
+# What runs here is only the subset that is both fast and catches the failure
+# mode this hook exists for: a branch that was gate-clean when it was written,
+# pushed after an interaction with other work made it no longer so. A dead
+# variable left behind when a merge removed its only reader is exactly that
+# shape, and it reached the default branch once already.
+#
+# Set FD_SKIP_PUSH_GATE=1 to skip deliberately, which is preferable to
+# --no-verify because it skips this hook alone rather than every hook.
+set -e
+
+if [ "${FD_SKIP_PUSH_GATE:-0}" = "1" ]; then
+  echo "pre-push: skipped (FD_SKIP_PUSH_GATE=1)"
+  exit 0
+fi
+
+echo "pre-push: format:check, lint, typecheck"
+pnpm format:check
+pnpm lint
+pnpm typecheck
+echo "pre-push: clean"

@@ -69,6 +69,14 @@ Each approved feature is developed in an isolated `feature/<scope>` branch or wo
 
 An independent review is required before handoff. Formatting, linting, strict type checks, unit tests, integration tests, system tests, relevant concurrency/load checks, and a security review must pass before a feature is ready to merge. The project owner controls all staging, commits, and merges; agents must not commit, merge, or force-push.
 
+### Gates
+
+`.github/workflows/quality.yml` is the authority. It runs the full list -- formatting, lint, strict types, the Drizzle migration check, unit and integration tests, the build, and both browser suites including the database-backed persistence suite -- on every pull request and on pushes to `main`.
+
+`.githooks/pre-push` is a local backstop, not a second authority. It runs only `format:check`, `lint` and `typecheck`: the subset that is fast enough to sit in front of a push, and enough to catch the failure this hook exists for -- a branch that was gate-clean when it was written but stopped being so once other work merged around it. A dead variable left behind when a merge removed its only reader is exactly that shape, and it reached `main` once already, because a branch verified in isolation is not the same thing as a branch verified against what it will land on.
+
+The hook is wired by the `prepare` script (`git config core.hooksPath .githooks`), so `pnpm install` activates it and no manual setup step is needed. To skip it deliberately, set `FD_SKIP_PUSH_GATE=1`; prefer that to `--no-verify`, which disables every hook rather than this one.
+
 ## Security and privacy
 
 Screenplays are private by default. Sharing must be explicit and role-based. The application must use secure sessions and authorization checks, private asset storage with short-lived authorized URLs, encrypted network connections, and redacted logs. Screenplay content, credentials, and personal data must never be logged or sent to external AI services without explicit user authorization.
