@@ -1,110 +1,77 @@
 import { expect, test } from '@playwright/test';
 
 /**
- * TEMPORARY DIAGNOSTIC -- not part of the suite's contract, and must be deleted once the CI font
- * failure is understood. It asserts nothing about the application; it only reports what the
- * browser actually did, because `page-geometry.spec.ts` fails on the CI runner with a 0.25in
- * deviation across a 60-character measure (a substituted typeface) while passing locally, and
- * `requireCourierPrime`'s `document.fonts.check` guard reports the font as loaded in both places.
+ * TEMPORARY DIAGNOSTIC -- delete once the CI font finding is resolved. Asserts nothing about the
+ * application, so it cannot turn CI red on its own.
  *
- * Everything here is logged rather than asserted, so this file cannot itself turn CI red and
- * cannot mask the real failures alongside it.
+ * Round one established that Courier Prime loads correctly on the runner but renders 60 characters
+ * at exactly 600px (10.0px per character) instead of 575.6px (9.59px per character), while generic
+ * `monospace` on the same runner measures a fractional 577.97px. Exactly 10.0px per character is
+ * 9.6px rounded up to a whole pixel, which points at glyph advances being snapped to integers --
+ * Chrome disables subpixel text positioning on Linux at 1x device scale.
+ *
+ * Round two tests that directly. If the mechanism is integer rounding of advances, then:
+ *  - raising deviceScaleFactor should restore fractional advances, and
+ *  - the relative error should shrink as font size grows, because a fixed sub-pixel rounding error
+ *    is a smaller fraction of a larger advance.
+ * Both are recorded below at several scales and sizes.
  */
-test('diagnostic: report what the runner actually renders', async ({ page }) => {
-  await page.goto('/');
-  await page.evaluate(async () => {
-    await Promise.all([
-      document.fonts.load("16px 'Courier Prime'"),
-      document.fonts.load("700 16px 'Courier Prime'"),
-    ]);
-  });
+const SIXTY = 'X'.repeat(60);
 
-  const report = await page.evaluate(async () => {
-    function widthOf(family: string, text: string): number {
+function measureScript(): string {
+  return `(() => {
+    function widthOf(family, sizeCss, text) {
       const span = document.createElement('span');
       span.style.position = 'absolute';
       span.style.visibility = 'hidden';
       span.style.whiteSpace = 'pre';
       span.style.fontFamily = family;
-      span.style.fontSize = '12pt';
+      span.style.fontSize = sizeCss;
       span.textContent = text;
       document.body.appendChild(span);
       const width = span.getBoundingClientRect().width;
       document.body.removeChild(span);
       return width;
     }
-
     const sixty = 'X'.repeat(60);
-    const faces = Array.from(document.fonts).map((face) => ({
-      family: face.family,
-      status: face.status,
-      weight: face.weight,
-    }));
-
-    // Whether the stylesheet's own @font-face URL is actually fetchable from this origin. A 404
-    // or a wrong content type here would explain a silent fallback completely.
-    const fontUrls = Array.from(document.styleSheets)
-      .flatMap((sheet) => {
-        try {
-          return Array.from(sheet.cssRules);
-        } catch {
-          return [];
-        }
-      })
-      .filter((rule): rule is CSSFontFaceRule => rule instanceof CSSFontFaceRule)
-      .map((rule) => rule.style.getPropertyValue('src'))
-      .filter((src) => src.includes('courier'));
-
-    const probes: Record<string, number> = {};
-    for (const family of [
-      "'Courier Prime', monospace",
-      "'Courier Prime'",
-      'monospace',
-      "'DejaVu Sans Mono'",
-      "'Liberation Mono'",
-      "'Courier New'",
-      "'NoSuchFontExistsAnywhere', monospace",
-    ]) {
-      probes[family] = widthOf(family, sixty);
+    const sizes = ['12pt', '24pt', '48pt', '96pt'];
+    const bySize = {};
+    for (const size of sizes) {
+      const courier = widthOf("'Courier Prime', monospace", size, sixty);
+      bySize[size] = {
+        courierPerChar: courier / 60,
+        courierTotal: courier,
+        monospaceTotal: widthOf('monospace', size, sixty),
+      };
     }
+    return { bySize, dpr: window.devicePixelRatio };
+  })()`;
+}
 
-    return {
-      checkCourierPrime: document.fonts.check("16px 'Courier Prime'"),
-      faces,
-      fontFaceSrcMentioningCourier: fontUrls,
-      fontsReadyStatus: document.fonts.status,
-      probeWidthsPxFor60Chars: probes,
-      userAgent: navigator.userAgent,
-    };
-  });
+test('diagnostic: advance rounding across device scale factors and font sizes', async ({
+  browser,
+}) => {
+  const results: Record<string, unknown> = {};
 
-  // Fetched through the page's own origin, so this reports exactly what the running server serves.
-  const cssProbe = await page.evaluate(async () => {
-    const link = Array.from(document.querySelectorAll('link[rel="stylesheet"]')).map(
-      (el) => (el as HTMLLinkElement).href,
-    );
-    const results: { url: string; status: number; type: string | null }[] = [];
-    for (const url of link) {
-      try {
-        const response = await fetch(url);
-        results.push({
-          status: response.status,
-          type: response.headers.get('content-type'),
-          url,
-        });
-      } catch (error) {
-        results.push({ status: -1, type: String(error), url });
-      }
-    }
-    return results;
-  });
+  for (const deviceScaleFactor of [1, 2, 3]) {
+    const context = await browser.newContext({ deviceScaleFactor });
+    const page = await context.newPage();
+    await page.goto('/');
+    await page.evaluate(async () => {
+      await Promise.all([
+        document.fonts.load("16px 'Courier Prime'"),
+        document.fonts.load("700 16px 'Courier Prime'"),
+      ]);
+      await document.fonts.ready;
+    });
+    results[`deviceScaleFactor=${deviceScaleFactor}`] = await page.evaluate(measureScript());
+    await context.close();
+  }
 
-  console.log('FONT DIAGNOSTIC REPORT');
-  console.log(JSON.stringify({ ...report, stylesheets: cssProbe }, undefined, 2));
+  console.log('FONT DIAGNOSTIC ROUND TWO');
+  console.log(JSON.stringify(results, undefined, 2));
 
-  const sixtyCharInches = (report.probeWidthsPxFor60Chars["'Courier Prime', monospace"] ?? 0) / 96;
-  console.log(`60 chars measured: ${sixtyCharInches.toFixed(4)}in (nominal 6.0in)`);
-
-  // Deliberately not an assertion about the app: this only fails if the page never rendered.
-  expect(report.userAgent.length).toBeGreaterThan(0);
+  // Nominal Courier Prime advance is 0.6em. At 12pt (a 16px em) that is 9.6px per character.
+  console.log('Expected per-character advance at 12pt: 9.6px (0.6em of a 16px em box)');
+  expect(SIXTY).toHaveLength(60);
 });
