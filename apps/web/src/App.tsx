@@ -10,6 +10,7 @@ import {
 import {
   DEFAULT_DOCUMENT_SETTINGS,
   deriveScenes,
+  screenplayToPlainText,
   type DerivedScene,
   type DocumentSettings,
   type Screenplay,
@@ -191,6 +192,10 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     valid: false,
   });
   const [saveState, setSaveState] = useState<'saved' | 'saving' | 'failed' | 'conflict'>('saved');
+  // Feedback for the conflict state's "Copy my version" button (below). Not part of `saveState`:
+  // it describes the clipboard action's own outcome, which can succeed or fail independently of
+  // -- and without ever changing -- the save conflict it is trying to rescue the writer from.
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
   // `editorContentFromScreenplay` throws for canonical features this text-block editor cannot
   // faithfully preserve (more than one title page, notes, dual dialogue, page breaks); `undefined`
   // here means "read-only", same meaning `initialContent` carried before the title page split out
@@ -322,7 +327,12 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     timer.current = window.setTimeout(() => void saveLatest(), 600);
   };
 
-  const saveLatest = async () => {
+  // `keepalive` is only ever passed by the flush effect below, and only `true` for `pagehide`
+  // specifically -- see that effect's own comment for why unmount and `visibilitychange` must
+  // NOT set it. Every guard above still applies unchanged, including the conflict guard: this
+  // must never resume saving into a version the server has already rejected, on the way out any
+  // more than on the ordinary debounced path (requirement 4, progress/save-conflict-recovery.md).
+  const saveLatest = async ({ keepalive = false }: { keepalive?: boolean } = {}) => {
     if (
       inFlight.current ||
       saveStateRef.current === 'conflict' ||
@@ -341,6 +351,7 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
         initial.id,
         versionRef.current,
         nextProjection.screenplay,
+        { keepalive },
       );
       versionRef.current = result.version;
       savedWire.current = wire;
@@ -397,7 +408,60 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     onTransaction: ({ editor: editorInstance }) => syncPageCount(editorInstance),
   });
 
-  useEffect(() => () => window.clearTimeout(timer.current), []);
+  // A pending debounced save (`scheduleSave`'s 600 ms `setTimeout`) is the last line of defence
+  // against losing an edit that never got the chance to autosave (requirement 5,
+  // progress/save-conflict-recovery.md -- the audit's "smaller sibling" finding). Three exits skip
+  // that debounce entirely: this component unmounting (in-app navigation to a different
+  // screenplay or route, via this effect's own cleanup), `visibilitychange` to `hidden` (tab
+  // switch, backgrounding), and `pagehide` (navigation away, tab close). The first two are NOT the
+  // page going away -- the app is still fully alive, mid-navigation or merely backgrounded -- so
+  // they flush with an ordinary `fetch` (`keepalive: false`), which completes normally and has no
+  // size limit. `pagehide` is the one genuine "the page may be gone before the response arrives"
+  // case, so it alone passes `keepalive: true`: `fetch`'s `keepalive` is what lets that request
+  // outlive the page, unlike a plain `fetch`, which the browser may abort mid-flight once the page
+  // is truly gone. `navigator.sendBeacon` cannot replace it there -- the save is an authenticated
+  // `PUT` with a JSON body and a content-type header, which `sendBeacon` has no way to express.
+  //
+  // The distinction matters because `keepalive: true` is capped at a 64 KB total request body by
+  // the Fetch spec, and a real screenplay routinely exceeds that (measured on this branch:
+  // canonical JSON for 500 blocks is already ~67 KB); a save over the cap throws, which
+  // `saveLatest`'s own `catch` turns into `saveState: 'failed'`, never `'saved'` -- so a `pagehide`
+  // flush can honestly fail large documents, but unmount and `visibilitychange` never pay that
+  // cap at all, which is the case that matters for every in-app exit a writer actually takes.
+  // `saveLatest` itself still refuses to run while `saveStateRef.current === 'conflict'` (see that
+  // function's own comment), so none of these three can ever resume saving into a version the
+  // server already rejected on the way out.
+  //
+  // `flushPendingSaveRef` exists only so the listeners below can be registered once, with an
+  // empty dependency array, while still invoking the *current* render's `saveLatest` closure.
+  // `saveLatest` is a plain function redefined every render, not memoized -- putting it directly
+  // in this effect's dependency array would re-attach these listeners on every render for no
+  // benefit (every code path it reaches reads current values through refs, never through this
+  // closure), and omitting it would violate `react-hooks/exhaustive-deps`. Assigning to a ref
+  // during render, rather than through a second effect, is deliberate: it needs to be current by
+  // the time this effect's listeners can fire, which a same-render `useEffect` cannot guarantee
+  // relative to another effect, and the assignment itself has no rendering side effect of its
+  // own.
+  const flushPendingSaveRef = useRef<(options: { keepalive: boolean }) => void>(() => {});
+  flushPendingSaveRef.current = ({ keepalive }) => {
+    window.clearTimeout(timer.current);
+    void saveLatest({ keepalive });
+  };
+
+  useEffect(() => {
+    const flushOrdinary = () => flushPendingSaveRef.current({ keepalive: false });
+    const flushKeepalive = () => flushPendingSaveRef.current({ keepalive: true });
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flushOrdinary();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', flushKeepalive);
+    return () => {
+      flushOrdinary();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', flushKeepalive);
+    };
+  }, []);
 
   useEffect(() => {
     if (!editor) return;
@@ -420,6 +484,48 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     // honest if either ever changes before then, rather than asserting -- via an exhaustive-deps
     // suppression -- a timing guarantee this effect does not actually need to rely on.
   }, [documentSettings, editor, initial.id, initial.title, titlePageState]);
+
+  // The conflict state's rescue action (requirement 2, progress/save-conflict-recovery.md): the
+  // writer's own unsaved manuscript, as readable screenplay-formatted text, not the canonical
+  // JSON `nextProjection.screenplay` actually is -- pasting JSON into an email or a document
+  // would not read as a screenplay to anyone. `screenplayToPlainText` (`@finaler-draft/screenplay`)
+  // does that formatting; this only owns getting the result onto the clipboard and reporting
+  // whether that succeeded. `latestProjection.current` (not the `projection` state variable) is
+  // read directly for the same reason `saveLatest` reads it: it is guaranteed current the instant
+  // this runs, with no risk of a stale closure over a `projection` from an earlier render.
+  //
+  // The Clipboard API can reject -- a browser permission denial, a document that never gained
+  // focus, an insecure context -- and `navigator.clipboard` can even be entirely absent in an
+  // older or locked-down browser. Reporting only success would repeat exactly the defect this
+  // scope exists to fix: a writer trusting an action that silently did nothing. `copyStatus`
+  // drives a real, honest message either way (see the footer below); nothing here ever claims the
+  // work is safe unless the clipboard write actually resolved.
+  const copyMyVersion = async () => {
+    const current = latestProjection.current;
+    if (!current?.valid) {
+      setCopyStatus('failed');
+      return;
+    }
+    try {
+      if (!navigator.clipboard) throw new Error('Clipboard API unavailable');
+      await navigator.clipboard.writeText(screenplayToPlainText(current.screenplay));
+      setCopyStatus('copied');
+    } catch {
+      setCopyStatus('failed');
+    }
+  };
+
+  // The conflict state's clean exit (requirement 3, progress/save-conflict-recovery.md): discards
+  // this browser's unsaved copy and re-fetches the server's version. A full reload, not a
+  // targeted refetch of the `staleTime: Infinity` query in
+  // routes/projects/$projectId.screenplays.$screenplayId.tsx -- that query is deliberately
+  // "consumed once" per that route's own comment, with no invalidation path threaded down to this
+  // component, and reconstructing one just for this would add a second way to force a refetch
+  // where a full reload already does the job honestly: a real, visible navigation a writer can
+  // tell discarded something, not a quiet in-place swap.
+  const reloadFromServer = () => {
+    window.location.reload();
+  };
 
   // Title-page edits happen in separate React state, never inside the ProseMirror document (see
   // the `titlePageState` comment above), so they never fire `onUpdate`/`onTransaction` the way
@@ -784,7 +890,15 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
           {initialContent === undefined
             ? 'Text editing is unavailable for this screenplay'
             : saveState === 'conflict'
-              ? 'Save conflict · your local edits are preserved; reload before saving again'
+              ? // No claim of preservation: nothing preserves this browser's edits (there is no
+                // localStorage, sessionStorage, or IndexedDB anywhere in apps/web/src -- see
+                // audit/CONSOLIDATED.md item A2 and requirement 1 in
+                // progress/save-conflict-recovery.md). This says only what is actually true --
+                // something else changed this screenplay, this copy has not been saved, and
+                // saving is paused -- and points at the two real actions below rather than an
+                // instruction ("reload") that would destroy the very work it used to claim to
+                // protect.
+                'Save conflict · this screenplay changed elsewhere; this copy is unsaved and saving is paused'
               : saveState === 'failed'
                 ? 'Save failed · make another edit to retry'
                 : saveState === 'saving'
@@ -793,6 +907,38 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                     ? `Saved · validated locally · ${wordCount} words · no print pagination`
                     : `Draft needs attention · ${projection.issues[0] ?? 'Invalid screenplay data.'}`}
         </span>
+        {saveState === 'conflict' && (
+          // Deliberately not inside `.status-center`, which the small-viewport media query hides
+          // entirely (styles.css) -- these are the writer's only way to rescue or leave a
+          // conflict, so they must stay reachable at every viewport width the rest of the
+          // statusbar collapses at. Copy is offered before Reload, and Reload is unambiguous
+          // about what it discards: requirement 3, progress/save-conflict-recovery.md.
+          <span className="status-conflict-actions">
+            <button
+              className="status-conflict-button"
+              onClick={() => void copyMyVersion()}
+              type="button"
+            >
+              Copy my version
+            </button>
+            <button className="status-conflict-button" onClick={reloadFromServer} type="button">
+              Reload (discards this copy)
+            </button>
+            {copyStatus === 'copied' && (
+              <span className="status-conflict-feedback" role="status">
+                Copied to clipboard.
+              </span>
+            )}
+            {copyStatus === 'failed' && (
+              <span
+                className="status-conflict-feedback status-conflict-feedback-error"
+                role="alert"
+              >
+                Copy failed · select the manuscript text and copy it manually.
+              </span>
+            )}
+          </span>
+        )}
       </footer>
     </main>
   );

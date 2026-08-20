@@ -1,5 +1,14 @@
 import { z } from 'zod';
-import { ELEMENT_INDENTS, MARGIN_LEFT_IN, PAGE_WIDTH_IN, MARGIN_RIGHT_IN } from './pageFormat.js';
+import {
+  BLANK_LINES_BEFORE,
+  BODY_WIDTH_CHARACTERS,
+  ELEMENT_INDENTS,
+  MARGIN_LEFT_IN,
+  NOMINAL_CHARACTERS_PER_INCH,
+  PAGE_WIDTH_IN,
+  MARGIN_RIGHT_IN,
+  type ScreenplayElementKind,
+} from './pageFormat.js';
 
 export const SCREENPLAY_SCHEMA_VERSION = 1 as const;
 export const MAX_SCREENPLAY_TITLE_LENGTH = 250;
@@ -447,4 +456,122 @@ export function parseScreenplay(input: unknown): Screenplay {
 
 export function safeParseScreenplay(input: unknown) {
   return screenplaySchema.safeParse(input);
+}
+
+/**
+ * Left indent for a screenplay element, in spaces, for the plain-text rescue export below.
+ * `ELEMENT_INDENTS` measures from the physical page edge (see pageFormat.ts's module comment);
+ * plain text pasted into an email or a note has no page edge, only a left margin, so this
+ * re-bases every indent onto `MARGIN_LEFT_IN` and converts inches to characters via the
+ * specification's nominal 10-pitch (`NOMINAL_CHARACTERS_PER_INCH`) -- the same character grid
+ * `BODY_WIDTH_CHARACTERS` and pagination already treat as normative, not a font-derived guess.
+ */
+function plainTextIndent(element: Exclude<ScreenplayElementKind, 'transition'>): string {
+  const leftIn = ELEMENT_INDENTS[element].leftIn ?? MARGIN_LEFT_IN;
+  return ' '.repeat(
+    Math.max(0, Math.round((leftIn - MARGIN_LEFT_IN) * NOMINAL_CHARACTERS_PER_INCH)),
+  );
+}
+
+/**
+ * A title page's plain-text lines, grouped the way a printed title page groups them (title,
+ * then credit/authors, then source/date/contact) but without the blank-vertical-centering a real
+ * title page uses -- there is no page to center on in plain text. Groups are separated by exactly
+ * one blank line, and an empty group contributes nothing, so a title page with only a title (or
+ * only contact information) does not leave stray blank lines behind.
+ */
+function plainTextTitlePageLines(titlePage: TitlePage): string[] {
+  const groups = [
+    titlePage.title ? [titlePage.title] : [],
+    [titlePage.credit, ...(titlePage.authors ?? [])].filter((line): line is string =>
+      Boolean(line),
+    ),
+    [titlePage.source, titlePage.draftDate, ...(titlePage.contact ?? [])].filter(
+      (line): line is string => Boolean(line),
+    ),
+  ].filter((group) => group.length > 0);
+
+  return groups.flatMap((group, index) => (index === 0 ? group : ['', ...group]));
+}
+
+/** Blank lines before a root block, on the six-per-inch line grid -- see `BLANK_LINES_BEFORE`'s
+ * own comment for the element types it covers. `dual_dialogue` and `page_break` have no entry
+ * there (the specification gives blank-line counts per screenplay *element*, and neither is one);
+ * one blank line each is the plain-text default, matching every other multi-line structural break
+ * in this export.
+ */
+function plainTextBlankLinesBefore(block: ScreenplayBlock): number {
+  if (block.type === 'dual_dialogue' || block.type === 'page_break') {
+    return 1;
+  }
+  return BLANK_LINES_BEFORE[block.type];
+}
+
+function plainTextDialogueColumnLines(column: DialogueColumn): string[] {
+  return column.blocks.map((block) => plainTextIndent(block.type) + block.text);
+}
+
+/**
+ * One root block's plain-text lines, with no blank line before or after -- `screenplayToPlainText`
+ * inserts those itself via `plainTextBlankLinesBefore`, once, so spacing is decided in exactly one
+ * place. `transition` right-aligns to the body's right margin (its only specified edge, per
+ * `ELEMENT_INDENTS`); every other text element left-indents per `plainTextIndent`. `dual_dialogue`
+ * has no plain-text equivalent of true side-by-side columns (60 characters is too narrow to
+ * duplicate the page layout and still read), so both columns print in full, sequentially, each
+ * labelled -- lossy in relative timing (which this format cannot represent at all) but not in
+ * content: everything either character said is present and attributed. `page_break` carries no
+ * text of its own; its marker exists only so a reader of the plain text knows a page boundary was
+ * there, not so the marker could be parsed back out.
+ */
+function plainTextBlockLines(block: ScreenplayBlock): string[] {
+  switch (block.type) {
+    case 'page_break':
+      return ['-- page break --'];
+    case 'transition':
+      return [block.text.padStart(BODY_WIDTH_CHARACTERS)];
+    case 'dual_dialogue':
+      return [
+        '[Dual dialogue -- spoken together, left column]',
+        ...plainTextDialogueColumnLines(block.left),
+        '',
+        '[Dual dialogue -- spoken together, right column]',
+        ...plainTextDialogueColumnLines(block.right),
+      ];
+    case 'scene_heading':
+      return [
+        plainTextIndent('scene_heading') +
+          block.text +
+          (block.sceneNumber ? ` (scene ${block.sceneNumber})` : ''),
+      ];
+    default:
+      return [plainTextIndent(block.type) + block.text];
+  }
+}
+
+/**
+ * Renders a canonical screenplay as readable, screenplay-formatted plain text -- scene headings,
+ * character cues, dialogue, parentheticals, transitions, and shots each at their specified
+ * indent, not the canonical JSON a writer cannot paste anywhere useful. Built for the save-conflict
+ * "Copy my version" rescue (progress/save-conflict-recovery.md): when saving is paused because the
+ * server holds a newer version, this is the one way a writer can get their own unsaved text out of
+ * the browser. Deliberately not an export format -- no page breaks are recomputed, no (MORE)/CONT'D
+ * is inserted, annotations are omitted -- FDX export is the real export format and supersedes this
+ * for that purpose (plan.md's autosave-and-conflict material, "Out of scope" in the same progress
+ * file); this only has to be legible enough to paste into an email, a note, or a fresh document
+ * without losing the writer's words.
+ */
+export function screenplayToPlainText(screenplay: Screenplay): string {
+  const titlePage = screenplay.titlePages[0];
+  const titlePageLines = titlePage ? plainTextTitlePageLines(titlePage) : [];
+  const headerLines = titlePageLines.length > 0 ? titlePageLines : [screenplay.title];
+
+  const lines = [...headerLines, '', ''];
+  screenplay.blocks.forEach((block, index) => {
+    if (index > 0) {
+      lines.push(...Array<string>(plainTextBlankLinesBefore(block)).fill(''));
+    }
+    lines.push(...plainTextBlockLines(block));
+  });
+
+  return `${lines.join('\n').trimEnd()}\n`;
 }

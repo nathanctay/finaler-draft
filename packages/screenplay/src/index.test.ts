@@ -17,6 +17,7 @@ import {
   safeParseScreenplay,
   screenplayBlockSchema,
   screenplaySchema,
+  screenplayToPlainText,
 } from './index.js';
 
 function uuidFor(index: number): string {
@@ -584,5 +585,117 @@ describe('createDefaultTitlePage', () => {
         { id, title: 'The Last Stop', credit: 'written by' },
       ]);
     }
+  });
+});
+
+describe('screenplayToPlainText', () => {
+  it('renders every element type at its specified indent, not canonical JSON', () => {
+    const text = screenplayToPlainText(screenplayFixture);
+    const lines = text.split('\n');
+
+    // Not canonical JSON -- the whole point of "Copy my version" (progress/save-conflict-recovery.md,
+    // "Copy my version must actually rescue the work") is that a writer can paste this somewhere
+    // useful; `JSON.parse` succeeding here would mean the export regressed to `JSON.stringify`.
+    expect(() => JSON.parse(text)).toThrow();
+    expect(text).not.toContain('"blocks"');
+    expect(text).not.toContain(screenplayFixture.id);
+
+    // Title page: title, then credit+authors, then draft date+contact, one blank line between
+    // groups (fixture has no `source`, so that line is correctly absent, not a stray blank).
+    expect(lines.slice(0, 7)).toEqual([
+      'THE LAST STOP',
+      '',
+      'Written by',
+      'Morgan Vale',
+      '',
+      'August 2026',
+      'morgan@example.test',
+    ]);
+
+    // scene_heading and action/shot sit flush with the left margin (0 indent); the scene number
+    // is appended, not silently dropped.
+    expect(lines).toContain('INT. UNION STATION - NIGHT (scene 1)');
+    expect(lines).toContain(
+      'Rain presses against the glass ceiling. ADA waits beside a silent departures board.',
+    );
+    expect(lines).toContain('CLOSE ON the arrival clock as it changes to midnight.');
+
+    // character (22 characters from the margin), parenthetical (16), and dialogue (10) -- see
+    // pageFormat.ts's ELEMENT_INDENTS, re-based from the page edge onto the left margin.
+    expect(lines).toContain(`${' '.repeat(22)}ADA`);
+    expect(lines).toContain(`${' '.repeat(16)}(into her phone)`);
+    expect(lines).toContain(`${' '.repeat(10)}I am at the last stop. If you are coming, come now.`);
+
+    // transition right-aligns to the body's right margin (60 characters).
+    expect(lines).toContain('CUT TO:'.padStart(60));
+    expect(lines.find((line) => line.includes('CUT TO:'))).toHaveLength(60);
+
+    // dual_dialogue: both columns print in full, sequentially, each labelled -- no content lost,
+    // even though plain text cannot represent them side by side.
+    const leftLabelIndex = lines.indexOf('[Dual dialogue -- spoken together, left column]');
+    const rightLabelIndex = lines.indexOf('[Dual dialogue -- spoken together, right column]');
+    expect(leftLabelIndex).toBeGreaterThan(-1);
+    expect(rightLabelIndex).toBeGreaterThan(leftLabelIndex);
+    expect(lines.slice(leftLabelIndex + 1, rightLabelIndex)).toEqual([
+      `${' '.repeat(22)}ADA`,
+      `${' '.repeat(10)}You made it.`,
+      '',
+    ]);
+    expect(lines.slice(rightLabelIndex + 1, rightLabelIndex + 3)).toEqual([
+      `${' '.repeat(22)}MILES`,
+      `${' '.repeat(10)}The train was late.`,
+    ]);
+
+    // page_break leaves a marker, not silence -- a reader of the plain text can tell a page
+    // boundary was there even though nothing about pagination survives into plain text.
+    expect(lines).toContain('-- page break --');
+
+    // The note annotation's text is deliberately not part of the manuscript export (this is the
+    // rescued screenplay, not the anchored comments on it) -- it must not leak into the output.
+    expect(text).not.toContain('Confirm station access.');
+  });
+
+  it('keeps a speech contiguous: zero blank lines between character, parenthetical, and dialogue', () => {
+    const lines = screenplayToPlainText(screenplayFixture).split('\n');
+    const characterIndex = lines.indexOf(`${' '.repeat(22)}ADA`);
+
+    // One blank line separates the preceding action from the character cue (BLANK_LINES_BEFORE),
+    // then the parenthetical and dialogue that make up the same speech follow with none at all.
+    expect(lines[characterIndex - 1]).toBe('');
+    expect(lines[characterIndex - 2]).not.toBe('');
+    expect(lines[characterIndex + 1]).toBe(`${' '.repeat(16)}(into her phone)`);
+    expect(lines[characterIndex + 2]).toBe(
+      `${' '.repeat(10)}I am at the last stop. If you are coming, come now.`,
+    );
+  });
+
+  it('falls back to the screenplay title when there is no title page', () => {
+    expect(screenplayToPlainText(minimalScreenplayFixture)).toBe('Untitled Screenplay\n');
+  });
+
+  it('omits an absent scene number rather than inventing one', () => {
+    const text = screenplayToPlainText({
+      ...minimalScreenplayFixture,
+      blocks: [
+        {
+          id: '00000000-0000-4000-8000-000000000001',
+          type: 'scene_heading',
+          text: 'INT. HOUSE - DAY',
+        },
+      ],
+    });
+
+    expect(text).toBe('Untitled Screenplay\n\n\nINT. HOUSE - DAY\n');
+  });
+
+  it('drops no title-page group and adds no stray blank line when only contact information is present', () => {
+    const text = screenplayToPlainText({
+      ...minimalScreenplayFixture,
+      titlePages: [
+        { id: '00000000-0000-4000-8000-000000000002', contact: ['writer@example.test'] },
+      ],
+    });
+
+    expect(text).toBe('writer@example.test\n');
   });
 });

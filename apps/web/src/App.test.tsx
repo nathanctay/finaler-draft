@@ -124,6 +124,244 @@ describe('local semantic screenplay editor', () => {
     save.mockRestore();
   });
 
+  it('tells the writer the truth in a conflict, with no claim that anything is preserved, and offers both rescue actions', async () => {
+    // The regression this guards against is specific: `audit/CONSOLIDATED.md` item A2 found the
+    // old copy said "your local edits are preserved" while `grep -rn
+    // "localStorage\|sessionStorage\|indexedDB"` over apps/web/src returns nothing -- a false
+    // claim that would send a writer away from the one place their unsaved edits still exist.
+    // Asserting the real rendered text (not a constant this test also imports) is what
+    // progress/save-conflict-recovery.md's verification section calls out as the test most likely
+    // to pass vacuously if written the other way.
+    const save = vi.spyOn(api, 'saveScreenplay').mockRejectedValue(new ApiError(409));
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'shot',
+    );
+    const status = await screen.findByText(/Save conflict/);
+    expect(status).toHaveTextContent(
+      'Save conflict · this screenplay changed elsewhere; this copy is unsaved and saving is paused',
+    );
+    expect(status.textContent ?? '').not.toMatch(/preserved/i);
+    expect(screen.getByRole('button', { name: 'Copy my version' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Reload (discards this copy)' })).toBeVisible();
+    save.mockRestore();
+  });
+
+  it('"Copy my version" puts the unsaved manuscript on the clipboard as readable screenplay text, not canonical JSON', async () => {
+    const save = vi.spyOn(api, 'saveScreenplay').mockRejectedValue(new ApiError(409));
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    // `userEvent.setup()` installs its own `navigator.clipboard` stub (an in-memory
+    // `items`-backed clipboard, for its own copy/paste helpers) -- defining the mock after setup,
+    // not before, is what makes it the one the component actually sees.
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'shot',
+    );
+    await screen.findByText(/Save conflict/);
+    await user.click(screen.getByRole('button', { name: 'Copy my version' }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledOnce());
+    const copiedText: unknown = writeText.mock.calls[0]?.[0];
+    expect(typeof copiedText).toBe('string');
+    // Not canonical JSON: JSON.parse would succeed on `JSON.stringify(screenplay)`, which is
+    // exactly what this button used to have no alternative to producing.
+    expect(() => JSON.parse(copiedText as string)).toThrow();
+    expect(copiedText).not.toContain('"blocks"');
+    expect(copiedText).toContain('The Long Way Home');
+    expect(copiedText).toContain('MARA');
+    expect(copiedText).toContain('If the ending is true, it has to earn its way there.');
+    expect(await screen.findByText('Copied to clipboard.')).toBeVisible();
+
+    save.mockRestore();
+    Reflect.deleteProperty(navigator, 'clipboard');
+  });
+
+  it('reports a Clipboard API rejection honestly instead of silently doing nothing', async () => {
+    const save = vi.spyOn(api, 'saveScreenplay').mockRejectedValue(new ApiError(409));
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'));
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'shot',
+    );
+    await screen.findByText(/Save conflict/);
+    await user.click(screen.getByRole('button', { name: 'Copy my version' }));
+
+    expect(
+      await screen.findByText('Copy failed · select the manuscript text and copy it manually.'),
+    ).toBeVisible();
+    expect(screen.queryByText('Copied to clipboard.')).not.toBeInTheDocument();
+
+    save.mockRestore();
+    Reflect.deleteProperty(navigator, 'clipboard');
+  });
+
+  it('"Reload (discards this copy)" discards the local copy and reloads from the server', async () => {
+    const save = vi.spyOn(api, 'saveScreenplay').mockRejectedValue(new ApiError(409));
+    const reload = vi.fn();
+    const originalLocation = window.location;
+    Object.defineProperty(window, 'location', { configurable: true, value: { reload } });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'shot',
+    );
+    await screen.findByText(/Save conflict/);
+    await user.click(screen.getByRole('button', { name: 'Reload (discards this copy)' }));
+
+    expect(reload).toHaveBeenCalledOnce();
+
+    Object.defineProperty(window, 'location', { configurable: true, value: originalLocation });
+    save.mockRestore();
+  });
+
+  it('flushes a pending debounced save when the page is hidden, without keepalive since the app is not going away', async () => {
+    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'action',
+    );
+    expect(save).not.toHaveBeenCalled();
+
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    fireEvent(document, new Event('visibilitychange'));
+
+    // Deliberately not awaited or wrapped in `waitFor`: `saveLatest` runs synchronously up to its
+    // first `await`, so if the flush fired at all, `saveScreenplay` has already been called by
+    // the time `dispatchEvent` returns -- no window in which the ordinary 600 ms debounce could
+    // have coincidentally elapsed and produced a false pass. This is the failure mode
+    // progress/save-conflict-recovery.md's verification section names directly: "make sure the
+    // assertion would fail if the flush never fired, rather than passing because the debounce had
+    // already elapsed."
+    //
+    // `keepalive: false` here is deliberate, not an oversight: the page is only backgrounded, not
+    // going away, so an ordinary `fetch` is correct -- and unlike `pagehide` below, it carries no
+    // 64 KB request-body cap, which matters because a real screenplay routinely exceeds it (see
+    // the flush effect's own comment in App.tsx).
+    expect(save).toHaveBeenCalledOnce();
+    expect(save.mock.calls[0]?.[3]).toEqual({ keepalive: false });
+
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    save.mockRestore();
+  });
+
+  it('flushes a pending debounced save on pagehide too, with keepalive since that exit may be a real page teardown', async () => {
+    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'action',
+    );
+    expect(save).not.toHaveBeenCalled();
+
+    fireEvent(window, new Event('pagehide'));
+
+    expect(save).toHaveBeenCalledOnce();
+    expect(save.mock.calls[0]?.[3]).toEqual({ keepalive: true });
+    save.mockRestore();
+  });
+
+  it('still flushes a pending save on unmount for a document well over the 64 KB keepalive cap, because unmount does not use keepalive', async () => {
+    // `keepalive: true` requests are capped at a 64 KB total body by the Fetch spec, and a real
+    // screenplay routinely exceeds it -- measured on this branch, 500 blocks of canonical JSON is
+    // already ~67 KB. The other flush tests above use the tiny default fixture and so could not
+    // catch a regression that put `keepalive: true` back on the unmount/`visibilitychange` path
+    // (both are in-app, not a page teardown, and must not pay that cap): with a small document
+    // they would still "work" even over-cap, since 64 KB was never approached. This constructs a
+    // screenplay comfortably over the cap and asserts the unmount flush both carries the whole
+    // oversized payload and does so with `keepalive: false`.
+    const bigBlocks: ScreenplayBlock[] = Array.from({ length: 60 }, () => ({
+      id: crypto.randomUUID(),
+      text: 'x'.repeat(1200),
+      type: 'action' as const,
+    }));
+    const bigScreenplay: Screenplay = {
+      annotations: [],
+      blocks: [
+        { id: crypto.randomUUID(), text: 'INT. WAREHOUSE - NIGHT', type: 'scene_heading' },
+        ...bigBlocks,
+      ],
+      documentSettings: DEFAULT_DOCUMENT_SETTINGS,
+      id: crypto.randomUUID(),
+      schemaVersion: 1,
+      title: 'Big screenplay',
+      titlePages: [],
+    };
+    expect(JSON.stringify(bigScreenplay).length).toBeGreaterThan(65_536);
+    const bigInitial: PersistedScreenplay = {
+      id: bigScreenplay.id,
+      projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+      screenplay: bigScreenplay,
+      title: bigScreenplay.title,
+      version: 1,
+    };
+    const second = persistedScreenplay(
+      '8c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
+      'Second screenplay',
+      'Second route content.',
+    );
+    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
+    const user = userEvent.setup();
+    const { rerender } = render(<App initial={bigInitial} key={bigInitial.id} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    await user.click(screen.getByRole('button', { name: /1\. INT\. WAREHOUSE/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'shot',
+    );
+    rerender(<App initial={second} key={second.id} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    expect(save).toHaveBeenCalledOnce();
+    const [, , flushedScreenplay, flushedOptions] = save.mock.calls[0] ?? [];
+    expect(JSON.stringify(flushedScreenplay).length).toBeGreaterThan(65_536);
+    expect(flushedOptions).toEqual({ keepalive: false });
+
+    save.mockRestore();
+  });
+
+  it("never flushes on hide while a save conflict is in effect, matching the debounced path's own rule", async () => {
+    const save = vi.spyOn(api, 'saveScreenplay').mockRejectedValueOnce(new ApiError(409));
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'shot',
+    );
+    await screen.findByText(/Save conflict/);
+    expect(save).toHaveBeenCalledOnce();
+    save.mockClear();
+
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    fireEvent(document, new Event('visibilitychange'));
+
+    // The local edit is still genuinely different from `savedWire.current` (the 409 never
+    // succeeded), so absent the conflict guard this would fire a real second call -- silently
+    // resuming a save the server already rejected, requirement 4's own hazard.
+    expect(save).not.toHaveBeenCalled();
+
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    save.mockRestore();
+  });
+
   it('renders unsupported persisted snapshots as read-only', async () => {
     render(
       <App
@@ -149,7 +387,7 @@ describe('local semantic screenplay editor', () => {
     expect(screen.queryByText('INT. APARTMENT - MORNING')).not.toBeInTheDocument();
   });
 
-  it('discards the prior editor instance when a route opens a different screenplay', async () => {
+  it('discards the prior editor instance when a route opens a different screenplay, after flushing its pending save', async () => {
     const first = persistedScreenplay(
       '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
       'First screenplay',
@@ -174,8 +412,28 @@ describe('local semantic screenplay editor', () => {
     const secondCanvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
     expect(secondCanvas).toHaveTextContent('Second route content.');
     expect(secondCanvas).not.toHaveTextContent('First route content.');
+
+    // Requirement 5, progress/save-conflict-recovery.md -- the audit's "smaller sibling" finding
+    // in audit/CONSOLIDATED.md item A2: unmounting with a pending debounced save now flushes it
+    // rather than silently dropping the edit, the way this test used to assert (waiting past the
+    // 600 ms debounce to prove nothing happened). The flush fires synchronously on unmount, for
+    // the discarded first instance only -- its id, its edited block, `keepalive: false` (unmount
+    // is in-app navigation, not the page going away, so it deliberately does not pay the 64 KB
+    // keepalive cap -- see the flush effect's own comment in App.tsx) -- and must never touch or
+    // be attributed to the second, still-mounted instance.
+    expect(save).toHaveBeenCalledOnce();
+    const [flushedId, flushedExpectedVersion, flushedScreenplay, flushedOptions] =
+      save.mock.calls[0] ?? [];
+    expect(flushedId).toBe(first.id);
+    expect(flushedExpectedVersion).toBe(1);
+    expect(flushedScreenplay).toMatchObject({ blocks: [{ type: 'action' }] });
+    expect(flushedOptions).toEqual({ keepalive: false });
+
+    // The old native `setTimeout` the flush pre-empted must actually be cancelled, not merely
+    // outrun -- otherwise it would still fire a second, duplicate save once its own 600 ms
+    // elapsed.
     await new Promise((resolve) => window.setTimeout(resolve, 700));
-    expect(save).not.toHaveBeenCalled();
+    expect(save).toHaveBeenCalledOnce();
     save.mockRestore();
   });
 
