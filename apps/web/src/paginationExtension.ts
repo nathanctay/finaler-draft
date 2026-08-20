@@ -36,7 +36,7 @@
  * always recomputes from the full current document; frame-coalescing is the only mitigation used
  * here, deliberately.
  */
-import { Extension } from '@tiptap/core';
+import { Extension, type Editor } from '@tiptap/core';
 import { Plugin, PluginKey } from '@tiptap/pm/state';
 import { DecorationSet } from '@tiptap/pm/view';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
@@ -46,15 +46,25 @@ import { buildPaginationDecorations } from './pagination.js';
 import { projectDocumentScreenplay } from './screenplayEditor.js';
 
 /**
- * The plugin's state: the decorations ProseMirror renders, plus the page count the same
- * `LayoutResult` produced. `pageCount` rides the existing frame-coalesced computation rather than
- * triggering a second one -- see `App.tsx`'s use of it to size `.page`'s minimum height
- * (requirement 3, progress/page-rendering.md) via `pagination.ts`'s `pageStackMinHeightIn`. It is
- * exposed alongside `decorations`, not computed separately, specifically so driving that CSS
- * value never adds a second per-keystroke or per-frame pagination pass.
+ * The plugin's state: the decorations ProseMirror renders, the page count the same `LayoutResult`
+ * produced, and the `documentSettings` that produced both. `pageCount` rides the existing
+ * frame-coalesced computation rather than triggering a second one -- see `App.tsx`'s use of it to
+ * size `.page`'s minimum height (requirement 3, progress/page-rendering.md) via `pagination.ts`'s
+ * `pageStackMinHeightIn`. It is exposed alongside `decorations`, not computed separately,
+ * specifically so driving that CSS value never adds a second per-keystroke or per-frame
+ * pagination pass.
+ *
+ * `documentSettings` lives here now, not only in `addProseMirrorPlugins()`'s closure, because a
+ * settings change must repaginate the live document in place rather than remounting the editor
+ * (plan.md requires local undo history to survive a settings change, and remounting destroys it --
+ * see `updatePaginationDocumentSettings` below). Carrying the value that produced a given state
+ * alongside it is what lets the `view()` handler's own repagination read back "the settings this
+ * document is currently using" instead of the value the plugin was constructed with, which could
+ * be stale the moment a setting changes.
  */
 export type PaginationState = {
   readonly decorations: DecorationSet;
+  readonly documentSettings: DocumentSettings;
   readonly pageCount: number;
 };
 
@@ -79,15 +89,51 @@ function computePaginationState(
 ): PaginationState {
   const projection = projectDocumentScreenplay(doc);
   if (!projection.valid) {
-    return { decorations: DecorationSet.empty, pageCount: 0 };
+    return { decorations: DecorationSet.empty, documentSettings, pageCount: 0 };
   }
   try {
     const layout = paginateScreenplay(projection.screenplay.blocks, documentSettings);
-    return { decorations: buildPaginationDecorations(doc, layout), pageCount: layout.pages.length };
+    return {
+      decorations: buildPaginationDecorations(doc, layout, documentSettings),
+      documentSettings,
+      pageCount: layout.pages.length,
+    };
   } catch (error) {
     console.error('Screenplay pagination failed; rendering without page decorations.', error);
-    return { decorations: DecorationSet.empty, pageCount: 0 };
+    return { decorations: DecorationSet.empty, documentSettings, pageCount: 0 };
   }
+}
+
+/**
+ * Applies a new `documentSettings` to the live pagination plugin, in place. Dispatches a
+ * transaction carrying the freshly computed `PaginationState` as `paginationPluginKey`'s meta --
+ * the identical mechanism the `view()` handler's own frame-coalesced repagination already uses
+ * below, just invoked directly and computed synchronously rather than deferred to the next
+ * animation frame.
+ *
+ * Running synchronously here (unlike the doc-change path, which is deliberately deferred off the
+ * input event -- see this module's top-of-file comment) is correct, not an oversight: a settings
+ * change is a deliberate, infrequent action (closing the document-settings dialog), not a
+ * keystroke, so there is no burst to coalesce and no reason to withhold the result for a frame.
+ * The cost is one full `paginateScreenplay` pass over the current document -- the same per-block
+ * cost the frame-coalesced path already pays on every repagination (see the module comment's own
+ * measurements) -- run once, synchronously, at the moment the writer applies the change.
+ *
+ * This is also the piece that lets `App.tsx` change `documentSettings` without remounting the
+ * editor. `addProseMirrorPlugins()` used to close over `documentSettings` once, at plugin
+ * construction, which is exactly why a settings change used to require building a fresh editor
+ * instance -- destroying local undo history, which plan.md does not allow. The plugin's own state
+ * now carries `documentSettings` (see `PaginationState` above), so this function, and the
+ * `view()` handler's own repagination reading it back, are the only two places that still need to
+ * know the current value; `addOptions()`'s `documentSettings` remains only the value the plugin is
+ * seeded with when the editor first mounts.
+ */
+export function updatePaginationDocumentSettings(
+  editor: Editor,
+  documentSettings: DocumentSettings,
+): void {
+  const paginationState = computePaginationState(editor.state.doc, documentSettings);
+  editor.view.dispatch(editor.state.tr.setMeta(paginationPluginKey, paginationState));
 }
 
 export type PaginationExtensionOptions = {
@@ -149,9 +195,19 @@ export const PaginationExtension = Extension.create<PaginationExtensionOptions>(
               if (editorView.isDestroyed) {
                 return;
               }
+              // Reads the plugin's own current `documentSettings`, not the value this closure was
+              // constructed with: a writer can change settings (via the document-settings dialog,
+              // see `updatePaginationDocumentSettings`) at any point, including between a
+              // keystroke and the animation frame that repaginates it. Falling back to the
+              // closure's `documentSettings` only covers the state before the plugin's own state
+              // has been initialized at all, which `init` above already guarantees never outlives
+              // this view's construction.
+              const currentDocumentSettings =
+                paginationPluginKey.getState(editorView.state)?.documentSettings ??
+                documentSettings;
               const paginationState = computePaginationState(
                 editorView.state.doc,
-                documentSettings,
+                currentDocumentSettings,
               );
               editorView.dispatch(
                 editorView.state.tr.setMeta(paginationPluginKey, paginationState),

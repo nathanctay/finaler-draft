@@ -792,3 +792,160 @@ describe('title page editing', () => {
     expect(screen.queryByRole('article', { name: 'Title page' })).not.toBeInTheDocument();
   });
 });
+
+describe('document settings', () => {
+  async function openDialog(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Document settings…' }));
+    return screen.getByRole('dialog', { name: 'Document settings' });
+  }
+
+  it('opens from the File menu and closes on Escape, returning focus to the File menu trigger', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const dialog = await openDialog(user);
+    expect(dialog).toBeVisible();
+
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'File menu' })).toHaveFocus();
+  });
+
+  /**
+   * The bug this increment's scope opened with: `projectDocumentScreenplay` never threaded
+   * `documentSettings` into `safeParseScreenplay` at all, so the schema's own `.default()` filled
+   * in `DEFAULT_DOCUMENT_SETTINGS` on every save regardless of what was actually stored. A
+   * screenplay loaded with non-default settings, edited in a way that has nothing to do with
+   * settings at all, must still save those same non-default settings back -- not the
+   * specification's defaults.
+   */
+  it('a loaded screenplay keeps its own non-default settings through an unrelated autosave, not the schema defaults', async () => {
+    const custom = persistedScreenplay(
+      '4c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
+      'Custom settings',
+      'INT. WORKSHOP - NIGHT',
+      {
+        characterIndentIn: 4.1,
+        parentheticalIndentIn: 3.6,
+        parentheticalWidthIn: 1.8,
+        pageNumberStyle: 'roman',
+        sceneNumbersEnabled: true,
+        autoMoreContinued: false,
+      },
+    );
+    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
+    const user = userEvent.setup();
+    render(<App initial={custom} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    // An edit that has nothing to do with document settings: converting the loaded scene heading
+    // to a shot.
+    await user.click(screen.getByRole('button', { name: /1\. INT\. WORKSHOP/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'shot',
+    );
+
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    const savedScreenplay = save.mock.calls.at(-1)?.[2] as Screenplay;
+    expect(savedScreenplay.documentSettings).toEqual({
+      characterIndentIn: 4.1,
+      parentheticalIndentIn: 3.6,
+      parentheticalWidthIn: 1.8,
+      pageNumberStyle: 'roman',
+      sceneNumbersEnabled: true,
+      autoMoreContinued: false,
+    });
+    save.mockRestore();
+  });
+
+  /**
+   * plan.md: scene numbers are "display only," rendered as decorations, never written into the
+   * document. This is the guarantee that makes that true from the writer's side of the autosave
+   * path, not just inside the pagination plugin -- the setting most likely to pass vacuously per
+   * this scope's own verification note, since nothing else in this suite saves a screenplay with
+   * the setting on and inspects what actually got sent.
+   */
+  it('toggling scene numbers on changes only documentSettings.sceneNumbersEnabled, leaving every block byte-identical', async () => {
+    const twoSceneBlocks: ScreenplayBlock[] = [
+      {
+        id: '00000000-0000-4000-8000-000000000201',
+        type: 'scene_heading',
+        text: 'INT. APARTMENT - MORNING',
+      },
+      {
+        id: '00000000-0000-4000-8000-000000000202',
+        type: 'action',
+        text: 'MARA studies the last page of a script.',
+      },
+      {
+        id: '00000000-0000-4000-8000-000000000203',
+        type: 'scene_heading',
+        text: 'EXT. STREET - DAY',
+      },
+    ];
+    const base = persistedScreenplay(
+      '5c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
+      'Two scenes',
+      'unused',
+    );
+    const initial = { ...base, screenplay: { ...base.screenplay, blocks: twoSceneBlocks } };
+    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
+    const user = userEvent.setup();
+    render(<App initial={initial} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const dialog = await openDialog(user);
+    await user.click(within(dialog).getByRole('checkbox', { name: 'Number scenes' }));
+
+    await waitFor(() => expect(save).toHaveBeenCalled());
+    const savedScreenplay = save.mock.calls.at(-1)?.[2] as Screenplay;
+    expect(savedScreenplay.documentSettings.sceneNumbersEnabled).toBe(true);
+    // `toEqual` is exact structural equality: a `sceneNumber` key silently written onto either
+    // scene_heading block here would fail this, not just a changed value on an existing key.
+    expect(savedScreenplay.blocks).toEqual(twoSceneBlocks);
+    save.mockRestore();
+  });
+
+  /**
+   * The architectural property `PaginationExtension`'s plugin-state redesign exists to protect:
+   * changing a document setting must repaginate in place, never remount the editor, because a
+   * remount would reset the ProseMirror document to `initial` and discard local undo history
+   * (plan.md requires local undo to survive). Nothing else in this suite would catch a regression
+   * back to `.configure()`-only settings, since that would still *render* correctly on the next
+   * full page load -- it would only lose history for edits already made before the change.
+   */
+  it('undo history for an edit made before a settings change still works after the settings change', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'character',
+    );
+    expect(getBlock(canvas, firstSceneId)).toHaveAttribute('data-screenplay-element', 'character');
+    expect(screen.getByRole('button', { name: 'Undo local change' })).toBeEnabled();
+
+    const dialog = await openDialog(user);
+    await user.click(within(dialog).getByRole('checkbox', { name: 'Number scenes' }));
+    await user.keyboard('{Escape}');
+
+    // The pre-existing edit and its undo availability both survive the settings change untouched
+    // -- if the editor had been remounted, the block would already be back to a fresh
+    // `scene_heading` (the remount reloads `initial`, discarding the conversion above entirely)
+    // and there would be nothing to undo.
+    expect(getBlock(canvas, firstSceneId)).toHaveAttribute('data-screenplay-element', 'character');
+    expect(screen.getByRole('button', { name: 'Undo local change' })).toBeEnabled();
+
+    await user.click(screen.getByRole('button', { name: 'Undo local change' }));
+    expect(getBlock(canvas, firstSceneId)).toHaveAttribute(
+      'data-screenplay-element',
+      'scene_heading',
+    );
+  });
+});

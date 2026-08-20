@@ -42,6 +42,7 @@ import {
   PAGE_HEIGHT_IN,
   PAGE_NUMBER_TOP_IN,
 } from '@finaler-draft/screenplay/pageFormat';
+import { DEFAULT_DOCUMENT_SETTINGS, type DocumentSettings } from '@finaler-draft/screenplay';
 
 /** Visual gap, in inches, drawn between two page rectangles in discrete page mode. See the module comment. */
 export const PAGE_GAP_IN = 0.25;
@@ -219,6 +220,51 @@ export function computePageBreaks(
 }
 
 /**
+ * Roman-numeral digit table, largest value first, including the four subtractive pairs (CM, CD,
+ * XC, XL, IX, IV) so the greedy algorithm below never needs special-casing for them. Page numbers
+ * never reach anywhere near the traditional 3999 ceiling, so no thousands-of-thousands extension
+ * is needed.
+ */
+const ROMAN_NUMERAL_DIGITS: ReadonlyArray<readonly [value: number, numeral: string]> = [
+  [1000, 'M'],
+  [900, 'CM'],
+  [500, 'D'],
+  [400, 'CD'],
+  [100, 'C'],
+  [90, 'XC'],
+  [50, 'L'],
+  [40, 'XL'],
+  [10, 'X'],
+  [9, 'IX'],
+  [5, 'V'],
+  [4, 'IV'],
+  [1, 'I'],
+];
+
+function toRomanNumeral(value: number): string {
+  let remaining = value;
+  let numeral = '';
+  for (const [digitValue, digitNumeral] of ROMAN_NUMERAL_DIGITS) {
+    while (remaining >= digitValue) {
+      numeral += digitNumeral;
+      remaining -= digitValue;
+    }
+  }
+  return numeral;
+}
+
+/**
+ * Formats a 1-based page number per `documentSettings.pageNumberStyle` -- plan.md's "Page
+ * numbering": "Roman numerals are available as a document setting." The engine's own
+ * `Page.pageNumber` is a position, never a printed label (see `packages/layout`'s `model.ts`), so
+ * choosing the numeral system is entirely this renderer's job; nothing about it reaches the
+ * layout package.
+ */
+function formatPageNumber(pageNumber: number, style: DocumentSettings['pageNumberStyle']): string {
+  return style === 'roman' ? toRomanNumeral(pageNumber) : String(pageNumber);
+}
+
+/**
  * Builds the composite DOM widget for one page break: an optional `(MORE)` line at the character
  * indent, a spacer sized to `spacerHeightIn`, the incoming page's number positioned relative to
  * that spacer, and an optional `CONT'D` heading. All of it is `contenteditable="false"` -- none of
@@ -229,8 +275,15 @@ export function computePageBreaks(
  * `spacerHeightIn - MARGIN_TOP_IN` is the incoming page's physical top, measured from the
  * spacer's own top. Anchoring there (via the spacer's `position: relative`) is what lets the
  * number land correctly without a per-page container to position it against.
+ *
+ * `pageNumberStyle` defaults to `'arabic'`, matching every other document-settings-aware function
+ * in this codebase, so the existing direct callers of this function (its own test file) keep
+ * passing unchanged.
  */
-export function buildPageBreakWidget(pageBreak: PageBreak): HTMLElement {
+export function buildPageBreakWidget(
+  pageBreak: PageBreak,
+  pageNumberStyle: DocumentSettings['pageNumberStyle'] = 'arabic',
+): HTMLElement {
   const wrapper = document.createElement('div');
   wrapper.className = 'page-break-widget';
   wrapper.contentEditable = 'false';
@@ -249,7 +302,7 @@ export function buildPageBreakWidget(pageBreak: PageBreak): HTMLElement {
 
   const pageNumber = document.createElement('div');
   pageNumber.className = 'page-break-number';
-  pageNumber.textContent = `${pageBreak.pageNumber}.`;
+  pageNumber.textContent = `${formatPageNumber(pageBreak.pageNumber, pageNumberStyle)}.`;
   pageNumber.style.top = `${pageBreak.spacerHeightIn - MARGIN_TOP_IN + PAGE_NUMBER_TOP_IN}in`;
   spacer.appendChild(pageNumber);
   wrapper.appendChild(spacer);
@@ -265,16 +318,101 @@ export function buildPageBreakWidget(pageBreak: PageBreak): HTMLElement {
 }
 
 /**
+ * One node decoration per scene heading, in document order, numbering them 1-based -- plan.md's
+ * "Scene numbers": "every scene heading receives a number, right-aligned." A node decoration
+ * (rather than a widget) attaches `data-scene-number` to the block's own DOM node, which
+ * `styles.css`'s `::after { content: attr(data-scene-number) }` renders without touching the
+ * block's actual text content -- the same convention `computePageTopBlocks`'s `page-top` class
+ * already uses for suppressing space-before, and it composes with that decoration cleanly since
+ * ProseMirror merges multiple node decorations on the same node.
+ *
+ * This walks `doc` directly rather than reading the canonical `sceneNumber` field: **scene
+ * numbers are never written into the document or persisted onto `sceneNumber`** (that field is
+ * reserved for the distinct, not-yet-built Phase 5 locked-numbering feature -- see plan.md's
+ * "Scene numbers" section). Numbering here is purely a rendering decoration, recomputed from the
+ * live document on every repagination, which is exactly what lets it renumber freely as scenes
+ * move without ever touching `canonical_hash`.
+ *
+ * An empty scene heading -- the ordinary transient state of a heading the writer has not started
+ * typing yet -- is skipped entirely: it neither receives a decoration nor consumes a number.
+ * plan.md gives no rule for this case, so this is a deliberate choice, not an oversight, made for
+ * two reasons. First, the alternative (numbering it but hiding the number, since there is no text
+ * to draw a number `::after`) makes the *visible* sequence non-contiguous -- a writer who can see
+ * scenes 1, 3, 4 but never 2 reads that as a bug, not as "scene 2 exists but is blank." Second,
+ * plan.md already establishes that this numbering "renumbers freely as scenes move" -- a shift is
+ * an expected, already-accepted property of this feature, not a new kind of surprise -- so an
+ * empty heading claiming its number only once the writer types its first character is the same
+ * kind of shift, just triggered by authoring the heading rather than reordering it.
+ */
+function buildSceneNumberWidget(label: string): HTMLElement {
+  const wrapper = document.createElement('span');
+  wrapper.className = 'scene-number';
+  wrapper.contentEditable = 'false';
+  wrapper.setAttribute('data-scene-number', label);
+
+  const left = document.createElement('span');
+  left.className = 'scene-number-left';
+  left.textContent = label;
+
+  // The right-margin copy is the same number a second time, purely so the printed page reads
+  // correctly when scanned from either edge. Announcing it again would make a screen reader say
+  // every scene number twice, so only the left copy is exposed.
+  const right = document.createElement('span');
+  right.className = 'scene-number-right';
+  right.textContent = label;
+  right.setAttribute('aria-hidden', 'true');
+
+  wrapper.append(left, right);
+  return wrapper;
+}
+
+export function computeSceneNumberDecorations(doc: ProseMirrorNode): Decoration[] {
+  const decorations: Decoration[] = [];
+  let sceneNumber = 0;
+  doc.forEach((node, offset) => {
+    if (node.attrs.element !== 'scene_heading' || node.textContent === '') {
+      return;
+    }
+    sceneNumber += 1;
+    const label = String(sceneNumber);
+    // Anchored at `offset + 1` -- just inside the scene heading's own textblock, not between two
+    // block nodes. A widget placed *between* blocks makes ProseMirror emit its
+    // `img.ProseMirror-separator`, which adds a line box and shifts the page grid (see
+    // `computePageBreaks`'s own anchoring comment for the same trap). Inside a textblock is the
+    // ordinary, safe position for a widget.
+    //
+    // `side: -1` keeps it before any text at that position, and `ignoreSelection` stops it
+    // capturing a cursor placed at the start of the heading -- the number is display, never a
+    // place the writer can put the caret.
+    decorations.push(
+      Decoration.widget(offset + 1, () => buildSceneNumberWidget(label), {
+        ignoreSelection: true,
+        key: `scene-number|${label}`,
+        side: -1,
+      }),
+    );
+  });
+  return decorations;
+}
+
+/**
  * Builds the full decoration set for a paginated document: one node decoration per page-top block
- * (suppressing its space-before) and one widget decoration per break. Both view modes (discrete
- * pages and continuous scroll) call this with the identical `layout`, so the decorations --
- * therefore the page count and break positions -- are byte-identical between them by
- * construction. The two modes differ only in `styles.css`'s `.page`/`.page.continuous` background
- * rules; nothing here reads or reacts to the view mode at all.
+ * (suppressing its space-before), one node decoration per scene heading when
+ * `documentSettings.sceneNumbersEnabled` (see `computeSceneNumberDecorations`), and one widget
+ * decoration per break. Both view modes (discrete pages and continuous scroll) call this with the
+ * identical `layout`, so the decorations -- therefore the page count and break positions -- are
+ * byte-identical between them by construction. The two modes differ only in `styles.css`'s
+ * `.page`/`.page.continuous` background rules; nothing here reads or reacts to the view mode at
+ * all.
+ *
+ * `documentSettings` defaults to the specification's current fixed values (scene numbers off,
+ * Arabic page numbers), matching every other document-settings-aware function in this codebase,
+ * so this function's own test file's existing calls keep passing unchanged.
  */
 export function buildPaginationDecorations(
   doc: ProseMirrorNode,
   layout: LayoutResult,
+  documentSettings: DocumentSettings = DEFAULT_DOCUMENT_SETTINGS,
 ): DecorationSet {
   const blockStarts = computeBlockStarts(doc);
   const decorations: Decoration[] = [];
@@ -285,26 +423,38 @@ export function buildPaginationDecorations(
     );
   }
 
+  if (documentSettings.sceneNumbersEnabled) {
+    decorations.push(...computeSceneNumberDecorations(doc));
+  }
+
   for (const pageBreak of computePageBreaks(doc, blockStarts, layout)) {
     decorations.push(
-      Decoration.widget(pageBreak.pos, () => buildPageBreakWidget(pageBreak), {
-        // The key must encode everything the widget draws, not just which page it introduces.
-        // ProseMirror treats two widgets with equal keys as the same widget and reuses the
-        // existing DOM node without calling the render function again. Keyed on the page number
-        // alone, a break whose spacer height changed -- which happens on every edit that changes
-        // the outgoing page's line count without moving a block across the boundary -- kept the
-        // stale spacer, so the incoming page's frame and its number sat a line or more off, and
-        // the correction only appeared on a later edit that happened to change the key. Every
-        // field `buildPageBreakWidget` reads appears here.
-        key: [
-          'page-break',
-          pageBreak.pageNumber,
-          pageBreak.spacerHeightIn,
-          pageBreak.more?.text ?? '',
-          pageBreak.continued?.text ?? '',
-        ].join('|'),
-        side: 1,
-      }),
+      Decoration.widget(
+        pageBreak.pos,
+        () => buildPageBreakWidget(pageBreak, documentSettings.pageNumberStyle),
+        {
+          // The key must encode everything the widget draws, not just which page it introduces.
+          // ProseMirror treats two widgets with equal keys as the same widget and reuses the
+          // existing DOM node without calling the render function again. Keyed on the page number
+          // alone, a break whose spacer height changed -- which happens on every edit that changes
+          // the outgoing page's line count without moving a block across the boundary -- kept the
+          // stale spacer, so the incoming page's frame and its number sat a line or more off, and
+          // the correction only appeared on a later edit that happened to change the key.
+          // `pageNumberStyle` is included for the identical reason: toggling it changes the
+          // rendered text (`4.` vs `IV.`) without changing `pageBreak.pageNumber` itself, so
+          // omitting it here would leave the stale numeral system's DOM node in place after the
+          // writer switched. Every field `buildPageBreakWidget` reads appears here.
+          key: [
+            'page-break',
+            pageBreak.pageNumber,
+            pageBreak.spacerHeightIn,
+            pageBreak.more?.text ?? '',
+            pageBreak.continued?.text ?? '',
+            documentSettings.pageNumberStyle,
+          ].join('|'),
+          side: 1,
+        },
+      ),
     );
   }
 

@@ -437,6 +437,102 @@ test.describe('page rendering: real editor, real DOM', () => {
     const settledOffsetIn = await readSettledBreakOffsetIn();
     expect(Math.abs(settledOffsetIn - baselineOffsetIn)).toBeLessThan(TOLERANCE_IN);
   });
+  /**
+   * Scene numbers render as a widget decoration inside each numbered scene heading, carrying the
+   * number out into both margins (plan.md's "Locked scripts"). A widget puts real DOM inside the
+   * editable subtree, which a `::before`/`::after` overlay never did -- so unlike the previous
+   * implementation, this one *could* perturb the line grid if its positioning were wrong or its
+   * anchor were placed between blocks rather than inside the heading's own textblock.
+   *
+   * The character grid is normative and must not move for a display-only setting, so this test
+   * measures every block's painted position with numbering off, turns it on through the real
+   * dialog, and requires every block to be exactly where it was. Nothing else in the suite covers
+   * the app with `sceneNumbersEnabled` on: the other tests in this file all run at the default
+   * settings, so a grid shift introduced by numbering would otherwise ship unnoticed.
+   */
+  test('turning scene numbers on paints both margins without moving a single block', async ({
+    page,
+  }) => {
+    await requireCourierPrime(page);
+    const { canvas } = await createAndOpenScreenplay(page);
+    await canvas.click();
+
+    // A new screenplay's first block is `action`, not a scene heading, so the element has to be
+    // set explicitly before typing -- otherwise this fixture contains no scene at all and the
+    // assertions below would pass vacuously against zero rendered numbers.
+    await page.getByLabel('Active screenplay element').selectOption({ label: 'Scene Heading' });
+    // The heading fills its full 60-character budget deliberately. A short heading would absorb
+    // two extra characters without wrapping, so this test would pass even if the numbers rendered
+    // in the text flow instead of the margins -- exactly the regression it exists to catch. At the
+    // budget, any in-flow content wraps the heading and pushes every block below it down a line.
+    const heading = 'INT. APARTMENT KITCHEN - CONTINUOUS - THE MORNING AFTER IT'.padEnd(60, 'X');
+    expect(heading).toHaveLength(60);
+    const lines = [
+      heading,
+      'Mara counts the money twice.',
+      'She does not like the answer either time.',
+      'The radiator knocks once and gives up.',
+    ];
+    for (let index = 0; index < lines.length; index += 1) {
+      await page.keyboard.insertText(lines[index] ?? '');
+      if (index < lines.length - 1) {
+        await page.keyboard.press('Enter');
+      }
+    }
+    await page.waitForTimeout(400);
+
+    const readBlockTops = async (): Promise<number[]> =>
+      page.evaluate(() =>
+        Array.from(document.querySelectorAll('[data-screenplay-block]')).map(
+          (block) => block.getBoundingClientRect().top,
+        ),
+      );
+
+    const before = await readBlockTops();
+    expect(before.length).toBe(lines.length);
+    // The fixture really does contain a scene to number.
+    expect(
+      await page
+        .locator("[data-screenplay-block][data-screenplay-element='scene_heading']")
+        .count(),
+    ).toBe(1);
+    expect(await page.locator('.scene-number').count()).toBe(0);
+
+    await page.locator('.menu-file .overflow-menu-trigger').click();
+    await page.getByRole('menuitem', { name: 'Document settings…' }).click();
+    await page.getByRole('checkbox', { name: 'Number scenes' }).check();
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(400);
+
+    // Precondition: numbering actually took effect. Without this the equality below could pass
+    // simply because nothing rendered at all.
+    const sceneNumber = page.locator('.scene-number').first();
+    await expect(sceneNumber).toHaveAttribute('data-scene-number', '1');
+    await expect(sceneNumber.locator('.scene-number-left')).toHaveText('1');
+    await expect(sceneNumber.locator('.scene-number-right')).toHaveText('1');
+
+    // Both copies sit outside the heading's own text column -- one to its left, one to its right.
+    const margins = await page.evaluate(() => {
+      const heading = document.querySelector('[data-screenplay-block]');
+      const left = document.querySelector('.scene-number-left');
+      const right = document.querySelector('.scene-number-right');
+      if (!heading || !left || !right) return undefined;
+      const headingBox = heading.getBoundingClientRect();
+      return {
+        headingLeft: headingBox.left,
+        headingRight: headingBox.right,
+        leftRight: left.getBoundingClientRect().right,
+        rightLeft: right.getBoundingClientRect().left,
+      };
+    });
+    expect(margins).toBeDefined();
+    expect(margins!.leftRight).toBeLessThanOrEqual(margins!.headingLeft);
+    expect(margins!.rightLeft).toBeGreaterThanOrEqual(margins!.headingRight);
+
+    const after = await readBlockTops();
+    expect(after).toEqual(before);
+  });
+
   test("a page frame stays put when an edit changes a short page's fill without moving a block", async ({
     page,
   }) => {

@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Editor } from '@tiptap/core';
-import { Fragment } from '@tiptap/pm/model';
-import type { ScreenplayBlock } from '@finaler-draft/screenplay';
+import { Fragment, type Node as ProseMirrorNode } from '@tiptap/pm/model';
+import { DEFAULT_DOCUMENT_SETTINGS, type ScreenplayBlock } from '@finaler-draft/screenplay';
 import { screenplayExtensions } from './screenplayEditor.js';
-import { PaginationExtension, paginationPluginKey } from './paginationExtension.js';
+import {
+  PaginationExtension,
+  paginationPluginKey,
+  updatePaginationDocumentSettings,
+} from './paginationExtension.js';
 
 /**
  * `safeParseScreenplay` requires every block id to be a UUID (see `stableIdSchema` in
@@ -29,6 +33,14 @@ function plainTwoPageBlocks(): ScreenplayBlock[] {
   return Array.from({ length: 29 }, (_, index) => actionBeat(index));
 }
 
+function sceneHeading(index: number, text: string): ScreenplayBlock {
+  return {
+    id: `00000000-0000-4000-9000-${String(index).padStart(12, '0')}`,
+    type: 'scene_heading',
+    text,
+  };
+}
+
 function docContentFor(blocks: readonly ScreenplayBlock[]) {
   return {
     type: 'screenplayDocument' as const,
@@ -42,13 +54,24 @@ function docContentFor(blocks: readonly ScreenplayBlock[]) {
   };
 }
 
-function buildEditor(blocks: readonly ScreenplayBlock[]) {
+/**
+ * `documentSettings` is optional and, when passed, configures the extension with it -- every
+ * existing call site in this file omits it and gets the bare, unconfigured extension (matching
+ * `DEFAULT_DOCUMENT_SETTINGS`), unchanged from before this parameter existed.
+ */
+function buildEditor(
+  blocks: readonly ScreenplayBlock[],
+  documentSettings?: typeof DEFAULT_DOCUMENT_SETTINGS,
+) {
   const mount = document.createElement('div');
   document.body.append(mount);
   const editor = new Editor({
     content: docContentFor(blocks),
     element: mount,
-    extensions: [...screenplayExtensions, PaginationExtension],
+    extensions: [
+      ...screenplayExtensions,
+      documentSettings ? PaginationExtension.configure({ documentSettings }) : PaginationExtension,
+    ],
   });
   return { editor, mount };
 }
@@ -208,5 +231,183 @@ describe('PaginationExtension', () => {
     editor.destroy();
     mount.remove();
     expect(cancelSpy).toHaveBeenCalledWith(scheduledHandle);
+  });
+});
+
+describe('updatePaginationDocumentSettings', () => {
+  it('re-renders the page number in the new style immediately, proving the decoration key busts on a style change', () => {
+    const { editor, mount } = buildEditor(plainTwoPageBlocks());
+    // Default is arabic.
+    expect(mount.querySelector('.page-break-number')?.textContent).toBe('2.');
+
+    updatePaginationDocumentSettings(editor, {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      pageNumberStyle: 'roman',
+    });
+
+    // This is the trap `buildPaginationDecorations`'s widget key comment describes: if the key
+    // did not encode `pageNumberStyle`, ProseMirror would treat this as the same widget it
+    // already drew (same page number, same spacer height, same absent (MORE)/CONT'D) and reuse
+    // the stale arabic DOM node without calling `buildPageBreakWidget` again at all -- the text
+    // would still read "2." here. Testing through the key, not just `toRomanNumeral` in
+    // isolation, is what a passing assertion on the function alone would not catch.
+    expect(mount.querySelector('.page-break-number')?.textContent).toBe('II.');
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('applies synchronously: no animation frame needs to elapse for the new style to render', () => {
+    vi.useFakeTimers();
+    const { editor, mount } = buildEditor(plainTwoPageBlocks());
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame');
+    rafSpy.mockClear();
+
+    updatePaginationDocumentSettings(editor, {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      pageNumberStyle: 'roman',
+    });
+
+    expect(mount.querySelector('.page-break-number')?.textContent).toBe('II.');
+    expect(rafSpy).not.toHaveBeenCalled();
+    editor.destroy();
+    mount.remove();
+  });
+
+  it("updates the plugin's own pageCount-bearing state, readable the same way App.tsx's syncPageCount reads it", () => {
+    const { editor, mount } = buildEditor(plainTwoPageBlocks());
+    expect(paginationPluginKey.getState(editor.state)?.pageCount).toBe(2);
+
+    updatePaginationDocumentSettings(editor, {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      pageNumberStyle: 'roman',
+    });
+
+    // Page count itself is unaffected by a purely cosmetic setting, but the state object was
+    // genuinely replaced (not merely mutated in place) -- see the next assertion.
+    expect(paginationPluginKey.getState(editor.state)?.pageCount).toBe(2);
+    expect(paginationPluginKey.getState(editor.state)?.documentSettings.pageNumberStyle).toBe(
+      'roman',
+    );
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('a later doc-change repagination reads the updated settings back from plugin state, not the stale construction closure', () => {
+    vi.useFakeTimers();
+    const { editor, mount } = buildEditor(plainTwoPageBlocks());
+    updatePaginationDocumentSettings(editor, {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      pageNumberStyle: 'roman',
+    });
+    expect(mount.querySelector('.page-break-number')?.textContent).toBe('II.');
+
+    // A plain doc edit after the settings change: append one more block, which shifts the break
+    // but must not fall back to the plugin-construction closure's arabic default.
+    const lastBlock = plainTwoPageBlocks().at(-1);
+    if (!lastBlock) {
+      throw new Error('plainTwoPageBlocks() must yield at least one block.');
+    }
+    const node = editor.schema.nodes.screenplayBlock!.create(
+      { element: lastBlock.type, id: '00000000-0000-4000-8000-000000000099' },
+      'text' in lastBlock && lastBlock.text !== '' ? editor.schema.text(lastBlock.text) : undefined,
+    );
+    editor.view.dispatch(
+      editor.state.tr.insert(editor.state.doc.content.size, Fragment.fromArray([node])),
+    );
+    vi.runOnlyPendingTimers();
+
+    expect(mount.querySelector('.page-break-number')?.textContent).toBe('II.');
+    editor.destroy();
+    mount.remove();
+  });
+});
+
+describe('scene numbers (live)', () => {
+  it('renders nothing when sceneNumbersEnabled is off, the default', () => {
+    const { editor, mount } = buildEditor([
+      sceneHeading(0, 'INT. APARTMENT - MORNING'),
+      actionBeat(0),
+      sceneHeading(1, 'EXT. STREET - DAY'),
+    ]);
+
+    expect(mount.querySelectorAll('[data-scene-number]')).toHaveLength(0);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('numbers every scene heading 1-based in document order once enabled, live, with no editor remount', () => {
+    const { editor, mount } = buildEditor([
+      sceneHeading(0, 'INT. APARTMENT - MORNING'),
+      actionBeat(0),
+      sceneHeading(1, 'EXT. STREET - DAY'),
+    ]);
+
+    updatePaginationDocumentSettings(editor, {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      sceneNumbersEnabled: true,
+    });
+
+    const numbers = Array.from(mount.querySelectorAll('[data-scene-number]')).map((el) =>
+      el.getAttribute('data-scene-number'),
+    );
+    expect(numbers).toEqual(['1', '2']);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('renumbers as scene headings reorder, without any settings change at all', () => {
+    const heading0 = sceneHeading(0, 'INT. APARTMENT - MORNING');
+    const heading1 = sceneHeading(1, 'EXT. STREET - DAY');
+    const { editor, mount } = buildEditor([heading0, heading1], {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      sceneNumbersEnabled: true,
+    });
+
+    const before = Array.from(mount.querySelectorAll('[data-scene-number]')).map((el) =>
+      el.getAttribute('data-scene-number'),
+    );
+    expect(before).toEqual(['1', '2']);
+
+    // Swap the two top-level scene-heading nodes -- the ProseMirror-level equivalent of a writer
+    // dragging the second scene above the first, exercising the plugin's own doc-change ->
+    // requestAnimationFrame -> recompute path (not `updatePaginationDocumentSettings`, which this
+    // test deliberately never calls, since a reorder is not a settings change).
+    vi.useFakeTimers();
+    const nodes: ProseMirrorNode[] = [];
+    editor.state.doc.forEach((node) => nodes.push(node));
+    const reordered = [nodes[1], nodes[0]] as ProseMirrorNode[];
+    editor.view.dispatch(
+      editor.state.tr.replaceWith(0, editor.state.doc.content.size, Fragment.fromArray(reordered)),
+    );
+    vi.runOnlyPendingTimers();
+
+    const after = Array.from(mount.querySelectorAll('[data-scene-number]')).map((el) =>
+      el.getAttribute('data-scene-number'),
+    );
+    // Same two headings, same two numbers 1 and 2 -- but now attached to the heading that moved
+    // to the front. `canonical_hash` is untouched by this (a pure reorder of already-canonical
+    // blocks), which is the whole point: the numbers followed the reorder, nothing was written.
+    expect(after).toEqual(['1', '2']);
+    const frontHeading = mount.querySelector('[data-screenplay-block]');
+    // The number the writer sees beside this heading, read from the widget the heading now
+    // carries rather than from the block's own attributes: scene numbers render in both margins
+    // (plan.md's "Locked scripts"), which one pseudo-element on the block could not do.
+    expect(
+      frontHeading?.querySelector('[data-scene-number]')?.getAttribute('data-scene-number'),
+    ).toBe('1');
+    // The heading's authored text, with the widget's own two margin copies excluded. The widget
+    // lives inside the block's DOM, so a bare `textContent` reads '11EXT. STREET - DAY'; the
+    // canonical document is unaffected either way, since widgets never enter it -- proven
+    // separately by the byte-identical-blocks test in App.test.tsx.
+    const headingText = Array.from(frontHeading?.childNodes ?? [])
+      .filter(
+        (child) => !(child instanceof HTMLElement && child.classList.contains('scene-number')),
+      )
+      .map((child) => child.textContent)
+      .join('');
+    expect(headingText).toBe('EXT. STREET - DAY');
+
+    editor.destroy();
+    mount.remove();
   });
 });

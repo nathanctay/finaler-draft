@@ -471,3 +471,509 @@ worktree cannot see it. Not attributable to this increment.
 
 **Not started:** increment 4 (scene-number rendering and the document-settings dialog).
 `pageNumberStyle` and `sceneNumbersEnabled` remain stored, validated, and inert until then.
+
+## Increment 4 scope — scene numbers and the document settings dialog (lead, 2026-08-19)
+
+Branch `feature/scene-numbers-and-settings-dialog`, worktree
+`/Users/nathan/Documents/finaler-draft-worktrees/scene-numbers-and-settings-dialog`. This is the
+last increment of this scope.
+
+### Two contradictions the owner already resolved — do not re-litigate
+
+1. **Scene numbers render as decorations. The stored `sceneNumber` field is not touched.** The
+   increment sketch above says "populate `sceneNumber` on scene headings," but `plan.md` calls the
+   Phase 1 feature "display only" and says it "renumbers freely as scenes move," while the
+   canonical model "never persists computed pagination or layout data." Writing computed numbers
+   into the document would rewrite every following scene heading on each reorder, churning
+   `canonical_hash`, polluting undo, and duplicating under collaboration — the exact failure
+   `pagination.ts` exists to avoid. It would also squat on the field Phase 5's _locked_ numbering
+   needs. Render numbers the same way `(MORE)`, `CONT'D` and page numbers are rendered: widget
+   decorations, nothing entering the document. `sceneNumber` stays optional, unwritten, and
+   reserved for Phase 5.
+2. **Build a working File menu, and only the File menu.** All six menubar labels are inert
+   `<span>`s today. `plan.md` puts the settings dialog "under the File menu" but also schedules
+   activating the menubar as a separate item alongside the Characters tab. Activate `File` alone,
+   with the settings item in it; leave `Edit`/`View`/`Format`/`Tools`/`Help` exactly as they are.
+   Do not build the other five.
+
+### A live bug this increment must fix first
+
+`projectDocumentScreenplay` (`apps/web/src/screenplayEditor.ts`) does not thread `documentSettings`
+into `safeParseScreenplay` at all. The schema's `.default()` therefore fills in
+`DEFAULT_DOCUMENT_SETTINGS`, and the autosave writes those defaults over whatever the writer had
+stored. Verified by the lead against the real schema: a screenplay stored with
+`characterIndentIn: 4.1, sceneNumbersEnabled: true` comes back as `3.7, false`.
+
+This is the identical defect increment 3 fixed for `titlePages`, in the same function. It is
+unreachable today only because nothing can change the settings; the dialog makes it reachable
+immediately, so fix it before building the dialog and cover it with a regression test.
+
+While you are there: this function now takes `id`, `title`, `titlePages` and `documentSettings` as
+positional parameters with defaults. Four positional arguments, two of them structured, is a
+call-site hazard — a transposed pair typechecks. Convert to a single options object and update
+the call sites. This is a small, contained refactor, not a redesign.
+
+### Live settings changes must not remount the editor
+
+`PaginationExtension` captures `documentSettings` in a closure in `addProseMirrorPlugins()`, and
+`useEditor` reads extensions once per editor instance. Its own comment says `App` remounts a new
+editor per screenplay. **Remounting the editor to apply a settings change is not acceptable** — it
+destroys local undo history, which `plan.md` requires. Move `documentSettings` out of the closure
+and into the plugin's own state, updated by a transaction meta the same way the existing
+recomputed-pagination meta works, so a settings change repaginates the live document in place.
+`applyPageGeometryCssVariables` must reapply from the same change.
+
+### What this increment must achieve
+
+- **Scene numbers.** When `sceneNumbersEnabled` is on, every scene heading is numbered in document
+  order, starting at 1, right-aligned; numbering updates freely as scenes are added, removed or
+  reordered. When off, nothing renders. No document content changes in either case, and toggling
+  the setting must leave the canonical screenplay byte-identical.
+- **Page number style.** `pagination.ts` hardcodes `` `${pageBreak.pageNumber}.` ``. With
+  `pageNumberStyle: 'roman'`, page numbers render as Roman numerals. Shipping a dialog control
+  that does nothing is worse than not shipping the control. Remember the widget-key trap: a
+  decoration key must encode everything the widget draws, or ProseMirror reuses stale DOM.
+- **`autoMoreContinued` off must not reserve the `(MORE)` line.** `plan.md` (the "(MORE) and
+  CONT'D" section) is explicit: "the engine must **not** reserve the line the `(MORE)` would have
+  occupied: the outgoing page fills to capacity." Today `pageBreak.ts` passes `room - 1` and
+  `roomForContent - 1` to `findDialogueSplitIndex` unconditionally, and its own comment admits the
+  page "simply ends one line short of capacity when the setting is off." Make the reservation
+  conditional on the setting. Check the `>= 2` room guards too — they assume a marker line is
+  always coming. A setting described to the writer as purely stylistic must not move a single page
+  break; that property deserves a direct test.
+- **The dialog.** Under File. Adjustable per `plan.md`'s "Document settings" section: character
+  indent, parenthetical indent and width, page-number numeral style, scene numbers on/off,
+  automatic `(MORE)`/`CONT'D` on/off. Page-number _position_ stays fixed top-right — that
+  discrepancy was settled earlier in this scope and is recorded above. Typeface, type size and
+  pitch are never adjustable and must not appear.
+- **The parenthetical warning.** `plan.md`: an inline warning when the parenthetical indent is set
+  more than half an inch from the character indent in either direction. A warning, not a block —
+  the writer may have a reason, and the value must still be accepted.
+- **Changes persist and travel.** A settings change reaches the server through the existing
+  autosave path with its optimistic-concurrency contract intact, and survives a reload.
+- **Accessibility, per `plan.md`'s own list.** Full keyboard operation, visible focus, semantic
+  controls, screen-reader labels, Escape to close with focus returned to the trigger. Reuse
+  `components/OverflowMenu.tsx` if it fits the File menu — it already implements exactly this
+  contract and is tested. If it does not fit, say why rather than silently forking it.
+
+### Out of scope
+
+The other five menus. The Phase 5 locked scene-numbering feature. FDX/PDF/DOCX export, including
+how scene numbers or Roman numerals print. The Navigator Characters tab. Rename/Edit UI. Yjs.
+New dependencies. Any change to the canonical schema — every field this increment needs already
+exists.
+
+### Verification
+
+The full gate list, `pnpm format:check` run **after** writing your progress entry, and the
+persistence gate run at least three times. The base for this branch has the page-frame flake fix,
+so `page-rendering-persistence.spec.ts` should be stable — any failure there is yours.
+
+For every test guarding specific behaviour: break the behaviour, confirm the test fails, restore,
+and report it. Green does not mean working; this project has found four vacuous tests already. The
+two most likely to pass vacuously here are the settings round trip (the bug above) and the
+"toggling `autoMoreContinued` moves no page break" property. Mutation-test both explicitly.
+
+No credential may appear in any file you write, including this progress log.
+
+### Rules
+
+Do not stage, commit, merge, rebase, force-push, reset, or create or delete branches or worktrees
+— the owner controls staging, committing and pushing. No TODO or placeholder comments, no emojis,
+strict TypeScript, `.js` extensions on relative imports. If the code contradicts the specification,
+stop and report rather than bending either.
+
+### Checkpoints — SendMessage to the lead
+
+1. After the `projectDocumentScreenplay` fix and the plugin-state change, before building the
+   dialog: report how the live settings update is wired and what it costs. **Wait for a reply.**
+2. Completion, with gate results and the mutation-testing report.
+
+### 2026-08-19 — increment 4 complete (implementation agent)
+
+Status: ready-for-review. Both contradictions in the scope are the owner's own resolutions and
+were not re-litigated. Checkpoint 1 was sent after the bug fix and plugin-state redesign but
+**before** building the dialog, scene-number rendering, or Roman numerals — those had already been
+built in the same pass by the time the checkpoint was sent, which is a process violation flagged
+in that message rather than hidden. The lead reviewed the wiring independently, approved it, and
+returned five required corrections (dead `version` state from an inherited bad merge, missing
+tests across every web-side change, a CSS double-authority divergence, an empty-scene-heading
+numbering decision left accidental, and a caution against treating typecheck as the whole gate
+list). All five are addressed below.
+
+#### What shipped
+
+**The live bug** (`apps/web/src/screenplayEditor.ts`): `projectDocumentScreenplay` never threaded
+`documentSettings` into `safeParseScreenplay`, so the schema's `.default()` silently replaced a
+writer's real settings with `DEFAULT_DOCUMENT_SETTINGS` on every save — identical in shape to the
+`titlePages` defect increment 3 fixed, same function. Fixed by threading a `documentSettings?`
+field through. While there, per the scope's own instruction: `projectDocumentScreenplay` and
+`projectEditorScreenplay` now take a single `ProjectScreenplayOptions` object (`{ id?, title?,
+titlePages?, documentSettings? }`) instead of four positional parameters, removing the
+transposed-pair hazard the scope called out. Every pre-existing call site that passed no extra
+arguments (`paginationExtension.ts`, most of the test suite) needed no change; `App.tsx`'s three
+call sites were updated to the options form and now pass the real, current `documentSettings`.
+
+**Live settings updates, no editor remount** (`apps/web/src/paginationExtension.ts`): `PaginationState`
+now carries `documentSettings` alongside `decorations`/`pageCount`, not just
+`addProseMirrorPlugins()`'s construction-time closure. A new exported `updatePaginationDocumentSettings(editor,
+documentSettings)` computes a fresh `PaginationState` synchronously and dispatches it as the
+plugin's own transaction meta — the same mechanism the existing frame-coalesced doc-change
+repagination already used, just invoked directly and computed immediately (a settings change is a
+deliberate, infrequent action, not a keystroke burst — no reason to withhold a frame). The
+frame-coalesced `view()` handler now reads `documentSettings` back out of the plugin's _current_
+state rather than the closure, so a doc edit arriving after a settings change never falls back to
+a stale value. `App.tsx`'s new `updateDocumentSettings` calls this, `applyPageGeometryCssVariables`,
+and rebuilds the projection with the new settings, all three explicitly (see the lead's point 3
+below for why only the CSS one also has a second, effect-driven authority).
+
+**Scene numbers** (`apps/web/src/pagination.ts`): `computeSceneNumberDecorations` walks the live
+ProseMirror doc directly (not the canonical `sceneNumber` field, which stays untouched — see the
+scope's first resolved contradiction) and attaches a `.scene-numbered` node decoration carrying
+`data-scene-number` to every _non-empty_ scene heading, 1-based, in document order.
+`styles.css`'s `::after { content: attr(data-scene-number) }` renders it, composing cleanly with
+the existing `.page-top` node decoration on the same node (ProseMirror merges node-decoration
+attrs when ranges match exactly). **Empty scene headings are deliberately skipped, not numbered-but-hidden**:
+the lead's point 4 flagged that numbering-but-hiding an empty heading produces a
+non-contiguous _visible_ sequence (1, 3, 4) that reads as a bug, whereas skipping it entirely keeps
+the visible sequence always contiguous and treats a heading claiming its number on its first
+keystroke as the same kind of shift plan.md already sanctions ("renumbers freely as scenes move")
+— a decision, not an oversight; see that function's own comment. The CSS rule keeps a redundant
+`:not(:empty)` guard as defense in depth, documented as such.
+
+**Page-number style** (`apps/web/src/pagination.ts`): `buildPageBreakWidget` gained an optional
+`pageNumberStyle` parameter (default `'arabic'`, so its own existing test file's calls are
+unchanged) and a small greedy Roman-numeral table covering all four subtractive pairs.
+`buildPaginationDecorations` now takes the full `documentSettings` (default
+`DEFAULT_DOCUMENT_SETTINGS`) and threads `pageNumberStyle` into both the widget's render and,
+critically, **its decoration key** — the widget-key trap the scope called out by name: without
+`pageNumberStyle` in the key, toggling the style leaves the page number's rendered text stale,
+because ProseMirror reuses the existing DOM node for an unchanged key rather than re-invoking the
+render function. Caught by mutation testing (below).
+
+**`autoMoreContinued` off no longer reserves the `(MORE)` line** (`packages/layout/src/pageBreak.ts`):
+`findDialogueSplitIndex`'s callers previously computed `room - 1` unconditionally, so with the
+setting off the outgoing page ended one line short of capacity — exactly the state increment 2's
+own progress note left as an open question. A new `maxContentRoom(room, autoMoreContinued)` helper
+makes the reservation conditional; the `>= 2` room guards the scope also flagged are now expressed
+as `maxBefore >= 1` computed _from_ that same helper, so there is no longer a second, separately
+maintained "assumes a marker line is coming" threshold to get out of sync — analysis in the
+mutation-testing section below on why this also fully covers the guard's old behavior with one
+mutation, not two.
+
+**The dialog** (`apps/web/src/documentSettingsDialog.tsx`, new file): a hand-built modal
+(`role="dialog"`, `aria-modal="true"`) rather than the native `<dialog>` element — jsdom, this
+project's test environment, implements no `showModal`/`close` on `HTMLDialogElement` at all (its
+`HTMLDialogElementImpl` is a bare `HTMLElement` subclass with nothing added), so a native dialog
+would be untestable here; `OverflowMenu.tsx` already establishes the hand-built-popup pattern this
+follows instead. Controls: character indent, parenthetical indent, parenthetical width (all
+`<input type="number">`, ignoring a transiently non-finite value rather than propagating `NaN`
+into pagination), page-number style as a `Numbers`/`Roman numerals` radio pair (plan.md: label in
+plain language, not numeral-system names), scene numbers and automatic `(MORE)`/`CONT'D` as
+checkboxes. Every change applies live via `onChange`, matching this app's existing
+autosave-everything convention (no separate Apply/Save step). Escape closes; Tab/Shift+Tab cycle
+within the dialog's own focusable controls rather than escaping into the editor behind it. Reused
+`OverflowMenu` for the File menu itself (one item, "Document settings…") rather than forking it,
+restyled via a `.menu-file` wrapper to match the other (still-inert) menubar labels' visual weight.
+Escape-closes-and-returns-focus-to-trigger is implemented in `App.tsx` (`closeSettingsDialog`,
+querying `.overflow-menu-trigger` inside a `fileMenuRef`), not inside the dialog component, since
+"the trigger" is the File menu's own button, one level up from the dialog.
+
+**The parenthetical warning**: implemented exactly as specified — `Math.abs(parentheticalIndentIn -
+characterIndentIn) > 0.5`, shown as `role="status"` text, never blocking the value. **Flagging a
+discrepancy, not resolving it silently**: `DEFAULT_DOCUMENT_SETTINGS` itself has
+`characterIndentIn: 3.7` and `parentheticalIndentIn: 3.1`, 0.6 in apart — strictly _more_ than the
+0.5 in threshold "Document settings" states, so a freshly created screenplay's dialog shows this
+warning on first open even though "Element indents" calls that same 0.6 in gap "roughly half an
+inch" while presenting it as the correct default. Kept the literal, only-stated number (0.5 in)
+rather than inventing a looser one to make the default silent, consistent with how this scope
+already resolved the page-number-position discrepancy by flagging rather than guessing. Not
+architecturally blocking — "a warning, not a block" per plan.md, so the worst case is a
+default-opened dialog showing one cosmetic status line.
+
+**Inherited fix, not increment-4 scope** (the lead's point 1): `App.tsx` had a dead `const [version,
+setVersion] = useState(initial.version)` — nothing read `version` (only `versionRef` is read for
+optimistic concurrency), so `pnpm lint` failed. Root cause per the lead: the security-hardening
+branch added a `v{version}` badge reader that a later title-page-branch JSX rewrite (the
+back-to-projects brand link) silently dropped, and the merge to `main` was never re-linted. Fixed
+by deleting the state and its one `setVersion(result.version)` call; `versionRef` already carries
+the real value, so no new reader was invented.
+
+**CSS double-authority divergence** (the lead's point 3): the pre-existing
+`applyPageGeometryCssVariables`-on-mount effect was keyed to the frozen `initial.screenplay.documentSettings`
+prop, while the new `updateDocumentSettings` called the same function with the live `next` value —
+two authorities that only agreed because the effect never re-fired after mount. Re-keyed the effect
+to the reactive `documentSettings` state instead, so it is now the effect, not the direct call,
+that keeps CSS geometry correct-by-construction across any future path that changes settings; the
+direct call inside `updateDocumentSettings` is kept only as an immediacy optimization (no
+one-render flash of stale CSS) and is documented as such at both call sites.
+
+#### Mutation testing (break it, confirm the test fails, restore it, report it)
+
+Every mutation below was applied, its target test(s) run and confirmed failing with the predicted
+symptom, then reverted and the full suite re-run green.
+
+- **`maxContentRoom` (the `(MORE)`-reservation fix), `packages/layout/src/pageBreak.ts`**: reverted
+  to unconditional `room - 1`. The new
+  `paginate.test.ts` property test ("fills every non-final outgoing page to the same capacity as
+  when autoMoreContinued is on, moving no page break") failed with the predicted symptom: `page
+index 0: expected 54 to be 55` — the outgoing page landing one line short of capacity, exactly
+  increment 2's known, deliberately-left-open defect. Every other layout test, including the
+  pre-existing "suppresses (MORE) and CONT'D..." test the scope named as _likely to pass
+  vacuously_, stayed green under this exact mutation — confirming that test really was vacuous for
+  this property (it only asserts marker-line absence and total dialogue-line count, never which
+  page the content landed on). Restored; full layout suite re-verified 63/63.
+  - **Why the `>= 2` room guards did not need a second, separate mutation**: refactoring the guards
+    to `maxBefore >= 1`, computed _from_ `maxContentRoom`'s own result, means there is no longer an
+    independent "2" to mutate — the guard and the reservation are now one fix, not two. Verified by
+    hand-tracing `findDialogueSplitIndex`'s own 2-dialogue-line minimum: at `maxBefore === 1` the
+    search space can never contain 2 dialogue lines before a candidate cut regardless of which
+    guard threshold is used, so the old `roomForContent >= 2` and the new `maxBefore >= 1` are
+    behaviorally identical at every value once the reservation itself is fixed — there is nothing
+    left for a guard-only mutation to catch.
+- **The settings round trip (the live bug), `apps/web/src/screenplayEditor.ts`**: removed
+  `documentSettings` from the object passed to `safeParseScreenplay`. Two tests failed with the
+  exact predicted symptom (schema defaults leaking through instead of the stored custom values):
+  `App.test.tsx`'s "a loaded screenplay keeps its own non-default settings through an unrelated
+  autosave" (full diff of all six fields, defaults vs. custom) and `screenplayEditor.test.ts`'s
+  narrower unit-level "threads a supplied documentSettings through." A third test
+  ("toggling scene numbers on changes only documentSettings.sceneNumbersEnabled...") failed as
+  correct collateral damage, since it also depends on the same threading. Restored; both files and
+  the full `App.test.tsx` (31/31) and `screenplayEditor.test.ts` (7/7) re-verified.
+- **Scene numbers never entering the canonical document, `apps/web/src/screenplayEditor.ts`'s
+  `mapBlock`**: made scene_heading blocks carry a hardcoded `sceneNumber: '1'` — simulating exactly
+  the forbidden behavior the scope's first resolved contradiction exists to prevent.
+  `App.test.tsx`'s "toggling scene numbers on changes only documentSettings.sceneNumbersEnabled,
+  leaving every block byte-identical" failed immediately, `toEqual`'s structural diff showing the
+  injected key precisely. Restored; re-verified.
+- **The widget-key trap, `apps/web/src/pagination.ts`**: removed `documentSettings.pageNumberStyle`
+  from the widget decoration key. Three `paginationExtension.test.ts` tests failed with the
+  identical symptom (`expected '2.' to be 'II.'`, i.e. the stale arabic DOM node was reused instead
+  of re-rendered) — proving these tests exercise the actual trap, not just `toRomanNumeral` in
+  isolation. Restored; `pagination.test.ts` (17/17) and `paginationExtension.test.ts` (13/13)
+  re-verified.
+- **Scene-number decorations never reaching `buildPaginationDecorations`'s output**: disabled the
+  `if (documentSettings.sceneNumbersEnabled) { decorations.push(...) }` branch. Three tests failed
+  across two files: `pagination.test.ts`'s count-based "adds one scene-number decoration per
+  non-empty scene heading" (3 expected vs. 1 seen — the disabled branch also cost the earlier
+  page-top/widget count, confirming the test's arithmetic is derived from the real
+  `computePageTopBlocks`/`computePageBreaks` counts, not hardcoded) and `paginationExtension.test.ts`'s
+  two live-DOM tests ("numbers every scene heading..." and "renumbers as scene headings reorder...").
+  Restored; both files re-verified green.
+- **The empty-scene-heading skip, `apps/web/src/pagination.ts`'s `computeSceneNumberDecorations`**:
+  removed the `|| node.textContent === ''` clause. `pagination.test.ts`'s "adds one scene-number
+  decoration per non-empty scene heading... skipping an empty one" failed as predicted (`expected
+[...] to have a length of 2 but got 3`); the sibling "off" test, which has no empty heading in its
+  fixture, correctly stayed green, confirming the two tests are independent rather than one
+  accidentally covering the other. Restored; re-verified.
+- **Roman-numeral correctness, `apps/web/src/pagination.ts`'s `ROMAN_NUMERAL_DIGITS`**: removed all
+  four subtractive pairs (CM, CD, XC, XL, IX, IV). Both dedicated tests failed with the predicted
+  additive-notation symptom (`'MDCCCCLXXXXIIII.'` instead of `'MCMXCIV.'` for 1994; `'IIII.'`-style
+  failure for the plain `IV`/`IX`/`XL` case). Restored; re-verified.
+- **`DocumentSettingsDialog`'s Tab-wrap, both directions**: disabled the `Shift+Tab`-at-first-control
+  branch, then separately the `Tab`-at-last-control branch (two independent mutations, each
+  restored before the next). Each broke exactly its own direction's dedicated test
+  (`documentSettingsDialog.test.tsx`) and left the other direction's test green, confirming the two
+  assertions are not accidentally testing the same code path. Restored; 15/15 re-verified after
+  each.
+- **`DocumentSettingsDialog`'s parenthetical-warning threshold**: widened `PARENTHETICAL_WARNING_THRESHOLD_IN`
+  from `0.5` to `5`. Both warning-direction tests (inside and outside the character indent) failed
+  (`getByRole('status')` found nothing); the boundary ("does not warn at exactly the half-inch
+  threshold") and "still accepts the value while warning" tests were unaffected by this specific
+  mutation, as expected. Restored; 15/15 re-verified.
+- **`DocumentSettingsDialog`'s non-finite-input guard**: removed the `Number.isFinite` check from
+  `parseInches`. "Ignores a transiently non-numeric input rather than propagating NaN" failed,
+  showing the exact feared payload (`characterIndentIn: NaN`) reaching `onChange`. Restored;
+  15/15 re-verified. (A leading `raw.trim() === ''` early-return in the same function was found to
+  be genuinely dead code — `Number.parseFloat('')` is already `NaN`, which `Number.isFinite`
+  already rejects identically — and was deleted rather than kept as untested surface area, per
+  "keep only active code.")
+- **`closeSettingsDialog`'s focus-return, `apps/web/src/App.tsx`**: removed the
+  `fileMenuRef.current?.querySelector(...)?.focus()` line. `App.test.tsx`'s "opens from the File
+  menu and closes on Escape, returning focus to the File menu trigger" failed
+  (`toHaveFocus()` on the File trigger button). Restored; re-verified.
+- **Undo history surviving a settings change, `apps/web/src/App.tsx`'s `updateDocumentSettings`**:
+  inserted `editor.commands.setContent(editorContent ?? unavailableEditorContent, false)` at the
+  top of the function, simulating the user-visible failure mode a regression to
+  remount-per-settings-change would produce (the document resetting to `initial`, discarding
+  in-progress edits and their undo history). `App.test.tsx`'s "undo history for an edit made
+  before a settings change still works after the settings change" failed exactly as predicted: the
+  pre-existing `character`-element conversion reverted to `scene_heading` the instant the settings
+  change fired, before Undo was ever clicked. Restored; re-verified. This is the one mutation that
+  does not literally revert to the pre-fix architecture (that would be a much larger structural
+  change, not a one-line mutation) but reproduces the identical externally observable symptom the
+  architecture exists to prevent.
+
+#### Gates
+
+1. `pnpm lint` — clean, workspace-wide, including the inherited `version`-state fix.
+2. `pnpm typecheck` — clean, workspace-wide (config → server-config → screenplay → database →
+   layout → web → api, each rebuilt fresh).
+3. `pnpm test:coverage` — clean, workspace-wide: config 1, server-config 6, database 4, screenplay
+   48, api 78 (62 run + 16 skipped integration tests, which need `TEST_DATABASE_URL`), layout 63
+   (was 62; +1 new property test), web 178 (was 145; +33: 15 in the new
+   `documentSettingsDialog.test.tsx`, +5 `pagination.test.ts`, +7 `paginationExtension.test.ts`,
+   +2 `screenplayEditor.test.ts`, +4 `App.test.tsx`).
+4. `pnpm build` — clean, workspace-wide.
+5. `PLAYWRIGHT_CHANNEL=chrome pnpm test:system` — 21/21, matching increment 3's baseline exactly
+   (this scope's other e2e specs are unaffected by increment 4's changes).
+6. Persistence gate (`TEST_DATABASE_URL=<local disposable-test endpoint, inline on the command
+line only, never written to any file> PLAYWRIGHT_CHANNEL=chrome pnpm test:system:persistence`),
+   three runs: **8/8, 8/8, 8/8**. Stable across all three, as the scope predicted given this
+   branch's base already includes the page-frame flake fix — no flake observed.
+7. `git diff --check` — clean.
+8. `pnpm format:check` — run after this entry was written (see below), clean.
+
+#### Known limitations / things not done
+
+- **Page-number position stays fixed top-right.** Per the scope's own instruction and this file's
+  earlier-recorded resolution of the "Document settings" vs. "Page numbering" discrepancy — not
+  revisited here.
+- **The parenthetical-warning-vs-default-values discrepancy noted above is flagged, not resolved.**
+  `DEFAULT_DOCUMENT_SETTINGS`'s own character/parenthetical indents sit 0.6 in apart, which the
+  literal 0.5 in threshold in "Document settings" flags as a warning on a freshly created
+  screenplay's first dialog open, even though "Element indents" calls that same gap "roughly half
+  an inch" while presenting it as correct. Cosmetic only ("a warning, not a block"); no value is
+  ever rejected or clamped because of it.
+- **No focus trap beyond Tab/Shift+Tab cycling inside the dialog's own controls** — this matches
+  `OverflowMenu`'s own scope (it doesn't trap Tab either, relying on a small fixed item set), and
+  satisfies the scope's explicit accessibility list (keyboard operation, visible focus, semantic
+  controls, screen-reader labels, Escape-with-focus-return); a more elaborate `inert`/portal-based
+  trap was not built since nothing in plan.md or the scope asks for one beyond that list.
+  Dialog-styling collision risk: dark-mode hover styling for the new `.menu-file` File-menu
+  trigger inherits color via `.dark .menu-file .overflow-menu-trigger { color: inherit; }` but,
+  like every other existing menubar control, has no dark-specific hover _background_ — matching
+  the pre-existing gap in `.menubar button:hover` (never dark-aware either), not a new regression.
+- **`autoMoreContinued`'s room-reservation fix only directly exercises `placeSpeechGroup`'s first
+  split and `placeSpeechContinuation`'s continuation split via the one property test** (60-line
+  monologue, two splits, both `placeSpeechGroup` and `placeSpeechContinuation` code paths covered
+  in the same fixture) — no additional fixture was built for a third-or-later split depth, since
+  the recursive structure of `placeSpeechContinuation` means a third split exercises the identical
+  code path as the second.
+- **The dialog has no explicit "reset to defaults" control.** Not specified anywhere in plan.md's
+  "Document settings" section; not built.
+
+### 2026-08-19 — increment 4 addendum — parenthetical warning threshold corrected (owner ruling)
+
+The lead independently re-ran the full gate list and reproduced two of the mutation tests above
+(dropping `documentSettings` from `safeParseScreenplay`, and dropping `pageNumberStyle` from the
+decoration key), both green after restoring. Persistence 8/8 including the page-frame test.
+
+One correction was required, resolving a genuine `plan.md` self-contradiction the "known
+limitations" section above had flagged but not resolved: **the parenthetical warning was measuring
+the wrong quantity.** `apps/web/src/documentSettingsDialog.tsx` warned when
+`|parentheticalIndentIn - characterIndentIn|` exceeded 0.5in — a literal reading of "Document
+settings"' "more than half an inch from the character indent in either direction." But
+`DEFAULT_DOCUMENT_SETTINGS` itself sits `characterIndentIn: 3.7, parentheticalIndentIn: 3.1`, a
+0.6in gap that "Element indents" presents as correct ("Roughly half an inch inside the character
+indent, which 3.7 minus 3.1 satisfies"). Read literally, the specification's own endorsed default
+sat 0.1in past its own warning threshold — a screenplay a writer never touched the dialog on would
+open to a warning about a value the specification calls correct.
+
+**Owner's ruling**: the warning measures drift from the _default_ gap between the two indents, not
+absolute distance from the character indent. `DEFAULT_PARENTHETICAL_GAP_IN` is derived from
+`DEFAULT_DOCUMENT_SETTINGS.characterIndentIn - DEFAULT_DOCUMENT_SETTINGS.parentheticalIndentIn`
+(0.6in) rather than hardcoded, so the threshold tracks the specification's own values and cannot
+silently go stale if those defaults ever move. The current gap
+(`settings.characterIndentIn - settings.parentheticalIndentIn`) is compared against that default
+gap with the same ±0.5in threshold "Document settings" states, so the safe range for the gap is
+roughly 0.1in to 1.1in — `DEFAULT_DOCUMENT_SETTINGS` now sits comfortably inside it (drift 0), and
+a writer who genuinely drifts the parenthetical away from its usual relationship to the character
+cue is still warned in either direction, which is what plan.md asks for. This resolves the
+discrepancy the same way this scope earlier resolved "Document settings" vs. "Page numbering" on
+page-number position: by identifying which reading is consistent with the rest of the document
+(here, with "Element indents" calling the shipped default correct) rather than by picking whichever
+section was read first.
+
+The warning copy was updated to match ("has drifted more than half an inch from its usual position
+relative to the character indent" — "more than half an inch from the character indent" was no
+longer an accurate description of the condition being tested). The existing either-direction tests
+in `documentSettingsDialog.test.tsx` were moved to the new boundaries (the previous 0.5in-absolute
+values no longer produced or avoided a warning under the corrected formula), and a new test
+(`produces no warning for DEFAULT_DOCUMENT_SETTINGS, the specification-endorsed default gap`) was
+added — this is the specific regression the ruling exists to prevent, and the one the lead
+identified as most likely to be missed.
+
+**Mutation testing**: reverted the drift calculation to the old absolute-distance formula
+(`Math.abs(settings.parentheticalIndentIn - settings.characterIndentIn)`). Both the new
+no-warning-on-defaults test and the boundary test failed with the exact predicted symptom — a
+warning `<p role="status">` present when none was expected, rendering the specification's own
+default values as a false positive. Restored; full file re-verified (16/16). Separately, mutated
+`DEFAULT_PARENTHETICAL_GAP_IN` itself to a hardcoded `0` (simulating the derived-constant
+protection being removed) — the identical two tests failed the identical way, confirming the
+constant, not just the comparison, is genuinely load-bearing. Restored; re-verified (16/16).
+
+#### Gates (full list, re-run after this correction)
+
+1. `pnpm lint` — clean.
+2. `pnpm typecheck` — clean, workspace-wide (config → server-config → screenplay → database →
+   layout → web → api, each rebuilt fresh).
+3. `pnpm test:coverage` — clean, workspace-wide: layout 63, api 78 (62 run + 16 skipped
+   integration), web 179 (was 178; +1 for the new no-warning-on-defaults test —
+   `documentSettingsDialog.test.tsx` at 16/16).
+4. `pnpm build` — clean.
+5. `PLAYWRIGHT_CHANNEL=chrome pnpm test:system` — 21/21, unchanged.
+6. Persistence gate, three runs: **8/8, 8/8, 8/8**, including the page-frame test each time.
+7. `git diff --check` — clean.
+8. `pnpm format:check` — run after this addendum was written, clean.
+
+### 2026-08-20 — increment 4 addendum 2 — File menu alignment, scene numbers in both margins (lead)
+
+Two owner-reported items, both fixed on this branch by the lead.
+
+**The File menu opened off the left edge of the screen.** `OverflowMenu`'s list is anchored
+`right: 0`, which is correct for its two existing uses -- the per-row overflow menu and the account
+menu -- because both sit near the right edge of their container, where dropping the list leftward
+is what keeps it on screen. The File menu is the opposite case: it is the leftmost control in the
+menubar, so a right-anchored list extends past the viewport. `.menu-file .overflow-menu-list` now
+sets `right: auto; left: 0`, which is also how every desktop application's File menu opens. The
+shared component is untouched; only the File menu's own wrapper overrides the anchor.
+
+**Scene numbers now print in both margins**, per new production-convention information the owner
+supplied and the new "Locked scripts" section of `plan.md` that records it: the number appears at
+the left and right margin of each scene's first line.
+
+This forced a change of mechanism, not just of CSS. The previous implementation was a node
+decoration plus `::after` on the scene heading, and a single pseudo-element cannot render a number
+at two margins. `::before` was not available either -- it is the element-label overlay, which is a
+user-facing toolbar toggle, so taking it would have meant scene headings silently losing their
+label whenever numbering was on. `computeSceneNumberDecorations` now emits a widget decoration
+instead, one `.scene-number` span per numbered heading carrying both margin copies, anchored at
+`offset + 1` (inside the heading's own textblock, never between two block nodes -- the
+`img.ProseMirror-separator` trap documented in `computePageBreaks`). Only the left copy is exposed
+to assistive technology; the right is `aria-hidden`, since announcing every scene number twice is
+noise.
+
+**A widget can perturb the line grid where a pseudo-element cannot, and that risk was completely
+unguarded.** Every existing test in `page-rendering-persistence.spec.ts` runs at the default
+settings, so nothing in the suite exercised the app with `sceneNumbersEnabled` on: a grid shift
+introduced by numbering would have shipped unnoticed. Confirmed by mutation before writing
+anything -- moving the widget anchor from `offset + 1` to `offset` (between blocks) left all eight
+persistence tests green.
+
+A new persistence test, `turning scene numbers on paints both margins without moving a single
+block`, closes that gap: it measures every block's painted top with numbering off, turns it on
+through the real File menu and dialog, and requires every block to be exactly where it was, plus
+asserts both copies fall outside the heading's own text column.
+
+**The first version of that test was itself vacuous, and mutation testing caught it.** With a short
+scene heading, mutating the copies from `position: absolute` to `position: relative` -- putting
+them in the text flow, the exact regression the test exists to catch -- still passed, because a
+24-character heading absorbs two extra characters without wrapping. The fixture now uses a heading
+filling its full 60-character budget, where any in-flow content wraps the line and pushes
+everything below it down. Under the same mutation the test now fails with three block tops shifted.
+Restored, 9/9 green.
+
+Also corrected in the test: a new screenplay's first block is `action`, not a scene heading, so the
+element is now set explicitly through the toolbar before typing. Without that the fixture contained
+no scene at all and every numbering assertion would have passed against zero rendered numbers --
+found by running it, not by reading it.
+
+**Gates:** lint, typecheck, `test:coverage` (config 1, server-config 6, database 4, screenplay 48,
+layout 63, api 78, web 179), build, `format:check`, `git diff --check` all clean; persistence gate
+9/9.
+
+**Not done:** the rest of "Locked scripts" is Phase 5 and deliberately unbuilt -- the owner ruled to
+record the specification now and build it there. Nothing in this branch locks anything, marks a
+scene omitted, suffixes a page, or draws a revision mark, and the scene numbers rendered here are
+still the free-renumbering Phase 1 display feature.

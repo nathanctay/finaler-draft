@@ -165,9 +165,12 @@ function placeSceneHeadingGroup(
 }
 
 /**
- * Finds the largest valid split point in a speech's flattened lines. `maxBeforeMore` is the room
- * available for authored content once one line has already been reserved for the generated
- * `(MORE)` line that will follow the cut — callers compute it as `room - 1`.
+ * Finds the largest valid split point in a speech's flattened lines. `maxBefore` is the room
+ * available for authored content before the cut -- callers derive it from the page's remaining
+ * room via `maxContentRoom` below, which subtracts one line for the generated `(MORE)` marker
+ * only when `autoMoreContinued` is on. The name is deliberately not `maxBeforeMore` any more: with
+ * the setting off, nothing here is reserved for a `(MORE)` line at all (see `maxContentRoom`'s own
+ * comment).
  *
  * The minimum is asymmetric: >= 2 dialogue lines before the break (the page foot), >= 1 dialogue
  * line after it (the continuation head) — see this file's top-of-file comment for why 2-and-1
@@ -178,9 +181,9 @@ function placeSceneHeadingGroup(
  */
 function findDialogueSplitIndex(
   lines: readonly AuthoredLine[],
-  maxBeforeMore: number,
+  maxBefore: number,
 ): number | undefined {
-  const upperBound = Math.min(lines.length - 1, maxBeforeMore);
+  const upperBound = Math.min(lines.length - 1, maxBefore);
   for (let cut = upperBound; cut >= 1; cut -= 1) {
     const before = lines[cut - 1];
     const after = lines[cut];
@@ -209,6 +212,19 @@ function findDialogueSplitIndex(
   return undefined;
 }
 
+/**
+ * The room a dialogue split's page-foot content may use, given the page's actual remaining room.
+ * When `autoMoreContinued` is on, one line of that room is reserved for the generated `(MORE)`
+ * marker the caller pushes immediately after the cut. When it is off, no `(MORE)` line is ever
+ * emitted, so nothing needs to be reserved for it: plan.md ("(MORE) and CONT'D") is explicit that
+ * "the engine must not reserve the line the (MORE) would have occupied: the outgoing page fills
+ * to capacity." Reserving it unconditionally -- the previous behavior -- left that line's room
+ * unused whenever the setting was off instead of giving it to one more line of real dialogue.
+ */
+function maxContentRoom(room: number, autoMoreContinued: boolean): number {
+  return autoMoreContinued ? room - 1 : room;
+}
+
 function moreLine(sourceBlockId: string): GeneratedLine {
   return { kind: 'generated', reason: 'more', sourceBlockId, text: '(MORE)' };
 }
@@ -224,12 +240,14 @@ function continuedLine(sourceBlockId: string, characterText: string | undefined)
 
 /**
  * Places the remainder of a speech after a dialogue split, splitting again if it still doesn't
- * fit. `autoMoreContinued` gates only whether the generated `(MORE)`/`CONT'D` marker lines
- * themselves are emitted (plan.md: "A document setting to suppress automatic `(MORE)` and
- * `CONT'D` entirely... Default on") — the split point and page-break decisions are unchanged
- * either way, so a page that would have ended with a `(MORE)` line simply ends one line short of
- * capacity when the setting is off, rather than this function re-deriving a different optimum
- * room reservation for a case plan.md does not specify page-fill behavior for.
+ * fit. `autoMoreContinued` gates whether the generated `(MORE)`/`CONT'D` marker lines themselves
+ * are emitted (plan.md: "A document setting to suppress automatic `(MORE)` and `CONT'D`
+ * entirely... Default on") *and* whether a line of room is reserved for the `(MORE)` that would
+ * otherwise follow the cut (`maxContentRoom`) -- with the setting off, the outgoing page fills to
+ * capacity with one more line of real dialogue instead of leaving that room unused. Which lines
+ * land where can therefore differ by up to one line's worth of content between the two settings,
+ * but the page's own total room usage does not: see paginate.test.ts's page-break-position
+ * property test for the guarantee this keeps.
  */
 function placeSpeechContinuation(
   builder: PageBuilder,
@@ -247,8 +265,8 @@ function placeSpeechContinuation(
     return;
   }
 
-  const room = builder.room;
-  const cut = room >= 2 ? findDialogueSplitIndex(remaining, room - 1) : undefined;
+  const maxBefore = maxContentRoom(builder.room, autoMoreContinued);
+  const cut = maxBefore >= 1 ? findDialogueSplitIndex(remaining, maxBefore) : undefined;
   if (cut !== undefined) {
     builder.pushMany(remaining.slice(0, cut));
     if (autoMoreContinued) {
@@ -317,9 +335,10 @@ function placeSpeechGroup(
   const hasBlank = effective[0]?.kind === 'blank';
   const effectiveContent = (hasBlank ? effective.slice(1) : effective) as AuthoredLine[];
   const roomForContent = builder.room - (hasBlank ? 1 : 0);
+  const maxBefore = maxContentRoom(roomForContent, autoMoreContinued);
 
-  if (group.characterBlockId !== undefined && roomForContent >= 2) {
-    const cut = findDialogueSplitIndex(effectiveContent, roomForContent - 1);
+  if (group.characterBlockId !== undefined && maxBefore >= 1) {
+    const cut = findDialogueSplitIndex(effectiveContent, maxBefore);
     if (cut !== undefined) {
       if (hasBlank) {
         const blank = group.leadingBlank[0];
