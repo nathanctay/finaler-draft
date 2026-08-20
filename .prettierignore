@@ -1,2 +1,5 @@
 apps/web/src/routeTree.gen.ts
 pnpm-lock.yaml
+
+# Point-in-time audit artifacts. Kept verbatim as evidence rather than reformatted.
+audit/

@@ -520,7 +520,11 @@ All are ordinary deletable text blocks. The title page never paginates with the 
 
 A document setting, **disabled by default**. When enabled, every scene heading receives a number, right-aligned.
 
-This is display only and belongs to Phase 1. It is distinct from the Phase 5 production feature, where scene numbers are locked and inserted scenes take suffixes such as `A1`. Do not conflate them: the Phase 1 setting renumbers freely as scenes move; the Phase 5 feature deliberately does not.
+This is display only and belongs to Phase 1. It is distinct from the Phase 5 production feature described under "Locked scripts" below, where scene numbers are frozen and inserted scenes take suffixes such as `25A`. Do not conflate them: the Phase 1 setting renumbers freely as scenes move; the Phase 5 feature deliberately does not.
+
+**The Phase 1 setting and the Phase 5 feature are one control, not two.** Before a script has ever been locked, the setting shows the numbers the scenes would receive if it were locked right now, which for a first lock is simply 1, 2, 3 in document order -- the behavior described above, unchanged. After a lock, the same setting shows the real locked numbers, suffixes included. The setting therefore never changes meaning; what changes is whether a lock exists for it to report against.
+
+**Phase 1 numbers are rendered decorations and are never written to the canonical `sceneNumber` field.** They are recomputed from the live document, so they cost nothing when scenes move and cannot destabilise `canonical_hash`. The `sceneNumber` field exists for locked numbers, which are the opposite kind of value: authored-once, stable, and required to survive exactly as issued.
 
 ### Document settings
 
@@ -528,7 +532,9 @@ A dialog under the File menu. Adjustable: character indent, parenthetical indent
 
 Not adjustable, ever: the typeface, the type size, the pitch.
 
-The parenthetical indent shows an inline warning when it is set more than half an inch from the character indent in either direction. A warning, not a block — the writer may have a reason.
+The parenthetical indent shows an inline warning when it drifts more than half an inch from its usual position relative to the character indent, in either direction. A warning, not a block — the writer may have a reason.
+
+**The warning measures drift from the default gap between the two indents, not absolute distance from the character indent.** Read the other way, the specification contradicts itself: "Element indents" puts the parenthetical 0.6 in inside the character indent (3.7 minus 3.1) and calls that correct, which is 0.1 in past a threshold measured absolutely — so a screenplay whose settings no one had ever touched would open to a warning about a value this document endorses. The default gap is therefore the zero point, and the half-inch tolerance applies to departures from it, giving a safe range of roughly 0.1 in to 1.1 in of gap. Derive the default gap from the shipped defaults rather than writing 0.6 in as a literal, so the threshold cannot go stale if those defaults move.
 
 **These values are document state, not application preferences.** They live in the canonical screenplay, travel with it through export and import, and are inputs to the layout package. A screenplay must paginate identically on any machine and for any collaborator, so a setting stored per user or per browser would break the pagination contract.
 
@@ -772,7 +778,20 @@ Collaboration transport moved forward into this phase. The interim autosave send
 
 ### Phase 5 — Production workflow
 
-- Scene numbering with insertion suffixes, tags, reports, revision sets, color marks, locked pages, omitted scenes, and production export/report fixtures.
+- Scene numbering with insertion suffixes, tags, reports, revision sets, color marks, locked pages, omitted scenes, and production export/report fixtures. See "Locked scripts" under the screenplay specification for the rules these must satisfy.
+
+#### Locked scripts
+
+Locking is the point at which a script stops being a document that renumbers itself and becomes a production reference other departments have already built work around. Everything below follows from one rule: **once a number is issued it never changes meaning**, because someone has secured costumes, sets, or locations against it.
+
+- **Locking is an explicit, recorded act.** A locked-version history runs alongside the existing revision history but is not the same thing: ordinary revisions accumulate continuously, whereas a lock is a deliberate checkpoint a writer takes, and the suffixes below are computed against the most recent lock. The history must be durable enough to answer "what number did this scene have at lock N" for every lock, not just the latest.
+- **Scene numbers are frozen at the lock.** A scene inserted after scene 25 becomes `25A`, the next `25B`, and scene 26 stays scene 26. The suffix follows the number; it does not precede it.
+- **Deleted scenes become `OMITTED` rather than disappearing.** Going from scene 40 to scene 42 reads as an error to anyone downstream, so scene 41 remains in the script marked omitted. A number, once issued, belongs to that scene whether or not it is ever shot.
+- **Pages take suffixes on the same principle.** New pages created by an insertion become `10A`, `10B`, and so on, so page 11 stays page 11.
+- **Changed lines carry a revision mark**, an asterisk beside the line, computed against the previous lock.
+- **Scene numbers print in both margins**, left and right, at the start of each scene, and repeat at the top of a page when a scene continues from the previous page.
+
+**Locked pages are the hard part, and they break an invariant this document otherwise holds absolutely.** Everywhere else, pagination is derived: the canonical model never stores layout, and page boundaries are recomputed from content on demand. A locked page number cannot work that way, because its whole purpose is to survive edits that would otherwise move it. Locking pages therefore means persisting page boundaries as authored data at the moment of the lock, and paginating subsequent edits _within_ those frozen boundaries rather than recomputing them freely. Do not treat this as an extension of the existing pagination path; it is a second mode with its own contract, and the two must not be blended silently. Scene locking has no such conflict -- a scene number anchors to a block that already has a stable identity -- so scene locking and page locking are separately sequenceable, and scene locking is much the cheaper of the two.
 
 ### Version 2 — Visual planning and storyboard board
 
