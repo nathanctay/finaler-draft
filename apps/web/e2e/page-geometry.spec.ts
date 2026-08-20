@@ -1,5 +1,6 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import { MEASURED_COURIER_PRIME_ADVANCE_EM } from '@finaler-draft/screenplay/pageFormat';
+import { requireCourierPrime } from './requireCourierPrime.js';
 
 // These specs prove the screenplay page geometry against real rendering rather than asserting
 // it: real Courier Prime, real CSS, real Chrome layout. They inject markup using the exact
@@ -20,36 +21,6 @@ import { MEASURED_COURIER_PRIME_ADVANCE_EM } from '@finaler-draft/screenplay/pag
 // inch-based check at that tolerance cannot tell the real font from a fallback. See the pitch
 // test for the tolerance that can.
 const TOLERANCE_IN = 0.01;
-
-/**
- * Forces Courier Prime to actually load and confirms it did, rather than assuming
- * `document.fonts.ready` implies it. `fonts.ready` resolves once every *pending* load settles --
- * if nothing has requested the font yet on this page, it resolves immediately and any
- * measurement that follows silently uses the fallback in the `font-family` stack instead. That
- * is not hypothetical: measuring without this guard measures the fallback about as often as it
- * measures Courier Prime, since which one wins depends on load timing this function exists to
- * remove. A failed check throws here, in the fixture, rather than letting every test downstream
- * fail obscurely against fallback-font numbers.
- */
-async function requireCourierPrime(page: Page): Promise<void> {
-  const loaded = await page.evaluate(async () => {
-    await Promise.all([
-      document.fonts.load("16px 'Courier Prime'"),
-      document.fonts.load("700 16px 'Courier Prime'"),
-    ]);
-    return (
-      document.fonts.check("16px 'Courier Prime'") &&
-      document.fonts.check("700 16px 'Courier Prime'")
-    );
-  });
-  if (!loaded) {
-    throw new Error(
-      'Courier Prime did not report as loaded via document.fonts.check() after an explicit ' +
-        'document.fonts.load(). Every measurement in this suite would silently be against ' +
-        'whatever fallback monospace the browser substituted, not the real typeface.',
-    );
-  }
-}
 
 test.beforeEach(async ({ page }) => {
   // Any route works: main.tsx's @fontsource imports and styles.css load on every route, and

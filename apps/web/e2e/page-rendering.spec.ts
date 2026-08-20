@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import {
   LINES_PER_INCH,
   MARGIN_TOP_IN,
@@ -7,6 +7,7 @@ import {
   PAGE_NUMBER_TOP_IN,
 } from '@finaler-draft/screenplay/pageFormat';
 import { PAGE_GAP_IN } from '../src/pagination.js';
+import { requireCourierPrime } from './requireCourierPrime.js';
 
 // This spec proves four narrow, isolated CSS facts of the pagination rendering technique
 // (progress/page-rendering.md) against real Chrome layout, in the same style as
@@ -39,19 +40,6 @@ function bottomMarginInFor(lineCount: number): number {
 
 function spacerHeightInFor(lineCount: number): number {
   return bottomMarginInFor(lineCount) + PAGE_GAP_IN + MARGIN_TOP_IN;
-}
-
-async function requireCourierPrime(page: Page): Promise<void> {
-  const loaded = await page.evaluate(async () => {
-    await Promise.all([
-      document.fonts.load("16px 'Courier Prime'"),
-      document.fonts.load("700 16px 'Courier Prime'"),
-    ]);
-    return document.fonts.check("16px 'Courier Prime'");
-  });
-  if (!loaded) {
-    throw new Error('Courier Prime did not report as loaded.');
-  }
 }
 
 test.beforeEach(async ({ page }) => {
