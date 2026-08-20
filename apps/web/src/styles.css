@@ -997,6 +997,46 @@ select:focus-visible,
   font-size: 11px;
 }
 
+/*
+ * The save-conflict rescue actions ("Copy my version" / "Reload"), rendered only while
+ * saveState === 'conflict' (App.tsx). Deliberately not nested inside `.status-center` --
+ * `.status-center { display: none }` below 600px would take these away with it, and they are the
+ * writer's only way out of the conflict, so they stay reachable at every width. `flex-wrap: wrap`
+ * rather than a fixed height: the statusbar shrinks to 30px at the same narrow breakpoint
+ * (`.application`'s grid-template-rows), too little room to guarantee a single line for two
+ * buttons plus feedback text.
+ */
+.status-conflict-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin-left: 10px;
+}
+
+.status-conflict-button {
+  border: 1px solid var(--border-05);
+  border-radius: 2px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.status-conflict-button:hover {
+  background: var(--surface-03);
+}
+
+.status-conflict-feedback {
+  color: var(--text-10);
+}
+
+.status-conflict-feedback-error {
+  color: var(--feedback-error);
+  font-weight: 600;
+}
+
 .entry-screen,
 .project-screen,
 .loading-screen {

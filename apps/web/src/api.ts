@@ -167,9 +167,23 @@ export const api = {
       },
     ),
   screenplay: (id: string) => json(`/api/screenplays/${id}`, screenplayResponseSchema),
-  saveScreenplay: (id: string, expectedVersion: number, screenplay: Screenplay) =>
+  // `keepalive` lets the browser complete this request even if the page that started it is gone
+  // by the time the response would arrive, at the cost of a 64 KB total request-body cap (Fetch
+  // spec) -- used only by App.tsx's `pagehide` flush, the one exit that genuinely might be a page
+  // teardown; its unmount and `visibilitychange` flushes pass `false` deliberately, since neither
+  // is the page going away and a real screenplay routinely exceeds that cap
+  // (progress/save-conflict-recovery.md). Never used on the ordinary debounced path. `fetch`'s
+  // `keepalive` is what `RequestInit` calls it; `request()` passes it through unchanged, same as
+  // every other field on `init`.
+  saveScreenplay: (
+    id: string,
+    expectedVersion: number,
+    screenplay: Screenplay,
+    options?: { keepalive?: boolean },
+  ) =>
     json(`/api/screenplays/${id}`, z.object({ version: z.number().int().positive() }), {
       body: JSON.stringify({ expectedVersion, screenplay }),
+      keepalive: options?.keepalive ?? false,
       method: 'PUT',
     }),
   deleteProject: (id: string) =>
