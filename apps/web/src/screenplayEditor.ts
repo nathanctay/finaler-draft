@@ -37,7 +37,10 @@ export type LocalScreenplayProjection =
 
 export type EditorContent = {
   content: Array<{
-    attrs: { element: ScreenplayElementType; id: string };
+    // `sceneNumber` is optional and present only on a `scene_heading` block that has one -- see
+    // `ScreenplayBlockNode.addAttributes()`'s comment for why it is carried unrendered rather than
+    // surfaced as a control.
+    attrs: { element: ScreenplayElementType; id: string; sceneNumber?: string };
     content?: Array<{ text: string; type: 'text' }>;
     type: 'screenplayBlock';
   }>;
@@ -182,6 +185,16 @@ function splitScreenplayBlock(
   return true;
 }
 
+/**
+ * `sceneNumber` (see `ScreenplayBlockNode.addAttributes()` below for the full rationale) is a
+ * ProseMirror attribute of every `screenplayBlock` node, not only scene headings -- attributes
+ * are declared per node *type*, and there is one node type here. Reading it back out only for
+ * `element === 'scene_heading'` is load-bearing, not defensive style: every other block type's
+ * canonical schema (`packages/screenplay`'s `textBlockSchemas`) is `.strict()` and has no
+ * `sceneNumber` field, so emitting it on, say, an `action` block would make
+ * `projectDocumentScreenplay` fail validation the moment a writer changed a numbered scene
+ * heading's element -- turning a routine element change into a broken save.
+ */
 function mapBlock(node: {
   attrs: Record<string, unknown>;
   textContent: string;
@@ -192,7 +205,19 @@ function mapBlock(node: {
   }
 
   if (element === 'scene_heading') {
-    return { id, type: element, text: node.textContent };
+    const { sceneNumber } = node.attrs;
+    return {
+      id,
+      type: element,
+      text: node.textContent,
+      // Not also excluding an empty string here: nothing in this file ever sets one (`renderHTML`
+      // below only ever writes `data-scene-number` when the attribute is truthy, and
+      // `editorContentFromScreenplay` only ever supplies a defined `sceneNumber`), and
+      // `sceneHeadingSchema`'s `min(1)` already rejects one loudly via a normal validation issue
+      // if some other path ever produced it -- silently coercing it to "absent" here would hide
+      // that instead of surfacing it.
+      ...(typeof sceneNumber === 'string' ? { sceneNumber } : {}),
+    };
   }
 
   return { id, type: element, text: node.textContent };
@@ -334,7 +359,18 @@ export function editorContentFromScreenplay(screenplay: Screenplay): ScreenplayE
         }
         return {
           type: 'screenplayBlock',
-          attrs: { element: block.type, id: block.id },
+          attrs: {
+            element: block.type,
+            id: block.id,
+            // Carries a locked production number (`sceneHeadingSchema`'s `sceneNumber`) into the
+            // editor document as an unrendered attribute so it survives the round trip -- see
+            // `ScreenplayBlockNode.addAttributes()`'s comment. Only `scene_heading` ever has this
+            // field; every other block type's `block.sceneNumber` access below is unreachable
+            // (TypeScript already narrows `block` by `block.type` here).
+            ...(block.type === 'scene_heading' && block.sceneNumber !== undefined
+              ? { sceneNumber: block.sceneNumber }
+              : {}),
+          },
           ...(block.text === '' ? {} : { content: [{ type: 'text' as const, text: block.text }] }),
         };
       }),
@@ -377,6 +413,35 @@ export const ScreenplayBlockNode = Node.create({
         default: null,
         parseHTML: (element) => element.getAttribute('data-block-id'),
         renderHTML: (attributes) => ({ 'data-block-id': attributes.id }),
+      },
+      /**
+       * A locked-production scene number (`packages/screenplay`'s `sceneHeadingSchema.sceneNumber`)
+       * -- entirely distinct from the Phase 1 scene-number *display* setting (`pagination.ts`'s
+       * `computeSceneNumberDecorations`, recomputed from document order on every render and never
+       * written here; see plan.md's "Scene numbers"). This editor has no control for authoring or
+       * editing `sceneNumber`, the same situation `titlePages` was in before increment 3 -- so it
+       * is carried as an unrendered attribute purely so a locked production script survives being
+       * opened and re-saved rather than silently losing its numbers
+       * (progress/canonical-round-trip.md). Do not add UI for it; that is explicitly out of this
+       * scope.
+       *
+       * This attribute exists on every `screenplayBlock` node, not only scene headings --
+       * ProseMirror attributes are declared per node *type*, and there is one node type here.
+       * `mapBlock` above only reads it back out for `element === 'scene_heading'`, since every
+       * other block type's canonical schema is `.strict()` with no such field. Changing a numbered
+       * scene heading's element (the toolbar and Tab both call `convertActiveScreenplayBlock`,
+       * which calls `setNodeMarkup` with an attrs object that omits `sceneNumber`) resets this
+       * attribute to `default` rather than carrying the old value onto the new element --
+       * ProseMirror's `NodeType.create` fills any attribute missing from a supplied attrs object
+       * from its schema default, it does not merge with the node's previous attrs. That is
+       * correct, not a bug: the writer changed what the block *is*, and silently resurrecting a
+       * stale production number on whatever it becomes next would be worse than losing it.
+       */
+      sceneNumber: {
+        default: null,
+        parseHTML: (element) => element.getAttribute('data-scene-number'),
+        renderHTML: (attributes) =>
+          attributes.sceneNumber ? { 'data-scene-number': attributes.sceneNumber } : {},
       },
     };
   },
