@@ -185,3 +185,40 @@ test('the Navigator and Inspector panels scroll their own overflowing content in
   expect(measurements.navigator.scrollHeight).toBeGreaterThan(measurements.navigator.clientHeight);
   expect(measurements.inspector.scrollHeight).toBeGreaterThan(measurements.inspector.clientHeight);
 });
+
+/**
+ * `.save-dot.attention` is the small always-visible half of the "this document is not saving"
+ * indicator (`App.tsx` applies it next to the document title whenever the projection is invalid).
+ * It shipped with the class applied and **no CSS rule at all** -- the dot stayed the neutral colour
+ * whether the document was saving or not -- and nothing caught that, because jsdom does not load
+ * `styles.css` and the unit tests only prove the class is applied, not that it resolves to
+ * anything. The owner reported seeing no signal that saving had stopped; this was one reason why.
+ *
+ * Asserting the *resolved* colour is the only level at which that class of defect is visible, and
+ * it needs a real browser with the real stylesheet. It deliberately does not drive an invalid
+ * document: paste sanitisation closed the ordinary route to one, and the property under test here
+ * is the stylesheet's, not the projection's -- `App.test.tsx` already covers the class being
+ * applied for the right reason.
+ */
+test('the not-saving dot resolves to a visibly different colour from the saving one', async ({
+  page,
+}) => {
+  const colours = await page.evaluate(() => {
+    const neutral = document.createElement('span');
+    neutral.className = 'save-dot';
+    const attention = document.createElement('span');
+    attention.className = 'save-dot attention';
+    document.body.append(neutral, attention);
+    const read = (el: HTMLElement) => window.getComputedStyle(el).backgroundColor;
+    const result = { attention: read(attention), neutral: read(neutral) };
+    neutral.remove();
+    attention.remove();
+    return result;
+  });
+
+  // Both must actually resolve: an unmatched class yields a transparent default, which is exactly
+  // the state this shipped in and is indistinguishable from "no rule" if only inequality is checked.
+  expect(colours.neutral).not.toBe('rgba(0, 0, 0, 0)');
+  expect(colours.attention).not.toBe('rgba(0, 0, 0, 0)');
+  expect(colours.attention).not.toBe(colours.neutral);
+});

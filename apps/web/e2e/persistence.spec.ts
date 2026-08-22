@@ -144,6 +144,179 @@ test('a writer can create, autosave, and reload a private screenplay', async ({ 
   expect(conflictingPutCount).toBe(1);
 });
 
+/**
+ * `progress/paste-sanitization.md`: pasting used to make the screenplay stop saving, with almost
+ * nothing to tell the writer. This is the required real-browser proof -- jsdom cannot parse HTML
+ * or drive a real clipboard the way a browser does, and `screenplayEditor.test.ts`'s unit tests
+ * (which use `EditorView.pasteHTML`/`pasteText` and a real `serializeForClipboard` round trip,
+ * but still inside jsdom) are the mechanism, not the property the owner actually lost. The
+ * property is this: the edit reaches the server. A green "projection is valid" assertion proves
+ * the mechanism; only a completed `PUT` proves the save the owner lost actually happens again.
+ *
+ * Both tests below wait for that `PUT` explicitly and assert the real rendered "Saved" text
+ * against no-name constants, the same discipline `save-conflict-recovery.md` used for its own
+ * conflict-message test -- a test that only checked `projection.valid` in isolation would pass
+ * even if some *other* guard downstream (the pagination plugin, the export menu) still treated a
+ * sanitized-but-differently-broken document as invalid, which is exactly the kind of vacuous
+ * green this suite exists to rule out.
+ */
+test('pasting foreign HTML keeps the screenplay valid and saving, instead of failing closed silently', async ({
+  page,
+}) => {
+  const { canvas } = await createAndOpenScreenplay(page);
+  // The async Clipboard API (`navigator.clipboard.write` below) needs this; the OS-level
+  // Ctrl+C/Ctrl+V a later test in this file uses does not.
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+
+  await canvas.click();
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('INT. HOUSE - DAY');
+  await page.keyboard.press('Enter');
+
+  // Representative of the `lipsum.com` paste from the bug report: a heading, a link, and bold
+  // inline formatting -- none of which this schema's `screenplayBlock` can represent -- ahead of
+  // plain paragraph text. Before this fix, `ScreenplayDocument`'s content expression rejected
+  // whatever node ProseMirror's default parsing produced for the `<h1>`/`<a>` here as an
+  // "Unsupported local editor node", the exact issue text the owner reported.
+  const foreignHtml =
+    '<h1>Scene notes</h1>' +
+    '<p>Lorem ipsum <strong>dolor sit</strong> amet, consectetur ' +
+    '<a href="https://example.test/lipsum">adipiscing</a> elit.</p>' +
+    '<p>A second foreign paragraph, with no markup at all.</p>';
+  await page.evaluate(async (html) => {
+    const item = new ClipboardItem({
+      'text/html': new Blob([html], { type: 'text/html' }),
+      'text/plain': new Blob(['Scene notes\nLorem ipsum dolor sit amet.'], { type: 'text/plain' }),
+    });
+    await navigator.clipboard.write([item]);
+  }, foreignHtml);
+
+  const savedAfterPaste = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'PUT' &&
+      response.url().includes('/api/screenplays/') &&
+      response.status() === 200,
+  );
+  await page.keyboard.press('ControlOrMeta+KeyV');
+  await savedAfterPaste;
+
+  await expect(page.getByText(/^Saved · validated locally/)).toBeVisible();
+  await expect(page.getByText(/Draft needs attention/)).toHaveCount(0);
+  await expect(page.getByText(/Not saving/)).toHaveCount(0);
+  await expect(canvas).toContainText('Scene notes');
+  await expect(canvas).toContainText('Lorem ipsum dolor sit amet, consectetur adipiscing elit.');
+});
+
+test('pasting content copied from this editor back into the same document regenerates ids and keeps saving', async ({
+  page,
+}) => {
+  const { canvas } = await createAndOpenScreenplay(page);
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+
+  await canvas.click();
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('INT. HOUSE - DAY');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('MARA enters the room.');
+  const firstSavedUpdate = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'PUT' &&
+      response.url().includes('/api/screenplays/') &&
+      response.status() === 200,
+  );
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('CUT TO:');
+  await firstSavedUpdate;
+  await expect(page.getByText(/^Saved · validated locally/)).toBeVisible();
+
+  // The owner's literal report: "copying from our own page and pasting produced 'Stable id ...
+  // must be globally unique'". Select-all-and-copy is the simplest real action that reproduces
+  // it -- every block currently in the document, each carrying the same `data-block-id`s already
+  // present in the document it is about to be pasted back into.
+  //
+  // The copy itself has to be genuine -- this listener captures the real `clipboardData` a real
+  // 'copy' event carries, which is `ScreenplayBlockNode`'s real `renderHTML` output run through
+  // `EditorView.serializeForClipboard` (`prosemirror-view`'s real copy handler, registered on
+  // `view.dom` when the editor mounts, fires and calls `event.clipboardData.setData(...)` before
+  // this bubble-phase `document` listener sees the same event) -- not HTML this test authors by
+  // hand. What is NOT genuine, deliberately: getting that HTML onto the clipboard the *paste*
+  // reads from. The first version of this test used a real OS-level Ctrl+C/Ctrl+V round trip
+  // (`navigator.clipboard.write` was reserved for the sibling "foreign HTML" test above) and was
+  // flaky under this suite's runner -- observed directly, more than once, as the paste landing
+  // with the document completely unchanged, because the browser's native copy handler writes to
+  // the real OS pasteboard asynchronously and a same-tick Ctrl+V does not reliably wait for it.
+  // Writing the captured HTML through the async Clipboard API instead (below, the same mechanism
+  // the "foreign HTML" test already uses, and the one this suite has confirmed to be reliable) is
+  // synchronous from this test's point of view, so the subsequent Ctrl+V has no race to lose.
+  const copiedHtml = page.evaluate(
+    () =>
+      new Promise<string>((resolve) => {
+        document.addEventListener(
+          'copy',
+          (event) => resolve(event.clipboardData?.getData('text/html') ?? ''),
+          { once: true },
+        );
+      }),
+  );
+  await page.keyboard.press('ControlOrMeta+KeyA');
+  await page.keyboard.press('ControlOrMeta+KeyC');
+  const html = await copiedHtml;
+  expect(html).toContain('MARA enters the room.');
+  expect(html).toContain('CUT TO:');
+  await page.evaluate(async (clipboardHtml) => {
+    const item = new ClipboardItem({
+      'text/html': new Blob([clipboardHtml], { type: 'text/html' }),
+    });
+    await navigator.clipboard.write([item]);
+  }, html);
+
+  // Collapses the still-active select-all to its end, purely by keyboard -- deliberately not a
+  // mouse `.click()` back into the canvas, which reintroduced exactly the kind of flakiness the
+  // clipboard fix above was meant to remove (native click-to-place-a-caret racing ProseMirror's
+  // own selection sync in a way `Ctrl+A`'s own selection never has to, since it never leaves the
+  // keyboard). The caret ends up where it already was after typing "CUT TO:" -- the end of the
+  // last block -- which is what the paste below is testing against.
+  await page.keyboard.press('ArrowRight');
+
+  const savedAfterPaste = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'PUT' &&
+      response.url().includes('/api/screenplays/') &&
+      response.status() === 200,
+  );
+  await page.keyboard.press('ControlOrMeta+KeyV');
+  await savedAfterPaste;
+
+  await expect(page.getByText(/^Saved · validated locally/)).toBeVisible();
+  await expect(page.getByText(/Draft needs attention/)).toHaveCount(0);
+  await expect(page.getByText(/Not saving/)).toHaveCount(0);
+
+  // Not a fixed block count: the paste landed at the end of "CUT TO:", inside its text, so the
+  // copied slice's own open edges merge into that block the same way any ProseMirror editor
+  // merges an open paste edge into its insertion point (screenplayEditor.ts's own ruling, and
+  // out of scope to redefine here) -- the exact resulting shape is not this test's concern. What
+  // must hold regardless of that shape is the actual regression: "MARA enters the room." was the
+  // fully-closed *interior* block of the three-block copy, both of its edges closed by
+  // construction (only a copy's first and last siblings can be open), so it always survives the
+  // paste as a genuine new block rather than merging into anything -- proof this landed as real
+  // content, not proof of nothing having been pasted at all. Two real DOM nodes now carry that
+  // text, and, decisively, two *different* stable ids: before this fix the second one would have
+  // carried the same id as the first, which `packages/screenplay`'s schema rejects as a duplicate
+  // and is the literal defect this whole scope exists to fix.
+  const pastedBlocks = canvas.getByText('MARA enters the room.');
+  await expect(pastedBlocks).toHaveCount(2);
+  const [originalId, pastedId] = await pastedBlocks.evaluateAll((elements) =>
+    elements.map((element) => element.getAttribute('data-block-id')),
+  );
+  expect(originalId).toBeTruthy();
+  expect(pastedId).toBeTruthy();
+  expect(pastedId).not.toBe(originalId);
+
+  await page.reload();
+  await expect(page.getByText(/^Saved · validated locally/)).toBeVisible();
+  await expect(canvas.getByText('MARA enters the room.')).toHaveCount(2);
+});
+
 test('a writer can delete a screenplay from its overflow menu and undo the deletion inline, against the real API and database', async ({
   page,
 }) => {

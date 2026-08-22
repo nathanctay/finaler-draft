@@ -201,3 +201,268 @@ describe('projectDocumentScreenplay', () => {
     mount.remove();
   });
 });
+
+/**
+ * `ScreenplayPasteSanitizer` (screenplayEditor.ts): the fix for `progress/paste-sanitization.md`.
+ * These drive `EditorView.pasteHTML`/`pasteText`, the real paste pipeline (`transformPastedHTML`,
+ * `DOMParser.fromSchema`, `transformPasted`), not a hand-rolled substitute -- the only thing not
+ * exercised here is the browser's own HTML parser and the OS clipboard, which is what
+ * `apps/web/e2e/persistence.spec.ts`'s real-browser paste test is for.
+ */
+describe('paste sanitisation', () => {
+  const originalId = '00000000-0000-4000-8000-000000000401';
+  const secondId = '00000000-0000-4000-8000-000000000402';
+
+  function buildPasteEditor(
+    blocks: ReadonlyArray<{ element: ScreenplayElementType; id: string; text: string }>,
+  ) {
+    const mount = document.createElement('div');
+    document.body.append(mount);
+    const editor = new Editor({
+      content: {
+        type: 'screenplayDocument' as const,
+        content: blocks.map((block) => ({
+          type: 'screenplayBlock' as const,
+          attrs: { element: block.element, id: block.id },
+          ...(block.text === '' ? {} : { content: [{ type: 'text', text: block.text }] }),
+        })),
+      },
+      element: mount,
+      extensions: screenplayExtensions,
+    });
+    return { editor, mount };
+  }
+
+  /**
+   * Positions the cursor before the very first block, at the document's own top level rather
+   * than inside any block's text. `TextSelection.create` accepts this position directly (with a
+   * harmless `console.warn` from `prosemirror-state`'s own sanity check, since position 0 has no
+   * enclosing *inline* content -- it sits one level up, at the document) instead of snapping
+   * inward the way `Selection.near`/`TextSelection.atStart` would. That distinction is exactly
+   * what several tests below need: pasting a block-shaped slice at a genuine block boundary
+   * inserts sibling blocks, while pasting the same slice at a position already inside a block's
+   * text (what `Selection.near` would produce here) merges it into that block instead -- see the
+   * dedicated mid-block test further down for that second case on its own.
+   */
+  function selectBeforeFirstBlock(editor: Editor): void {
+    const selection = TextSelection.create(editor.state.doc, 0);
+    editor.view.dispatch(editor.state.tr.setSelection(selection));
+  }
+
+  // `pasteHTML`/`pasteText` take an optional `ClipboardEvent` only to forward to the
+  // `handlePaste` hook, which nothing here registers -- jsdom has no `ClipboardEvent`
+  // constructor, so an inert stand-in is enough to satisfy the call.
+  function pasteHTML(editor: Editor, html: string): void {
+    editor.view.pasteHTML(html, {} as unknown as ClipboardEvent);
+  }
+
+  function pasteText(editor: Editor, text: string): void {
+    editor.view.pasteText(text, {} as unknown as ClipboardEvent);
+  }
+
+  it('gives a block pasted from a foreign site a fresh id, strips its formatting, and lands it as action', () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'scene_heading', id: originalId, text: 'INT. HOUSE - DAY' },
+    ]);
+    selectBeforeFirstBlock(editor);
+
+    // Representative of the `lipsum.com` paste from the bug report: a foreign paragraph with
+    // inline formatting this schema has no mark for.
+    pasteHTML(editor, '<p><strong>Lorem ipsum</strong> dolor sit amet.</p>');
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    expect(projection.screenplay.blocks).toHaveLength(2);
+    // No residual markup and no unsupported-node rejection: the <strong> wrapper is dropped
+    // (this schema defines no marks at all) while its text survives, landing as a plain `action`
+    // block with a real id rather than the `null` id that used to make this "invalid screenplay
+    // block".
+    expect(projection.screenplay.blocks[0]).toMatchObject({
+      text: 'Lorem ipsum dolor sit amet.',
+      type: 'action',
+    });
+    expect(projection.screenplay.blocks[0]?.id).not.toBe(originalId);
+    expect(projection.screenplay.blocks[1]?.id).toBe(originalId);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('regenerates the id of a block pasted from this editor, even back into the document it was copied from, and keeps its element', () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'scene_heading', id: originalId, text: 'INT. HOUSE - DAY' },
+    ]);
+    selectBeforeFirstBlock(editor);
+
+    // The exact clipboard shape `ScreenplayBlockNode.renderHTML` produces for this same block --
+    // the reported "Stable id ... must be globally unique" case, reproduced by pasting a block
+    // back into the very document it was copied from.
+    pasteHTML(
+      editor,
+      `<div data-screenplay-block data-screenplay-element="scene_heading" data-block-id="${originalId}">INT. HOUSE - DAY</div>`,
+    );
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    expect(projection.screenplay.blocks).toHaveLength(2);
+    const ids = projection.screenplay.blocks.map((block) => block.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // The scene heading stays a scene heading -- only its identity is new, not its semantics.
+    expect(projection.screenplay.blocks[0]).toMatchObject({
+      text: 'INT. HOUSE - DAY',
+      type: 'scene_heading',
+    });
+    expect(projection.screenplay.blocks[0]?.id).not.toBe(originalId);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('regenerates every id in a multi-block paste copied from this editor, none colliding with each other or the existing document', () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'scene_heading', id: originalId, text: 'INT. HOUSE - DAY' },
+    ]);
+    selectBeforeFirstBlock(editor);
+
+    pasteHTML(
+      editor,
+      [
+        `<div data-screenplay-block data-screenplay-element="character" data-block-id="${originalId}">ADA</div>`,
+        `<div data-screenplay-block data-screenplay-element="dialogue" data-block-id="${secondId}">Hello.</div>`,
+      ].join(''),
+    );
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    expect(projection.screenplay.blocks).toHaveLength(3);
+    const ids = projection.screenplay.blocks.map((block) => block.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(projection.screenplay.blocks.map((block) => block.type)).toEqual([
+      'character',
+      'dialogue',
+      'scene_heading',
+    ]);
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * The other three "own blocks" tests above hand-author the pasted HTML directly, which is
+   * deliberately how `ScreenplayBlockNode.parseHTML()`'s `div[data-screenplay-block]` rule is
+   * matched -- but it is not quite what a genuine same-session copy produces: an actual Ctrl+C in
+   * a live ProseMirror view runs `EditorView.serializeForClipboard`, which also stamps a
+   * `data-pm-slice` attribute recording the exact openness of the copied selection, and
+   * `parseFromClipboard` (`prosemirror-view`'s `clipboard.ts`) takes a different branch when that
+   * attribute is present. This test drives that real branch: it builds a `Slice` from an actual
+   * cross-block `TextSelection` (spanning from inside one block into the next, the drag-select
+   * that reproduces the owner's "copying from our own page" report -- copying a single block's
+   * content in isolation is always fully open at both ends and merges as inline text, which is
+   * exactly the mid-block case covered separately below), serializes it with the same method a
+   * real copy uses, and pastes the resulting HTML back with `pasteHTML`.
+   *
+   * The exact shape of the merge at the paste point is ProseMirror's own default fitting
+   * behaviour for an open slice edge (unchanged, and out of this scope's remit -- see
+   * `regeneratePastedIds`'s doc comment), so this only asserts the property this slice actually
+   * guards: the ids already in the document and every id the paste introduces are pairwise
+   * distinct, and every text-carrying block. `screenplayEditor.ts`'s duplicate-id defect fails
+   * exactly this assertion without `ScreenplayPasteSanitizer` in place.
+   */
+  it('regenerates ids for a real cross-block clipboard round trip, with no duplicate surviving the paste', () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'character', id: originalId, text: 'ADA' },
+      { element: 'dialogue', id: secondId, text: 'Hello there.' },
+    ]);
+    const doc = editor.state.doc;
+    // From inside the first block's text through into the second block's text -- a genuine
+    // cross-block drag-select, not a whole-document or single-block selection.
+    const selection = TextSelection.create(doc, 2, doc.content.size - 1);
+    const { dom } = editor.view.serializeForClipboard(selection.content());
+    expect(dom.innerHTML).toContain('data-pm-slice');
+
+    editor.view.dispatch(
+      editor.state.tr.setSelection(
+        TextSelection.create(editor.state.doc, editor.state.doc.content.size - 1),
+      ),
+    );
+    pasteHTML(editor, dom.innerHTML);
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    const ids = projection.screenplay.blocks.map((block) => block.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('splits pasted multi-line plain text into separate action blocks, each with its own valid id', () => {
+    const { editor, mount } = buildPasteEditor([{ element: 'action', id: originalId, text: '' }]);
+    selectBeforeFirstBlock(editor);
+
+    pasteText(editor, 'First line\nSecond line\nThird line');
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    const texts = projection.screenplay.blocks.map((block) => ('text' in block ? block.text : ''));
+    // The original (empty) block survives as a fourth, trailing block -- the paste was inserted
+    // before it, at the document boundary `selectBeforeFirstBlock` leaves the cursor at, not in
+    // place of it.
+    expect(texts).toEqual(['First line', 'Second line', 'Third line', '']);
+    expect(projection.screenplay.blocks.every((block) => block.type === 'action')).toBe(true);
+    const ids = projection.screenplay.blocks.map((block) => block.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('leaves the document alone when the clipboard has nothing in it', () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'action', id: originalId, text: 'Existing text.' },
+    ]);
+    selectBeforeFirstBlock(editor);
+
+    pasteText(editor, '');
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    expect(projection.screenplay.blocks).toHaveLength(1);
+    expect(projection.screenplay.blocks[0]).toMatchObject({
+      id: originalId,
+      text: 'Existing text.',
+    });
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * A paste that lands *inside* an existing block, rather than at a block boundary, is not given
+   * any special handling by `ScreenplayPasteSanitizer` -- and this test is the record of that
+   * being a deliberate choice, not an oversight (see that extension's own doc comment). Pasting
+   * plain inline text mid-block never produces a `screenplayBlock` node in the slice at all --
+   * ProseMirror opens the slice to merge it into the surrounding block -- so there is no id to
+   * regenerate and the block keeps the one it already had.
+   */
+  it('merges a mid-block paste into the surrounding text without creating a new block or a new id', () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'action', id: originalId, text: 'INT. HOUSE - DAY' },
+    ]);
+    // Position 5 is inside the block's text, between "INT." and " HOUSE - DAY".
+    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 5)));
+
+    pasteText(editor, 'REALLY BIG');
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    expect(projection.screenplay.blocks).toHaveLength(1);
+    expect(projection.screenplay.blocks[0]).toMatchObject({
+      id: originalId,
+      text: 'INT.REALLY BIG HOUSE - DAY',
+    });
+    editor.destroy();
+    mount.remove();
+  });
+});

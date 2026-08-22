@@ -45,6 +45,7 @@ import {
 } from './titlePageState.js';
 import { DocumentSettingsDialog } from './documentSettingsDialog.js';
 import { OverflowMenu } from './components/OverflowMenu.js';
+import { Toast } from './components/Toast.js';
 import { triggerDocxDownload } from './docxDownload.js';
 import { triggerFdxDownload } from './fdxDownload.js';
 import { triggerPdfDownload } from './pdfDownload.js';
@@ -195,6 +196,15 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     valid: false,
   });
   const [saveState, setSaveState] = useState<'saved' | 'saving' | 'failed' | 'conflict'>('saved');
+
+  // An export that fails *after* the projection was valid -- today, only `@finaler-draft/pdf`
+  // rejecting on a character PDF's un-embedded standard Courier cannot encode (Cyrillic, Greek,
+  // emoji: all of which paste, save, and export to FDX and DOCX perfectly well). `disabled` does
+  // not cover this: the screenplay is genuinely valid, so the menu item is genuinely enabled, and
+  // the click genuinely runs. Without this the rejection reached `console.error` alone and the
+  // writer saw a click that did nothing -- the same silent failure this scope exists to remove,
+  // arriving through a different door.
+  const [exportError, setExportError] = useState<string>();
   // Feedback for the conflict state's "Copy my version" button (below). Not part of `saveState`:
   // it describes the clipboard action's own outcome, which can succeed or fail independently of
   // -- and without ever changing -- the save conflict it is trying to rescue the writer from.
@@ -638,6 +648,17 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     syncEditorState(editor);
   };
 
+  // Shared by all three export menu items below -- FDX, DOCX, and PDF (requirement 2,
+  // progress/paste-sanitization.md): an invalid projection used to make an export click silently
+  // do nothing, which -- per that scope's own framing -- "is indistinguishable from a broken
+  // build", and is the owner's literal "Download PDF did nothing" report. All three are now real
+  // disabled controls (OverflowMenu.tsx) instead, with this exact string as the reason a writer
+  // sees on hover. It reuses `projection.issues[0]`, the same message the status bar and
+  // `.status-attention` below already show, rather than inventing a second wording of "why".
+  const exportDisabledReason = projection.valid
+    ? undefined
+    : `Can't export: ${projection.issues[0] ?? 'Invalid screenplay data.'}`;
+
   return (
     <main className={dark ? 'application dark' : 'application'}>
       <header className="titlebar">
@@ -681,12 +702,15 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                 onSelect: () => setSettingsDialogOpen(true),
               },
               {
-                // No-op when `projection` is invalid: the FDX exporter takes a canonical
-                // `Screenplay` (see `packages/fdx`'s own doc comment), which an invalid local
-                // projection is not. `screenplayToFdx` itself has no licence to guess at one, and
-                // this menu item shouldn't either -- an unsupported/unparseable local document
-                // already renders read-only elsewhere in this file, so there is nothing a click
-                // here could usefully do until that's resolved.
+                // Disabled, not a no-op, when `projection` is invalid: the FDX exporter takes a
+                // canonical `Screenplay` (see `packages/fdx`'s own doc comment), which an invalid
+                // local projection is not, and `screenplayToFdx` has no licence to guess at one.
+                // The `if (projection.valid)` guard inside `onSelect` is still required -- it is
+                // what lets TypeScript narrow `projection` to the branch with a `.screenplay` --
+                // but it is no longer the only thing standing between a click and nothing
+                // happening: `disabled` means that click can no longer reach `onSelect` at all.
+                disabled: !projection.valid,
+                disabledReason: exportDisabledReason,
                 label: 'Download FDX…',
                 onSelect: () => {
                   if (projection.valid) {
@@ -695,9 +719,11 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                 },
               },
               {
-                // Same no-op-when-invalid reasoning as "Download FDX…" above: `screenplayToDocx`
-                // takes a canonical `Screenplay` (see `packages/docx`'s own doc comment), and an
-                // invalid local projection is not one.
+                // Same reasoning as "Download FDX…" above: `screenplayToDocx` takes a canonical
+                // `Screenplay` (see `packages/docx`'s own doc comment), and an invalid local
+                // projection is not one.
+                disabled: !projection.valid,
+                disabledReason: exportDisabledReason,
                 label: 'Download DOCX…',
                 onSelect: () => {
                   if (projection.valid) {
@@ -706,19 +732,32 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                 },
               },
               {
-                // Same no-op-when-invalid reasoning as "Download FDX…" above. Unlike FDX/DOCX,
-                // `triggerPdfDownload` is `async` (`screenplayToPdf` is -- see `@finaler-draft/pdf`'s
-                // `index.ts`), so a rejection (most likely `@finaler-draft/pdf`'s WinAnsiEncoding
-                // limitation -- a character PDF's un-embedded standard Courier cannot render) must
-                // be caught here or it becomes an unhandled promise rejection. No user-facing error
-                // surface exists yet for an export failure; logged so it is at least visible during
-                // development, and flagged as a known limitation in progress/pdf-export.md rather
-                // than silently inventing one.
+                // Same disabled-not-a-no-op reasoning as "Download FDX…" above -- this is in fact
+                // the owner's exact reported symptom: "Download PDF did nothing when clicked" was
+                // this same `if (projection.valid)` guard with no disabled state and no reason,
+                // on a document a paste had made invalid (progress/paste-sanitization.md). Unlike
+                // FDX/DOCX, `triggerPdfDownload` is `async` (`screenplayToPdf` is -- see
+                // `@finaler-draft/pdf`'s `index.ts`), so a rejection (most likely
+                // `@finaler-draft/pdf`'s WinAnsiEncoding limitation -- a character PDF's
+                // un-embedded standard Courier cannot render) must still be caught here or it
+                // becomes an unhandled promise rejection; that failure mode is unrelated to and
+                // unfixed by `disabled`, which only ever concerns an invalid local projection.
+                // No user-facing error surface exists yet for an export failure past that point;
+                // logged so it is at least visible during development, and flagged as a known
+                // limitation in progress/pdf-export.md rather than silently inventing one.
+                disabled: !projection.valid,
+                disabledReason: exportDisabledReason,
                 label: 'Download PDF…',
                 onSelect: () => {
                   if (projection.valid) {
+                    setExportError(undefined);
                     triggerPdfDownload(projection.screenplay).catch((error: unknown) => {
                       console.error('PDF export failed:', error);
+                      setExportError(
+                        error instanceof Error
+                          ? error.message
+                          : 'PDF export failed for an unknown reason.',
+                      );
                     });
                   }
                 },
@@ -953,6 +992,22 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                     ? `Saved · validated locally · ${wordCount} words · no print pagination`
                     : `Draft needs attention · ${projection.issues[0] ?? 'Invalid screenplay data.'}`}
         </span>
+        {initialContent !== undefined && !projection.valid && (
+          // Deliberately not inside `.status-center`, which the narrow-viewport media query
+          // hides entirely (styles.css) -- exactly the gap requirement 2 in
+          // progress/paste-sanitization.md exists to close: below that width the only place an
+          // invalid projection was ever announced (the text this duplicates, a few lines up)
+          // disappeared along with everything else in `.status-center`, leaving a writer on a
+          // narrow window with no signal at all that `scheduleSave` (below) is refusing to run.
+          // Gated on `initialContent !== undefined`: the other reason `projection` can be invalid
+          // is the unrelated "this screenplay has features this editor can't open" case, which
+          // already has its own unambiguous message above and disables editing entirely, so there
+          // is no save being silently skipped there for this banner to announce.
+          <span className="status-attention" role="alert">
+            Not saving · {projection.issues[0] ?? 'Invalid screenplay data.'}
+          </span>
+        )}
+
         {saveState === 'conflict' && (
           // Deliberately not inside `.status-center`, which the small-viewport media query hides
           // entirely (styles.css) -- these are the writer's only way to rescue or leave a
@@ -986,6 +1041,18 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
           </span>
         )}
       </footer>
+      {exportError !== undefined && (
+        // A toast rather than a line in the status bar: this message names the block and element
+        // the writer has to go and fix, which the bar has no room for -- it already carries the
+        // save state, the word count and the page count, and collapses to 30px below 600px. It is
+        // also the wrong home for it in kind: the bar describes the document's ongoing state,
+        // while this describes one completed attempt that failed.
+        <Toast
+          message={exportError}
+          onDismiss={() => setExportError(undefined)}
+          title="Export failed"
+        />
+      )}
     </main>
   );
 }

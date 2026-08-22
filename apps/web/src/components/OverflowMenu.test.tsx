@@ -147,4 +147,49 @@ describe('OverflowMenu', () => {
     await user.click(screen.getByRole('button', { name: 'Elsewhere' }));
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
+
+  /**
+   * `progress/paste-sanitization.md` requirement 2: a menu item that cannot proceed must say why
+   * rather than silently declining to do anything on click -- the App.tsx export items are the
+   * motivating case, but the contract belongs here, on the component that owns it.
+   */
+  it('disabled item never calls onSelect on click, and exposes the reason as its title', async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(
+      <OverflowMenu
+        items={[
+          {
+            disabled: true,
+            disabledReason: "Can't export: the draft has an unresolved issue.",
+            label: 'Download FDX…',
+            onSelect,
+          },
+        ]}
+        label="Row actions"
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Row actions' }));
+
+    const item = screen.getByRole('menuitem', { name: 'Download FDX…' });
+    expect(item).toBeDisabled();
+    expect(item).toHaveAttribute('title', "Can't export: the draft has an unresolved issue.");
+
+    await user.click(item);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('an item with no disabled reason carries no title, and remains clickable', async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(<OverflowMenu items={[{ label: 'Delete', onSelect }]} label="Row actions" />);
+    await user.click(screen.getByRole('button', { name: 'Row actions' }));
+
+    const item = screen.getByRole('menuitem', { name: 'Delete' });
+    expect(item).not.toBeDisabled();
+    expect(item).not.toHaveAttribute('title');
+
+    await user.click(item);
+    expect(onSelect).toHaveBeenCalledOnce();
+  });
 });

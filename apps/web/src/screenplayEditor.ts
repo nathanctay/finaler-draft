@@ -1,7 +1,7 @@
-import { Node, type Editor } from '@tiptap/core';
+import { Extension, Node, type Editor } from '@tiptap/core';
 import { History } from '@tiptap/extension-history';
-import { TextSelection } from '@tiptap/pm/state';
-import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
+import { Plugin, TextSelection } from '@tiptap/pm/state';
+import { Fragment, Slice, type Node as ProseMirrorNode } from '@tiptap/pm/model';
 import {
   SCREENPLAY_SCHEMA_VERSION,
   safeParseScreenplay,
@@ -210,12 +210,17 @@ function mapBlock(node: {
       id,
       type: element,
       text: node.textContent,
-      // Not also excluding an empty string here: nothing in this file ever sets one (`renderHTML`
-      // below only ever writes `data-scene-number` when the attribute is truthy, and
-      // `editorContentFromScreenplay` only ever supplies a defined `sceneNumber`), and
-      // `sceneHeadingSchema`'s `min(1)` already rejects one loudly via a normal validation issue
-      // if some other path ever produced it -- silently coercing it to "absent" here would hide
-      // that instead of surfacing it.
+      // Not also excluding an empty `sceneNumber` string here: nothing in this file ever sets
+      // one (`renderHTML` below only ever writes `data-scene-number` when the attribute is
+      // truthy, and `editorContentFromScreenplay` only ever supplies a defined `sceneNumber`),
+      // and `sceneHeadingSchema`'s own `sceneNumber: z.string().min(1)...` already rejects an
+      // empty one loudly via a normal validation issue if some other path ever produced it --
+      // silently coercing it to "absent" here would hide that instead of surfacing it. This
+      // `min(1)` is on `sceneNumber` specifically, not on this block's `text` above -- a reader
+      // moving quickly (this scope's own implementation agent, on first read) can otherwise walk
+      // away thinking an empty scene heading is itself rejected somewhere, which it is not:
+      // `screenplayTextSchema` (packages/screenplay's `text` field for every block type,
+      // including this one) has no minimum length at all.
       ...(typeof sceneNumber === 'string' ? { sceneNumber } : {}),
     };
   }
@@ -497,11 +502,104 @@ export const ScreenplayBlockNode = Node.create({
   },
 });
 
+/**
+ * Regenerates every `screenplayBlock`'s stable id inside a pasted `Slice`, recursively, and
+ * leaves everything else -- element, sceneNumber, text, and any bare inline `text` nodes that
+ * are not wrapped in a `screenplayBlock` at all -- untouched. This is `progress/paste-sanitization.md`'s
+ * fix for the reported "Stable id ... must be globally unique" save failure: a pasted block is a
+ * new block, and that must hold even when the paste came from this same editor into this same
+ * document, which is the common case (copying a line and pasting it again below), not an edge
+ * case carved out for foreign content.
+ *
+ * Recursing into `node.content` rather than only inspecting top-level fragment children matters
+ * for a paste that lands *inside* an existing block: `ScreenplayBlockNode.parseHTML()`'s own
+ * comment and this module's `addAttributes()` establish that a `screenplayBlock` only ever
+ * contains `text*`, never another `screenplayBlock` -- so recursion here can only ever redescend
+ * into a leaf `text` node, which has no `id` to regenerate and is returned unchanged. What that
+ * case actually produces: `parseFromClipboard` (`prosemirror-view`'s `serializeForClipboard`)
+ * strips symmetric open wrapper levels off a slice copied from the interior of a single block,
+ * so a mid-block copy/paste round-trips as bare inline `text` with no `screenplayBlock` wrapper
+ * at all -- it merges into the surrounding block's own identity, which is already correct and
+ * needs no id regeneration. A paste that instead *replaces a multi-block selection* carries one
+ * or more full or partially-open `screenplayBlock` nodes in the slice, every one of which is
+ * walked here; an open (partial) one that ProseMirror's replace step goes on to merge into an
+ * existing block loses this synthetic id along with the rest of its wrapper attrs on merge (the
+ * surviving block keeps whichever side's identity ProseMirror's own join logic picks), and a
+ * fully-closed one is inserted as a genuine new block, for which a fresh id is exactly right.
+ */
+function regeneratePastedIds(fragment: Fragment): Fragment {
+  const regenerated: ProseMirrorNode[] = [];
+  fragment.forEach((node) => {
+    const content = node.content.size > 0 ? regeneratePastedIds(node.content) : node.content;
+    if (node.type.name === 'screenplayBlock') {
+      regenerated.push(
+        node.type.create({ ...node.attrs, id: createStableId() }, content, node.marks),
+      );
+      return;
+    }
+    regenerated.push(content === node.content ? node : node.copy(content));
+  });
+  return Fragment.fromArray(regenerated);
+}
+
+/**
+ * The paste side of `progress/paste-sanitization.md`. There is otherwise no paste handling in
+ * this editor at all -- no `transformPasted`, no `handlePaste` -- so ProseMirror's default
+ * clipboard parsing runs unmodified: it parses whatever HTML (or, absent HTML, line-split plain
+ * text -- see `prosemirror-view`'s `parseFromClipboard`) the clipboard carries against this
+ * schema, using each node type's own `parseHTML` rule, exactly the way typing and every other
+ * edit already does. This extension does not change what gets parsed or how; it only runs once
+ * more, after parsing, over the resulting `Slice`, which is `transformPasted`'s entire contract
+ * (`prosemirror-view`'s `EditorProps`) -- a hook that fires for every paste regardless of source,
+ * including drag-and-drop content and the plain-text fallback path.
+ *
+ * `ScreenplayBlockNode.parseHTML()` only matches `div[data-screenplay-block]`, so content this
+ * schema has no rule for does not get rejected -- ProseMirror's own default DOM-parsing fallback
+ * (used by every schema without an explicit generic "paragraph" node) wraps orphaned inline
+ * content in whatever schema node is block-level and text-only, which `screenplayBlock` is,
+ * defaulting its `element` to `'action'` and its `id` to `null` per `addAttributes()` above. That
+ * default `id` is exactly what made `projectDocumentScreenplay` report "invalid screenplay
+ * block" for foreign HTML before this fix: `mapBlock` requires a string id. Regenerating ids here
+ * fixes both failure modes with one pass -- a foreign paragraph gets a real id instead of `null`,
+ * and content copied from this editor gets a new id instead of the one it was copied from -- and
+ * this extension has no schema of its own reason to prefer one wrapping over another, so it also
+ * never touches `element`: a `div[data-screenplay-block]` pasted from this editor keeps whatever
+ * element `parseHTML` read off its `data-screenplay-element` attribute (scene headings stay scene
+ * headings), and content this schema had to fall back to its default wrapping for keeps that
+ * default (`'action'`), which is the same "reduce anything unrecognised to its text" outcome
+ * marks and other inline formatting already get: this schema defines no marks at all, so
+ * `DOMParser.fromSchema` has no rule to match `<strong>`, `<a>`, `<h1>`, and the rest against, and
+ * silently drops the wrapping tag while keeping its text -- exactly the "strip formatting, keep
+ * the words" behaviour the paste-sanitisation requirement calls for, with no code needed here to
+ * produce it.
+ *
+ * Whitespace-only and empty paste need no special case either: `parseFromClipboard` returns
+ * `null` -- skipping `transformPasted` entirely -- when the clipboard carries neither text nor
+ * HTML, and a clipboard that carries only blank lines still produces well-formed (if empty)
+ * `screenplayBlock` nodes here, which is exactly what an empty block already is everywhere else
+ * in this editor (a freshly split block, `Enter` on an empty document): not malformed, just
+ * empty.
+ */
+const ScreenplayPasteSanitizer = Extension.create({
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        props: {
+          transformPasted: (slice) =>
+            new Slice(regeneratePastedIds(slice.content), slice.openStart, slice.openEnd),
+        },
+      }),
+    ];
+  },
+  name: 'screenplayPasteSanitizer',
+});
+
 export const screenplayExtensions = [
   ScreenplayDocument,
   ScreenplayBlockNode,
   ScreenplayText,
   History,
+  ScreenplayPasteSanitizer,
 ];
 
 export const initialScreenplayContent = {
