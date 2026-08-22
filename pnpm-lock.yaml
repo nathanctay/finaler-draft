@@ -100,6 +100,9 @@ importers:
       '@finaler-draft/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@finaler-draft/fdx':
+        specifier: workspace:*
+        version: link:../../packages/fdx
       '@finaler-draft/layout':
         specifier: workspace:*
         version: link:../../packages/layout
@@ -201,6 +204,19 @@ importers:
       drizzle-kit:
         specifier: 0.31.10
         version: 0.31.10
+      vitest:
+        specifier: 3.2.4
+        version: 3.2.4(@types/node@24.3.0)(jsdom@26.1.0)(tsx@4.23.9)(yaml@2.9.0)
+
+  packages/fdx:
+    dependencies:
+      '@finaler-draft/screenplay':
+        specifier: workspace:*
+        version: link:../screenplay
+    devDependencies:
+      '@vitest/coverage-v8':
+        specifier: 3.2.4
+        version: 3.2.4(vitest@3.2.4(@types/node@24.3.0)(jsdom@26.1.0)(tsx@4.23.9)(yaml@2.9.0))
       vitest:
         specifier: 3.2.4
         version: 3.2.4(@types/node@24.3.0)(jsdom@26.1.0)(tsx@4.23.9)(yaml@2.9.0)

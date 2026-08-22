@@ -45,6 +45,7 @@ import {
 } from './titlePageState.js';
 import { DocumentSettingsDialog } from './documentSettingsDialog.js';
 import { OverflowMenu } from './components/OverflowMenu.js';
+import { triggerFdxDownload } from './fdxDownload.js';
 
 type Panel = 'navigator' | 'inspector';
 
@@ -676,6 +677,20 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
               {
                 label: 'Document settings…',
                 onSelect: () => setSettingsDialogOpen(true),
+              },
+              {
+                // No-op when `projection` is invalid: the FDX exporter takes a canonical
+                // `Screenplay` (see `packages/fdx`'s own doc comment), which an invalid local
+                // projection is not. `screenplayToFdx` itself has no licence to guess at one, and
+                // this menu item shouldn't either -- an unsupported/unparseable local document
+                // already renders read-only elsewhere in this file, so there is nothing a click
+                // here could usefully do until that's resolved.
+                label: 'Download FDX…',
+                onSelect: () => {
+                  if (projection.valid) {
+                    triggerFdxDownload(projection.screenplay);
+                  }
+                },
               },
             ]}
             label="File menu"
