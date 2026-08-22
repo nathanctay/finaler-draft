@@ -1089,6 +1089,46 @@ describe('FDX download', () => {
   });
 });
 
+describe('DOCX download', () => {
+  it('downloads the current screenplay as DOCX from the File menu', async () => {
+    const objectUrl = 'blob:mock-docx-url';
+    const createObjectURL = vi.fn().mockReturnValue(objectUrl);
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL });
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const appendSpy = vi.spyOn(document.body, 'appendChild');
+
+    const user = userEvent.setup();
+    render(
+      <App
+        initial={persistedScreenplay(
+          '9c7c5f7b-c2f0-47a0-a639-dfd0c5702b88',
+          'Downloadable Draft',
+          'INT. STAGE - DAY',
+        )}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Download DOCX…' }));
+
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    const blobArgument = createObjectURL.mock.calls[0]?.[0] as Blob;
+    expect(blobArgument.type).toBe(
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    );
+    const anchorCall = appendSpy.mock.calls.find(([node]) => (node as HTMLElement).tagName === 'A');
+    expect((anchorCall?.[0] as HTMLAnchorElement).download).toBe('Downloadable Draft.docx');
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith(objectUrl);
+
+    vi.unstubAllGlobals();
+    clickSpy.mockRestore();
+    appendSpy.mockRestore();
+  });
+});
+
 describe('document settings', () => {
   async function openDialog(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByRole('button', { name: 'File menu' }));

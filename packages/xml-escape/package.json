@@ -1,5 +1,5 @@
 {
-  "name": "@finaler-draft/fdx",
+  "name": "@finaler-draft/xml-escape",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -14,10 +14,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
-  },
-  "dependencies": {
-    "@finaler-draft/screenplay": "workspace:*",
-    "@finaler-draft/xml-escape": "workspace:*"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "3.2.4",

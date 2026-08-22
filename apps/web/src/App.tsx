@@ -45,6 +45,7 @@ import {
 } from './titlePageState.js';
 import { DocumentSettingsDialog } from './documentSettingsDialog.js';
 import { OverflowMenu } from './components/OverflowMenu.js';
+import { triggerDocxDownload } from './docxDownload.js';
 import { triggerFdxDownload } from './fdxDownload.js';
 
 type Panel = 'navigator' | 'inspector';
@@ -689,6 +690,17 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                 onSelect: () => {
                   if (projection.valid) {
                     triggerFdxDownload(projection.screenplay);
+                  }
+                },
+              },
+              {
+                // Same no-op-when-invalid reasoning as "Download FDX…" above: `screenplayToDocx`
+                // takes a canonical `Screenplay` (see `packages/docx`'s own doc comment), and an
+                // invalid local projection is not one.
+                label: 'Download DOCX…',
+                onSelect: () => {
+                  if (projection.valid) {
+                    triggerDocxDownload(projection.screenplay);
                   }
                 },
               },
