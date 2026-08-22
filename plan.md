@@ -74,7 +74,7 @@ Everything runs on Railway. The web client and the API share one origin: Fastify
 ```text
 app.example.com   Railway service: Fastify serves the Vite build + REST API.  CDN enabled.
 ws.example.com    Railway service: Hocuspocus.  Deploys independently.  Not proxied.
-                  Railway service: export worker (headless Chromium).
+                  Railway service: export worker (see "Superseded" note under Exports).
                   Railway service: PostgreSQL.
 ```
 
@@ -146,7 +146,19 @@ stated window.
 
 This is deliberate. If the preview and the export each derive their own page breaks from a layout engine, they depend on Chromium version parity between an arbitrary user's browser and the server, and they will diverge. Page count is contractual in this industry, and a script that previews at 112 pages must not export at 113. A monospaced screenplay face reduces to a fixed character-and-line grid with fixed per-element indents, which makes an exact implementation both tractable and far easier to test than browser layout: page counts become unit-testable assertions against FDX fixtures with no browser involved.
 
-PDF export is a required Phase 1 capability, not a late optional feature. The server creates an immutable canonical screenplay snapshot, records its hash and revision, runs the layout function, and uses headless Chromium to paint the resulting page model to PDF. The client polls or subscribes to an export job and downloads a short-lived, authorized result. The export worker will likely need its own Dockerfile, because headless Chromium requires system libraries a buildpack will not reliably provide.
+PDF export is a required Phase 1 capability, not a late optional feature. The server creates an immutable canonical screenplay snapshot, records its hash and revision, runs the layout function, and produces a PDF from the resulting page model. The client polls or subscribes to an export job and downloads a short-lived, authorized result.
+
+**Superseded: the PDF is generated directly from the layout model, not painted by headless Chromium.** This section originally specified a headless-Chromium worker with its own Dockerfile, written when the browser was the only thing that knew where lines fell. `packages/layout` now computes the page and line model exactly and deterministically without a browser, so Chromium would re-derive layout the product already owns -- and disagreement between browser text metrics and this specification is the precise failure the layout package exists to prevent. It is not a hypothetical one: a CI font-hinting difference silently widened glyph advances and broke every character-grid assertion (`progress/test-harness-hardening.md`). Generating the PDF directly makes it a pure function of the canonical model, testable in process, with no worker service, no Dockerfile, and no browser in the fidelity path. The export worker and its Dockerfile are therefore not required; if a future need reintroduces them, it must be for a reason other than layout.
+
+**Positioning comes from the grid, never from font metrics.** Every line is placed at coordinates derived from `pageFormat`'s character-and-line grid, exactly as `MEASURED_COURIER_PRIME_ADVANCE_EM` is already forbidden from driving layout. This is what makes the typeface a rendering detail rather than a layout input.
+
+**Typeface: the PDF standard Courier while export runs client-side; Courier Prime once it moves server-side.** Courier is one of PDF's fourteen standard fonts, present in every viewer, requiring no embedded font file, and its advance is exactly 0.6em -- precisely the specification's ten characters per inch. Courier Prime is the better-looking face and matches the editor, but embedding it means shipping a font binary and a font-embedding path. Because positions come from the grid, that substitution changes glyph shapes and nothing structural: the page count, the line positions, and the character budgets are identical either way, which is what makes deferring it safe rather than a compromise to be repaid.
+
+**Consequence, and it must be fixed by the server-side move rather than survive it: the standard Courier cannot encode text outside its Latin-1-ish range.** Cyrillic, Greek, and emoji all paste, save, and export to FDX and DOCX correctly -- the canonical model and the other two exporters handle them exactly as they should -- but PDF export of the same screenplay fails outright (verified 2026-08-22). This is the un-embedded standard font's limitation, not a defect in the layout model or the canonical schema.
+
+**Do not resolve this by restricting what a writer may type or paste.** Rejecting characters at the input boundary to accommodate one exporter would be the narrowest consumer dictating the model, and it would block ordinary content -- an accented name in a contact block, a line of dialogue in another language. The canonical model is right; the exporter is the narrow one.
+
+Until embedding lands, the failure is surfaced to the writer rather than logged: `App.tsx` renders the rejection in the status-attention banner, naming the block and element, outside the container the narrow-viewport rule hides. That makes it visible and actionable, which is the most that can be done without a font. **Embedding a face with the required coverage is the actual fix**, and it is the reason the server-side typeface change is a requirement rather than a refinement. Note that Courier Prime's own coverage must be checked against this list before it is assumed sufficient: matching the editor's face is one goal and rendering a writer's characters is another, and a face that satisfies the first may not satisfy the second.
 
 Provide `.docx` export in Phase 1 from the same canonical snapshot using an OOXML generator. It should preserve the screenplay's content, element semantics, page breaks, and basic page layout, but PDF is the fidelity contract for exact screenplay pagination. Do not support legacy binary `.doc` initially: `.docx` is the modern interoperable format, while reliable `.doc` generation would add a disproportionate compatibility burden.
 
@@ -258,6 +270,17 @@ Notes are non-printing annotations, not screenplay blocks. They must remain anch
 The first editor implementation uses the open-source Tiptap core and React bindings with custom screenplay nodes; it does not use a generic rich-text starter schema or a paid Tiptap service. It edits a local canonical screenplay projection only. Persistence, authentication, collaboration, FDX conversion, title-page editing, and deterministic paginated print layout are deliberately separate slices.
 
 The initial keyboard defaults mirror the core Final Draft writing flow: Enter after a scene heading creates action, after action creates action, after character or parenthetical creates dialogue, after dialogue creates action, and after transition creates a scene heading. Tab from action creates character; Tab from dialogue creates parenthetical. The toolbar element selector changes the active block's screenplay element. Each transformation must preserve the block's stable identity where the schema permits it, and the UI must show the active element and derive Navigator scenes from the shared schema. Local undo/redo is required; it must not be presented as collaboration history.
+
+### Writing-flow behaviours borrowed from Final Draft
+
+Observed directly in Final Draft 13 and adopted deliberately. They share one purpose: **an element should never be able to sit empty and unlabelled**, because a blank block with an arbitrary inherited type is a formatting error the writer has to notice and undo later. They are listed together because they are one idea, but they need not ship together -- each is independently useful and several fit naturally into other slices.
+
+- **A second Enter opens an element menu rather than creating another empty block.** The first Enter creates a new element as it does today. If that element is still empty when Enter is pressed again, the editor offers the element types instead of stacking a second empty block, with single-key shortcuts so the choice costs no more than the keystroke it replaces. Pressing Enter again with the menu open closes it; the writer is never trapped in it.
+- **An element cannot be left empty.** Choosing a type for an empty block and pressing Enter re-opens the menu rather than creating a further empty block. The document therefore never accumulates blank blocks, which is also what keeps pagination honest: an empty block still occupies a line, so a stray one silently shifts every page after it.
+- **A line cannot begin with a space.** Indentation is a property of the element, defined by the character grid, and a leading space is either a mistake or an attempt to hand-indent something the format already positions. Rejecting it protects the grid the whole layout package depends on.
+- **Parentheticals own their parentheses.** Creating a parenthetical inserts `()` with the caret between them, and those characters cannot be deleted while the block remains a parenthetical. They are structural punctuation belonging to the element, not authored text -- which also means converting a parenthetical to another element must remove them rather than leaving them stranded in the text.
+
+The parenthetical rule is the one to be most careful with, because it is the only one that writes characters into the canonical model. The parentheses are authored text once stored, so they must round-trip, they must export, and the wrapping must not be applied a second time to a parenthetical that already has them -- including one arriving from FDX import, where the parentheses are already part of the text.
 
 The editor route is lazy-loaded behind the TanStack Router route tree. The documented bundle budget, enforced in CI as a build step that fails on regression, is:
 
@@ -565,6 +588,12 @@ The status bar carries the active scene, the word count, and the save state. Sav
 
 A **continuous scroll** toggle is offered for writers who prefer an unbroken column. It is view state, not document state, and it defaults to discrete pages.
 
+**Not yet true: discrete pages do not currently look separated.** They are drawn as a single `.page` element carrying a repeating gradient -- white for one page height, then the gap colour, repeating -- with one box shadow around the whole stack. The result reads as one long sheet with grey bands across it, not as individual pages, which is the specific thing this section says a writer should see. The owner reported it as such on 2026-08-22.
+
+The cause is a constraint worth preserving rather than a mistake: **the manuscript is one contiguous flow**, because selection, cursor movement, and undo have to work across a page boundary. Splitting it into a DOM element per page would break all three, so the gradient was the compromise that kept the flow intact.
+
+It is fixable without giving that up. A widget decoration already exists at every break and draws the spacer and the page number, so it can also draw the seam: the outgoing page's bottom edge and the incoming page's top edge, each with its own shadow, against a gap painted in the application background rather than a band of paper colour. That keeps a single flow, changes no break position, and is view state exactly as this section requires. Whatever approach is taken, the existing guarantee stands: the toggle and the page edges are presentation only, and `page-rendering-persistence.spec.ts` already asserts that a page frame never moves when content reflows around it.
+
 **The toggle changes presentation only. It never changes where pages break.** The layout package computes breaks from the canonical screenplay and the page format; both views render the same break positions. Page count is identical in either mode, and so is every rule below:
 
 - Space before is suppressed at the top of every page in both views. In continuous scroll this means the first element after a break still carries no leading blank line, even though no physical page edge is drawn there.
@@ -810,6 +839,18 @@ Public launch is gated on a workstream that runs alongside the feature phases ra
 - Terms of service, privacy policy, and a documented data-retention and account-deletion path.
 - Database backup and point-in-time-recovery verified by an actual restore rehearsal, not by the existence of a backup setting.
 - Dependency vulnerability and license review.
+
+### Importing untrusted files
+
+FDX import accepts a file a stranger can hand a writer, so it is the largest untrusted-input surface in the product and is held to rules that export is not. **Escaping and import hardening solve different problems and neither substitutes for the other**: escaping is output-side and stops our own authored text from breaking the XML we emit; the requirements below are input-side and stop a hostile file from doing anything at all.
+
+- **Disable external entity resolution and DTD processing.** An FDX file is XML, so an unhardened parser will resolve external entities: `file:///etc/passwd` read back into the document, or an entity pointing at an internal host turning the parser into a request forwarder against services that trust it. This is the single highest-severity risk in the feature. If import ever runs server-side, this is not optional; if it runs in the browser, `DOMParser` does not resolve external entities, but that is a property of the environment, not a decision that has been made, so it must be asserted in a test rather than assumed.
+- **Bound entity expansion, nesting depth, and input size before parsing.** A few kilobytes of nested entity definitions expand to gigabytes and take the process down. Reject the file on the limit rather than discovering it as an out-of-memory failure.
+- **Everything parsed is untrusted text, and the canonical schema is the boundary that makes it safe.** Parsed values are validated by `packages/screenplay` exactly as any other input, so an imported document cannot carry a field, a length, or a structure that authored content could not. Import must never bypass validation for fidelity.
+- **Imported text is never rendered as markup.** It reaches the writer through ProseMirror text nodes and, on the title page, through text content -- never `innerHTML`, and never a `content: attr()` path that a future change could turn into markup. The realistic stored-XSS vector here is an imported title or scene heading rendered somewhere that interprets it.
+- **Fail closed on anything unrepresentable**, exactly as the editor already refuses canonical features it cannot preserve. A partially-understood import that silently drops content is worse than a refusal, because the writer keeps working against a file they believe was imported faithfully.
+
+These are gates, not aspirations: an import slice is incomplete until each is covered by a test that fails when the protection is removed.
 
 ## Quality and security gates
 
