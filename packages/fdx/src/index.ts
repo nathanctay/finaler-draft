@@ -14,7 +14,7 @@ import {
   PAGE_NUMBER_TOP_IN,
   PAGE_WIDTH_IN,
 } from '@finaler-draft/screenplay/pageFormat';
-import { escapeFdxText } from './escape.js';
+import { escapeXmlText } from '@finaler-draft/xml-escape';
 
 /**
  * The page's nominal bottom margin in inches. `pageFormat` deliberately exports no
@@ -44,7 +44,7 @@ const NOMINAL_BOTTOM_MARGIN_IN = 1.0;
 const REFERENCE_FONT_SPEC =
   '<FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="12" Style=""/>';
 
-export { escapeFdxText } from './escape.js';
+export { escapeXmlText } from '@finaler-draft/xml-escape';
 
 /**
  * Serializes a canonical `Screenplay` (`packages/screenplay`) to a Final Draft `.fdx` document.
@@ -195,7 +195,7 @@ function bodyParagraph(
   const style = bodyParagraphStyleFor(type, documentSettings);
   const attrs = [`Alignment="${style.alignment}"`, `LeftIndent="${style.leftIn.toFixed(2)}"`];
   if (options.number !== undefined) {
-    attrs.push(`Number="${escapeFdxText(options.number)}"`);
+    attrs.push(`Number="${escapeXmlText(options.number)}"`);
   }
   if (options.startsNewPage === true) {
     attrs.push('StartsNewPage="Yes"');
@@ -207,7 +207,7 @@ function bodyParagraph(
     return `${openTag}/>\n`;
   }
   const styleAttr = style.allCaps ? ' Style="AllCaps"' : '';
-  return `${openTag}>\n      <Text${styleAttr}>${escapeFdxText(text)}</Text>\n    </Paragraph>\n`;
+  return `${openTag}>\n      <Text${styleAttr}>${escapeXmlText(text)}</Text>\n    </Paragraph>\n`;
 }
 
 type DialogueColumnBlock = DialogueColumn['blocks'][number];
@@ -514,7 +514,7 @@ function titlePageLineXml(line: TitlePageLine, id: string): string {
     line.styleTokens && line.styleTokens.length > 0 ? ` Style="${line.styleTokens.join('+')}"` : '';
   return (
     `${openTag}>\n` +
-    `        <Text Font="Courier Final Draft" Size="12"${styleAttr}>${escapeFdxText(line.text)}</Text>\n` +
+    `        <Text Font="Courier Final Draft" Size="12"${styleAttr}>${escapeXmlText(line.text)}</Text>\n` +
     `      </Paragraph>\n`
   );
 }
