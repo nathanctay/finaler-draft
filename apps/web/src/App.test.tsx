@@ -1129,6 +1129,49 @@ describe('DOCX download', () => {
   });
 });
 
+describe('PDF download', () => {
+  it('downloads the current screenplay as PDF from the File menu', async () => {
+    const objectUrl = 'blob:mock-pdf-url';
+    const createObjectURL = vi.fn().mockReturnValue(objectUrl);
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL });
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const appendSpy = vi.spyOn(document.body, 'appendChild');
+
+    const user = userEvent.setup();
+    render(
+      <App
+        initial={persistedScreenplay(
+          '9c7c5f7b-c2f0-47a0-a639-dfd0c5702b89',
+          'Downloadable Draft',
+          'INT. STAGE - DAY',
+        )}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Download PDF…' }));
+
+    // `triggerPdfDownload` is `async` (`screenplayToPdf` is -- see `@finaler-draft/pdf`'s
+    // `index.ts`), and the menu's `onSelect` handler does not await it (a synthetic click event
+    // has no way to await an async handler), so the object-URL/anchor/click sequence lands on a
+    // later microtask than `user.click` itself resolves -- `waitFor` is required here, unlike the
+    // synchronous FDX/DOCX equivalents above.
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+    const blobArgument = createObjectURL.mock.calls[0]?.[0] as Blob;
+    expect(blobArgument.type).toBe('application/pdf');
+    const anchorCall = appendSpy.mock.calls.find(([node]) => (node as HTMLElement).tagName === 'A');
+    expect((anchorCall?.[0] as HTMLAnchorElement).download).toBe('Downloadable Draft.pdf');
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith(objectUrl);
+
+    vi.unstubAllGlobals();
+    clickSpy.mockRestore();
+    appendSpy.mockRestore();
+  });
+});
+
 describe('document settings', () => {
   async function openDialog(user: ReturnType<typeof userEvent.setup>) {
     await user.click(screen.getByRole('button', { name: 'File menu' }));

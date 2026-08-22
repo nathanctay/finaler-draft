@@ -16,6 +16,7 @@
     "@finaler-draft/docx": "workspace:*",
     "@finaler-draft/fdx": "workspace:*",
     "@finaler-draft/layout": "workspace:*",
+    "@finaler-draft/pdf": "workspace:*",
     "@finaler-draft/screenplay": "workspace:*",
     "@tanstack/react-query": "5.87.4",
     "@tanstack/react-router": "1.131.37",

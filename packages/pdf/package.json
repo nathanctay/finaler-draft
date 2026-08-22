@@ -1,0 +1,27 @@
+{
+  "name": "@finaler-draft/pdf",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@finaler-draft/layout": "workspace:*",
+    "@finaler-draft/screenplay": "workspace:*",
+    "pdf-lib": "1.17.1"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "3.2.4",
+    "vitest": "3.2.4"
+  }
+}

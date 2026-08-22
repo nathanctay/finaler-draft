@@ -9,3 +9,4 @@ export type {
 } from './model.js';
 export { UnsupportedBlockError } from './model.js';
 export { paginateScreenplay } from './paginate.js';
+export { graphemeLength } from './wrap.js';

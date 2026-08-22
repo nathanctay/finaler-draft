@@ -47,6 +47,7 @@ import { DocumentSettingsDialog } from './documentSettingsDialog.js';
 import { OverflowMenu } from './components/OverflowMenu.js';
 import { triggerDocxDownload } from './docxDownload.js';
 import { triggerFdxDownload } from './fdxDownload.js';
+import { triggerPdfDownload } from './pdfDownload.js';
 
 type Panel = 'navigator' | 'inspector';
 
@@ -701,6 +702,24 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                 onSelect: () => {
                   if (projection.valid) {
                     triggerDocxDownload(projection.screenplay);
+                  }
+                },
+              },
+              {
+                // Same no-op-when-invalid reasoning as "Download FDX…" above. Unlike FDX/DOCX,
+                // `triggerPdfDownload` is `async` (`screenplayToPdf` is -- see `@finaler-draft/pdf`'s
+                // `index.ts`), so a rejection (most likely `@finaler-draft/pdf`'s WinAnsiEncoding
+                // limitation -- a character PDF's un-embedded standard Courier cannot render) must
+                // be caught here or it becomes an unhandled promise rejection. No user-facing error
+                // surface exists yet for an export failure; logged so it is at least visible during
+                // development, and flagged as a known limitation in progress/pdf-export.md rather
+                // than silently inventing one.
+                label: 'Download PDF…',
+                onSelect: () => {
+                  if (projection.valid) {
+                    triggerPdfDownload(projection.screenplay).catch((error: unknown) => {
+                      console.error('PDF export failed:', error);
+                    });
                   }
                 },
               },

@@ -56,7 +56,16 @@ const GRAPHEME_SEGMENTER = new Intl.Segmenter('en', { granularity: 'grapheme' })
  */
 const ASCII_PRINTABLE = /^[\x20-\x7E]*$/;
 
-function graphemeLength(text: string): number {
+/**
+ * Counts grapheme clusters -- character *cells* on the screenplay grid, which is what
+ * `pageFormat.ts` treats as normative, not code points and never a measured font advance.
+ *
+ * Exported because `packages/pdf` needs the identical count to position right-aligned and centred
+ * text, and a second implementation would be a second thing to keep in agreement. It would also
+ * either duplicate the ASCII fast path below or silently lose it, and that path exists for
+ * measured performance reasons (a 21x speedup on the pagination hot path), not tidiness.
+ */
+export function graphemeLength(text: string): number {
   if (ASCII_PRINTABLE.test(text)) {
     return text.length;
   }
