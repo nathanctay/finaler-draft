@@ -1648,3 +1648,97 @@ select:focus-visible,
 .dark .page {
   color: var(--dark-text-09);
 }
+
+/*
+ * Toast (components/Toast.tsx). Anchored bottom-right, clear of the status bar rather than inside
+ * it -- the bar has no room for a message that names a block and an element, and it hides
+ * `.status-center` entirely below 600px, which is exactly when a writer most needs to be told an
+ * export failed.
+ *
+ * Built from `.dialog`'s own vocabulary -- same `--border-03` hairline, same 4px radius, same
+ * `--surface-01` -- because those two are the product's only floating panels and should read as one
+ * system, not two. plan.md's design rules forbid "excessive floating shadows" and "generic
+ * component-library styling", so the elevation is a single restrained shadow rather than a stack,
+ * and the only ornament is a 3px accent edge in `--feedback-error`, the same functional accent the
+ * save-dot and the status-attention text already use. No pill, no icon badge, no gradient.
+ */
+.toast {
+  position: fixed;
+  right: 16px;
+  bottom: 52px;
+  z-index: 20;
+  display: flex;
+  width: min(360px, calc(100vw - 32px));
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid var(--border-03);
+  border-left: 3px solid var(--feedback-error);
+  border-radius: 4px;
+  background: var(--surface-01);
+  padding: 12px 12px 12px 14px;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 25%);
+  animation: toast-enter 140ms ease-out;
+}
+
+.toast-body {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.toast-title {
+  margin: 0;
+  color: var(--feedback-error);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.toast-message {
+  /* `overflow-wrap: anywhere` because the message embeds a block id -- an unbroken 36-character
+     run with no natural break point, which would otherwise push the panel past its own width. */
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-07);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.toast-dismiss {
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--text-09);
+  padding: 0 4px;
+  font-size: 14px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.toast-dismiss:hover,
+.toast-dismiss:focus-visible {
+  background: var(--surface-04);
+}
+
+@keyframes toast-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/*
+ * plan.md's accessibility list requires reduced-motion support. This is the product's first
+ * animation, so this is the first place it applies: the toast still appears, it simply does not
+ * travel to get there.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+  }
+}

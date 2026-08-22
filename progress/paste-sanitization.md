@@ -320,3 +320,90 @@ revert; full suites re-verified green after each.
 - Out of scope, unchanged, per the specification: the PDF/FDX/DOCX serialisers themselves, the
   export job infrastructure, import, any change to the canonical schema, and the separately
   reported page-boundary "grey stripe" rendering question.
+
+### 2026-08-22 — export failures surfaced, and the save-dot colour guarded (lead)
+
+Two additions the owner approved after testing the branch in a dev server, both closing silent
+failures rather than adding capability.
+
+**1. An export that fails is now visible.** The owner found this by testing paste with Cyrillic,
+Greek and emoji: all three paste cleanly, save cleanly, and export to FDX and DOCX cleanly, but
+`screenplayToPdf` rejects on them, because PDF's un-embedded standard Courier cannot encode outside
+its Latin-1-ish range. Confirmed directly: ASCII exports in 722 bytes; Cyrillic, Greek and emoji all
+throw.
+
+`disabled` does not and should not cover this. The screenplay is genuinely valid, so the menu item
+is genuinely enabled and the click genuinely runs — the rejection simply reached `console.error` and
+nowhere else, so the writer saw a button that did nothing. That is the same silent failure this
+scope exists to remove, arriving through a different door than paste.
+
+`App.tsx` now holds an `exportError` state rendered in the status-attention banner, outside
+`.status-center` for the same reason the not-saving banner and the conflict actions are: that
+container is hidden entirely under 600px, and a failed export is precisely when a writer needs
+telling. It is dismissible, unlike the not-saving banner, because it describes one completed attempt
+rather than a live state — nothing is at risk once it has been read.
+
+**Mutation-tested:** reverting the handler to `console.error` alone fails the new test by name.
+
+**2. The save-dot colour now has a guard, closing mutation 8's honest miss.** The implementation
+agent reported that deleting `.save-dot.attention` was caught by nothing, because jsdom does not
+load `styles.css` and the unit tests only prove the class is applied. That is exactly how the rule
+came to be missing in the first place, so leaving the gap open would invite the same defect back.
+
+`app-shell.spec.ts` now asserts the _resolved_ colours in a real browser: both classes must resolve
+to something (an unmatched class yields transparent, which is the state this shipped in and is
+indistinguishable from "no rule" if only inequality is checked) and they must differ. It
+deliberately does not drive an invalid document — paste sanitisation closed that route, and the
+property under test belongs to the stylesheet, not the projection.
+
+**Mutation-tested, with a trap worth recording:** deleting the rule and re-running the suite
+initially still passed, because Playwright serves the _built_ bundle and the CSS edit had not been
+rebuilt. This is the same staleness trap already documented for package `dist` in
+`progress/fdx-export.md`, and it applies to `apps/web`'s own stylesheet too: **rebuild before any
+browser-level mutation test, or the mutation will look uncaught when it is not.** After
+`pnpm --filter @finaler-draft/web build`, the test fails by name as it should.
+
+**The PDF encoding limitation is recorded in `plan.md`**, under the Exports section's typeface note,
+with the owner's ruling: it is fixed by embedding a face with the required coverage when export
+moves server-side, and **not** by restricting what a writer may type or paste — that would let the
+narrowest consumer dictate the canonical model. The note also flags that Courier Prime's own
+coverage must be verified against Cyrillic, Greek and emoji before it is assumed sufficient, since
+matching the editor's face and rendering a writer's characters are two different goals.
+
+### 2026-08-22 — the export error became a toast (lead)
+
+The owner tested the surfaced export error and reported the UI was wrong: it rendered into the
+status bar, which has nowhere near enough room. Correct — and it was the wrong home in kind, not
+just in size. The bar describes the document's _ongoing_ state (saving, word count, page count) and
+collapses to 30px below 600px; this message describes one _completed attempt that failed_, and it
+names the block and element a writer has to go and find.
+
+`apps/web/src/components/Toast.tsx` is the product's first toast, anchored bottom-right and clear of
+the status bar. Built from this product's own vocabulary rather than a component-library pattern,
+per plan.md's design rules: it reuses `.dialog`'s exact `--border-03` hairline, 4px radius and
+`--surface-01` -- the only other floating panel in the product, so the two read as one system seen
+twice -- with a 3px `--feedback-error` edge as the sole ornament, the same functional accent the
+save-dot and status-attention text already use. No pill, no icon badge, no gradient, and a single
+restrained shadow rather than a stack ("do not use ... excessive floating shadows, or generic
+component-library styling"; "do not adopt an unmodified Tailwind/shadcn visual language").
+
+Two details worth keeping:
+
+- **Errors do not auto-dismiss.** A message naming the thing a writer has to fix is not something to
+  remove on a timer. It stays until dismissed.
+- **This is the product's first animation**, so it is the first place plan.md's reduced-motion
+  requirement applies. `@media (prefers-reduced-motion: reduce)` removes the travel; the toast still
+  appears.
+
+`overflow-wrap: anywhere` on the message is deliberate: the error embeds a 36-character block id
+with no natural break point, which would otherwise push the panel past its own width.
+
+Verified by rendering it in a real browser and measuring: 360px wide, 16px from the right edge, and
+clear of the status bar. The now-dead `.status-attention-dismiss` rule from the previous entry was
+removed rather than left behind.
+
+**Known limitation, not fixed here.** The message a writer sees is `@finaler-draft/pdf`'s own, which
+leads with a function name and includes a block UUID -- precise, and useful in a bug report, but not
+writer-facing. Making it actionable for a writer (naming the offending characters rather than the
+block id) means changing the error text in `packages/pdf`, which is that package's decision to make,
+not this scope's. Flagged for the owner.

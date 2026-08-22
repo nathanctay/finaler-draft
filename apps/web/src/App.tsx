@@ -45,6 +45,7 @@ import {
 } from './titlePageState.js';
 import { DocumentSettingsDialog } from './documentSettingsDialog.js';
 import { OverflowMenu } from './components/OverflowMenu.js';
+import { Toast } from './components/Toast.js';
 import { triggerDocxDownload } from './docxDownload.js';
 import { triggerFdxDownload } from './fdxDownload.js';
 import { triggerPdfDownload } from './pdfDownload.js';
@@ -195,6 +196,15 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     valid: false,
   });
   const [saveState, setSaveState] = useState<'saved' | 'saving' | 'failed' | 'conflict'>('saved');
+
+  // An export that fails *after* the projection was valid -- today, only `@finaler-draft/pdf`
+  // rejecting on a character PDF's un-embedded standard Courier cannot encode (Cyrillic, Greek,
+  // emoji: all of which paste, save, and export to FDX and DOCX perfectly well). `disabled` does
+  // not cover this: the screenplay is genuinely valid, so the menu item is genuinely enabled, and
+  // the click genuinely runs. Without this the rejection reached `console.error` alone and the
+  // writer saw a click that did nothing -- the same silent failure this scope exists to remove,
+  // arriving through a different door.
+  const [exportError, setExportError] = useState<string>();
   // Feedback for the conflict state's "Copy my version" button (below). Not part of `saveState`:
   // it describes the clipboard action's own outcome, which can succeed or fail independently of
   // -- and without ever changing -- the save conflict it is trying to rescue the writer from.
@@ -740,8 +750,14 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                 label: 'Download PDF…',
                 onSelect: () => {
                   if (projection.valid) {
+                    setExportError(undefined);
                     triggerPdfDownload(projection.screenplay).catch((error: unknown) => {
                       console.error('PDF export failed:', error);
+                      setExportError(
+                        error instanceof Error
+                          ? error.message
+                          : 'PDF export failed for an unknown reason.',
+                      );
                     });
                   }
                 },
@@ -991,6 +1007,7 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
             Not saving · {projection.issues[0] ?? 'Invalid screenplay data.'}
           </span>
         )}
+
         {saveState === 'conflict' && (
           // Deliberately not inside `.status-center`, which the small-viewport media query hides
           // entirely (styles.css) -- these are the writer's only way to rescue or leave a
@@ -1024,6 +1041,18 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
           </span>
         )}
       </footer>
+      {exportError !== undefined && (
+        // A toast rather than a line in the status bar: this message names the block and element
+        // the writer has to go and fix, which the bar has no room for -- it already carries the
+        // save state, the word count and the page count, and collapses to 30px below 600px. It is
+        // also the wrong home for it in kind: the bar describes the document's ongoing state,
+        // while this describes one completed attempt that failed.
+        <Toast
+          message={exportError}
+          onDismiss={() => setExportError(undefined)}
+          title="Export failed"
+        />
+      )}
     </main>
   );
 }
