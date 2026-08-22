@@ -1051,6 +1051,119 @@ describe('title page editing', () => {
   });
 });
 
+/**
+ * Requirement 2, `progress/paste-sanitization.md`: an invalid projection can never again be
+ * silent. `ScreenplayPasteSanitizer` (screenplayEditor.ts) closes the paste route these tests
+ * used to reproduce this through, so this file's other invalid-projection test (`'surfaces
+ * unsupported and schema-invalid projections without dropping their nodes'`, above) reaches
+ * `projectLocalScreenplay` directly with a hand-built fake editor for exactly that reason -- there
+ * is no longer a real user action left that drives a live, rendered `<App>` into this state. These
+ * tests take the same approach one level up: a duplicate stable id planted directly in the
+ * `initial` screenplay the app loads (bypassing the paste path entirely, the same way a
+ * pre-this-fix save or a future bug elsewhere in the document pipeline could) reaches
+ * `safeParseScreenplay`'s real "Stable id ... must be globally unique" rejection the moment the
+ * editor mounts, which is what actually exercises the UI guards under test -- not a stub standing
+ * in for `projection`.
+ */
+describe('an invalid projection is never silent', () => {
+  const sharedBlockId = '00000000-0000-4000-8000-000000000501';
+
+  function duplicateIdScreenplay(id: string, title: string): PersistedScreenplay {
+    return {
+      id,
+      projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+      screenplay: {
+        annotations: [],
+        blocks: [
+          { id: sharedBlockId, type: 'scene_heading', text: 'INT. STAGE - DAY' },
+          { id: sharedBlockId, type: 'action', text: 'Two blocks, one identity.' },
+        ],
+        id,
+        schemaVersion: 1,
+        title,
+        titlePages: [],
+        documentSettings: DEFAULT_DOCUMENT_SETTINGS,
+      },
+      title,
+      version: 1,
+    };
+  }
+
+  it('renders an unmissable banner outside .status-center, which the narrow-viewport rule hides', async () => {
+    render(
+      <App
+        initial={duplicateIdScreenplay('9c7c5f7b-c2f0-47a0-a639-dfd0c5702b90', 'Broken Draft')}
+      />,
+    );
+
+    const banner = await screen.findByText(
+      `Not saving · Stable id ${sharedBlockId} must be globally unique within a screenplay.`,
+    );
+    expect(banner).toBeVisible();
+    expect(banner).toHaveAttribute('role', 'alert');
+    expect(banner.closest('.status-center')).toBeNull();
+  });
+
+  it('turns the save-dot next to the title red, not leaving the "attention" class unstyled', async () => {
+    const { container } = render(
+      <App
+        initial={duplicateIdScreenplay('9c7c5f7b-c2f0-47a0-a639-dfd0c5702b91', 'Broken Draft')}
+      />,
+    );
+
+    await screen.findByText(/Not saving/);
+    expect(container.querySelector('.save-dot')).toHaveClass('attention');
+  });
+
+  it('disables the export menu items with a reason instead of letting them silently no-op', async () => {
+    const user = userEvent.setup();
+    render(
+      <App
+        initial={duplicateIdScreenplay('9c7c5f7b-c2f0-47a0-a639-dfd0c5702b92', 'Broken Draft')}
+      />,
+    );
+    await screen.findByText(/Not saving/);
+
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    const fdxItem = screen.getByRole('menuitem', { name: 'Download FDX…' });
+    const docxItem = screen.getByRole('menuitem', { name: 'Download DOCX…' });
+    // The owner's literal report (progress/paste-sanitization.md): "Download PDF did nothing
+    // when clicked" on a document a paste had made invalid. This is that exact reproduction.
+    const pdfItem = screen.getByRole('menuitem', { name: 'Download PDF…' });
+    expect(fdxItem).toBeDisabled();
+    expect(docxItem).toBeDisabled();
+    expect(pdfItem).toBeDisabled();
+    const expectedReason = `Can't export: Stable id ${sharedBlockId} must be globally unique within a screenplay.`;
+    expect(fdxItem).toHaveAttribute('title', expectedReason);
+    expect(docxItem).toHaveAttribute('title', expectedReason);
+    expect(pdfItem).toHaveAttribute('title', expectedReason);
+
+    // A disabled `<button>` never dispatches `click` at all -- this confirms that, rather than
+    // trusting the `disabled` attribute's presence alone to mean nothing happens.
+    const createObjectURL = vi.fn();
+    vi.stubGlobal('URL', { ...URL, createObjectURL });
+    await user.click(fdxItem);
+    await user.click(docxItem);
+    await user.click(pdfItem);
+    expect(createObjectURL).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('never attempts a save while the projection is invalid', async () => {
+    const save = vi.spyOn(api, 'saveScreenplay');
+    render(
+      <App
+        initial={duplicateIdScreenplay('9c7c5f7b-c2f0-47a0-a639-dfd0c5702b93', 'Broken Draft')}
+      />,
+    );
+    await screen.findByText(/Not saving/);
+
+    await new Promise((resolve) => window.setTimeout(resolve, 700));
+    expect(save).not.toHaveBeenCalled();
+    save.mockRestore();
+  });
+});
+
 describe('FDX download', () => {
   it('downloads the current screenplay as FDX from the File menu', async () => {
     const objectUrl = 'blob:mock-fdx-url';

@@ -1,6 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 
 export interface OverflowMenuItem {
+  /**
+   * A disabled item renders as a real, native-`disabled` `<button>` rather than an enabled-looking
+   * one whose `onSelect` quietly declines to do anything -- see `progress/paste-sanitization.md`
+   * requirement 2. A disabled control reads unambiguously as "unavailable"; a click that no-ops
+   * reads as a broken build, which is exactly the defect this exists to stop. `disabledReason` is
+   * meant to be supplied whenever `disabled` is true -- it is surfaced as the button's `title` (a
+   * plain tooltip is enough here -- this is the same "say why" bar the export items already have
+   * to clear, not a new interaction pattern).
+   */
+  disabled?: boolean;
+  disabledReason?: string | undefined;
   label: string;
   onSelect: () => void;
 }
@@ -99,12 +110,15 @@ export function OverflowMenu({
         >
           {items.map((item) => (
             <button
+              aria-disabled={item.disabled}
+              disabled={item.disabled}
               key={item.label}
               onClick={() => {
                 setOpen(false);
                 item.onSelect();
               }}
               role="menuitem"
+              title={item.disabled ? item.disabledReason : undefined}
               type="button"
             >
               {item.label}
