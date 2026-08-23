@@ -297,3 +297,74 @@ test.describe('page rendering: wrap agreement (requirement 5)', () => {
     expect(result.character39.overflowsPage).toBe(false);
   });
 });
+
+/**
+ * The page-separation seam (`plan.md`'s "Page presentation": "Discrete separated pages are the
+ * default ... in the manner of Microsoft Word"). It is drawn entirely in CSS, and it shipped with
+ * no automated coverage at all -- exactly the shape of gap that let `.save-dot.attention` sit with
+ * no rule for months while the class was applied and nobody noticed.
+ *
+ * These assert the two structural properties the seam's appearance actually depends on, both of
+ * which were verified by mutation to break it visibly:
+ *
+ *  - the mask clips (`overflow: hidden`). Without it the caster's far edge escapes and paints a
+ *    stray shadow line ~40px inside the page content on both sides.
+ *  - the caster is tall relative to the blur radius. A box near the height of the boundary line is
+ *    a blurred *point* source rather than a blurred *edge*, and renders a visibly flatter falloff
+ *    than `.page`'s own shadow no matter what box-shadow value it is given. That was the first
+ *    attempt at this feature and the reason it needed a second iteration.
+ *
+ * Computed styles rather than pixels: this catches both regressions deterministically, without a
+ * screenshot baseline that would have to be regenerated on every unrelated visual change.
+ */
+test('the page-separation seam clips its mask and keeps a caster taller than the shadow blur', async ({
+  page,
+}) => {
+  const measured = await page.evaluate(() => {
+    const body = document.createElement('div');
+    body.className = 'script-body';
+    const spacer = document.createElement('div');
+    spacer.className = 'page-break-spacer';
+    spacer.style.height = '2in';
+
+    // The exact structure buildPageBreakWidget builds (pagination.ts).
+    const edge = document.createElement('div');
+    edge.className = 'page-break-edge page-break-edge-outgoing';
+    edge.style.setProperty('--fd-page-break-edge-top', '1in');
+    const caster = document.createElement('div');
+    caster.className = 'page-break-edge-caster';
+    edge.appendChild(caster);
+    spacer.appendChild(edge);
+    body.appendChild(spacer);
+    document.body.appendChild(body);
+
+    const edgeStyle = window.getComputedStyle(edge);
+    const casterStyle = window.getComputedStyle(caster);
+    const result = {
+      casterHeightPx: Number.parseFloat(casterStyle.height),
+      casterShadow: casterStyle.boxShadow,
+      maskHeightPx: Number.parseFloat(edgeStyle.height),
+      overflow: edgeStyle.overflow,
+    };
+    body.remove();
+    return result;
+  });
+
+  // The mask must clip, or the caster's far edge paints inside the page.
+  expect(measured.overflow).toBe('hidden');
+
+  // The caster must cast a shadow at all, and be far taller than that shadow's blur radius. The
+  // blur is read back out of the computed shadow rather than restated here, so this stays true if
+  // the shadow value is ever retuned.
+  expect(measured.casterShadow).not.toBe('none');
+  const blurPx = Number.parseFloat(
+    /(-?\d+(?:\.\d+)?)px\s+(-?\d+(?:\.\d+)?)px\s+(\d+(?:\.\d+)?)px/.exec(
+      measured.casterShadow,
+    )?.[3] ?? '0',
+  );
+  expect(blurPx).toBeGreaterThan(0);
+  expect(measured.casterHeightPx).toBeGreaterThan(blurPx * 4);
+
+  // The visible strip must comfortably contain that falloff, or the shadow is cut off mid-fade.
+  expect(measured.maskHeightPx).toBeGreaterThan(blurPx);
+});
