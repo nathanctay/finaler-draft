@@ -263,20 +263,24 @@ test('pasting content copied from this editor back into the same document regene
   const html = await copiedHtml;
   expect(html).toContain('MARA enters the room.');
   expect(html).toContain('CUT TO:');
-  await page.evaluate(async (clipboardHtml) => {
-    const item = new ClipboardItem({
-      'text/html': new Blob([clipboardHtml], { type: 'text/html' }),
-    });
-    await navigator.clipboard.write([item]);
-  }, html);
-
-  // Collapses the still-active select-all to its end, purely by keyboard -- deliberately not a
-  // mouse `.click()` back into the canvas, which reintroduced exactly the kind of flakiness the
-  // clipboard fix above was meant to remove (native click-to-place-a-caret racing ProseMirror's
-  // own selection sync in a way `Ctrl+A`'s own selection never has to, since it never leaves the
-  // keyboard). The caret ends up where it already was after typing "CUT TO:" -- the end of the
-  // last block -- which is what the paste below is testing against.
-  await page.keyboard.press('ArrowRight');
+  // Reload before pasting, instead of collapsing the still-active select-all in place.
+  //
+  // That collapse is what made this test flaky for its whole life, and the cause is subtler than
+  // it looks. ProseMirror keeps its own selection in editor state and syncs it from the DOM
+  // asynchronously, on `selectionchange`. So after `ArrowRight` the *DOM* selection is already a
+  // collapsed caret while ProseMirror's state can still hold the `AllSelection` -- and a paste
+  // inside that window replaces the whole document with a copy of itself. That produces the same
+  // block count with every id regenerated, which reads exactly like "the paste never happened",
+  // while a save still fires because new ids are a genuine change. Captured from a failing run:
+  // four blocks before, four after, all four ids different, DOM selection collapsed throughout.
+  //
+  // Waiting on `window.getSelection().isCollapsed` cannot fix this -- that is the very signal
+  // that lies. Reloading removes the question: the editor remounts with fresh state and no
+  // selection to inherit, so no stale `AllSelection` can exist. The screenplay was already saved
+  // above, so this reloads the same persisted document.
+  await page.reload();
+  await expect(canvas).toBeVisible();
+  await expect(canvas.getByText('MARA enters the room.')).toHaveCount(1);
 
   const savedAfterPaste = page.waitForResponse(
     (response) =>
@@ -284,7 +288,21 @@ test('pasting content copied from this editor back into the same document regene
       response.url().includes('/api/screenplays/') &&
       response.status() === 200,
   );
-  await page.keyboard.press('ControlOrMeta+KeyV');
+
+  // Dispatched directly rather than written to the OS clipboard and pressed Ctrl+V. `html` above
+  // is what a real copy really produced, and a dispatched `paste` event still runs ProseMirror's
+  // own `parseFromClipboard` and `transformPasted`, including `ScreenplayPasteSanitizer` -- which
+  // is the thing under test. What it removes is the OS pasteboard, which is not this product's
+  // code and whose asynchrony was a second, independent source of flakiness here.
+  await page.evaluate((clipboardHtml) => {
+    const editorDom = document.querySelector('.ProseMirror');
+    if (!editorDom) throw new Error('No ProseMirror editor found to paste into.');
+    const transfer = new DataTransfer();
+    transfer.setData('text/html', clipboardHtml);
+    editorDom.dispatchEvent(
+      new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: transfer }),
+    );
+  }, html);
   await savedAfterPaste;
 
   await expect(page.getByText(/^Saved · validated locally/)).toBeVisible();
