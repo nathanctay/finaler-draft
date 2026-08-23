@@ -27,11 +27,20 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     await runMigrations();
     await runMigrations();
 
-    const authentication = createAuth({
-      DATABASE_URL: databaseUrl!,
-      BETTER_AUTH_SECRET: 'integration-test-secret-with-at-least-thirty-two-characters',
-      BETTER_AUTH_URL: 'http://127.0.0.1:3001',
-    });
+    const authentication = createAuth(
+      {
+        DATABASE_URL: databaseUrl!,
+        BETTER_AUTH_SECRET: 'integration-test-secret-with-at-least-thirty-two-characters',
+        BETTER_AUTH_URL: 'http://127.0.0.1:3001',
+      },
+      // This fixture pool signs up and signs in dozens of unrelated users across this file's
+      // tests, all from the loopback address `.inject()` uses, and has nothing to do with
+      // proving the built-in auth rate limiter works -- that is `createAuth`'s own real,
+      // enabled-by-default behavior, exercised by its own dedicated instance below instead
+      // (see "rate-limits repeated sign-in attempts"). Disabled here explicitly, out loud, at
+      // this call site, rather than the real default being loosened to accommodate this suite.
+      { rateLimitEnabled: false },
+    );
     pool = authentication.pool;
     store = createPostgresProjectStore(pool);
     app = await buildApp({
@@ -45,6 +54,13 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
         trustedOrigins: [...authentication.trustedOrigins, 'https://app.example.test'],
       },
       projects: store,
+      // This single app instance is reused by every test in this file (over a hundred
+      // `.inject()` calls total), a far higher request volume in one window than any real
+      // client would ever produce -- not the traffic pattern the global cap defends against.
+      // Raised explicitly here, out loud, rather than sizing the real default
+      // (`@finaler-draft/server-config`'s `DEFAULT_API_RATE_LIMIT_MAX`) to fit this suite. The
+      // cap itself is proven separately, on its own dedicated app instance, in app.test.ts.
+      rateLimit: { max: 100_000, timeWindowMs: 60_000 },
     });
   }, 30_000);
 
@@ -102,21 +118,21 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const session = await app!.inject({
       method: 'GET',
       url: '/api/auth/get-session',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(session.statusCode).toBe(200);
 
     const signedOut = await app!.inject({
       method: 'POST',
       url: '/api/auth/sign-out',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(signedOut.statusCode).toBe(200);
     const ownerSession = await signIn('owner@example.test');
     const project = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: ownerSession },
+      headers: { cookie: ownerSession, origin: 'https://app.example.test' },
       payload: { title: 'Private project' },
     });
     expect(project.statusCode).toBe(201);
@@ -125,7 +141,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const screenplay = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/screenplays`,
-      headers: { cookie: ownerSession },
+      headers: { cookie: ownerSession, origin: 'https://app.example.test' },
       payload: { title: 'Private script', screenplay: screenplayFixture },
     });
     expect(screenplay.statusCode).toBe(201);
@@ -134,7 +150,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const loadedByOwner = await app!.inject({
       method: 'GET',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: ownerSession },
+      headers: { cookie: ownerSession, origin: 'https://app.example.test' },
     });
     expect(loadedByOwner.statusCode).toBe(200);
     expect(loadedByOwner.json()).toMatchObject({
@@ -146,7 +162,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const invalidIdentity = await app!.inject({
       method: 'PUT',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: ownerSession },
+      headers: { cookie: ownerSession, origin: 'https://app.example.test' },
       payload: {
         expectedVersion: 1,
         screenplay: { ...ownerScreenplay, id: randomUUID() },
@@ -161,26 +177,26 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const deniedCreate = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/screenplays`,
-      headers: { cookie: other.cookie },
+      headers: { cookie: other.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Unauthorized', screenplay: screenplayFixture },
     });
     expect(deniedCreate.statusCode).toBe(403);
     const deniedRead = await app!.inject({
       method: 'GET',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: other.cookie },
+      headers: { cookie: other.cookie, origin: 'https://app.example.test' },
     });
     const unknownRead = await app!.inject({
       method: 'GET',
       url: `/api/screenplays/${randomUUID()}`,
-      headers: { cookie: other.cookie },
+      headers: { cookie: other.cookie, origin: 'https://app.example.test' },
     });
     expect(deniedRead.statusCode).toBe(404);
     expect(deniedRead.json()).toEqual(unknownRead.json());
     const deniedUpdate = await app!.inject({
       method: 'PUT',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: other.cookie },
+      headers: { cookie: other.cookie, origin: 'https://app.example.test' },
       payload: { expectedVersion: 1, screenplay: screenplayFixture },
     });
     expect(deniedUpdate.statusCode).toBe(404);
@@ -188,7 +204,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const saved = await app!.inject({
       method: 'PUT',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: ownerSession },
+      headers: { cookie: ownerSession, origin: 'https://app.example.test' },
       payload: { expectedVersion: 1, screenplay: ownerScreenplay },
     });
     expect(saved.statusCode).toBe(200);
@@ -271,7 +287,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const project = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Original Title' },
     });
     expect(project.statusCode).toBe(201);
@@ -280,7 +296,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const screenplay = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Draft', screenplay: screenplayFixture },
     });
     expect(screenplay.statusCode).toBe(201);
@@ -289,7 +305,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const renamed = await app!.inject({
       method: 'PATCH',
       url: `/api/projects/${projectId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Renamed Project' },
     });
     expect(renamed.statusCode).toBe(200);
@@ -298,7 +314,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const listedAfterRename = await app!.inject({
       method: 'GET',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(listedAfterRename.json<Array<{ id: string; title: string }>>()).toContainEqual(
       expect.objectContaining({ id: projectId, title: 'Renamed Project' }),
@@ -307,7 +323,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const deleted = await app!.inject({
       method: 'DELETE',
       url: `/api/projects/${projectId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(deleted.statusCode).toBe(200);
     expect(deleted.json()).toEqual({ id: projectId });
@@ -317,7 +333,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const listedAfterDelete = await app!.inject({
       method: 'GET',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(listedAfterDelete.json<Array<{ id: string }>>()).not.toContainEqual(
       expect.objectContaining({ id: projectId }),
@@ -325,20 +341,20 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const screenplaysAfterDelete = await app!.inject({
       method: 'GET',
       url: `/api/projects/${projectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(screenplaysAfterDelete.json()).toEqual([]);
     const screenplayAfterDelete = await app!.inject({
       method: 'GET',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(screenplayAfterDelete.statusCode).toBe(404);
 
     const restored = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/restore`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(restored.statusCode).toBe(200);
     expect(restored.json()).toEqual({ id: projectId, title: 'Renamed Project' });
@@ -346,7 +362,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const listedAfterRestore = await app!.inject({
       method: 'GET',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(listedAfterRestore.json<Array<{ id: string }>>()).toContainEqual(
       expect.objectContaining({ id: projectId }),
@@ -354,7 +370,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const screenplayAfterRestore = await app!.inject({
       method: 'GET',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(screenplayAfterRestore.statusCode).toBe(200);
   });
@@ -364,14 +380,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const project = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Project' },
     });
     const projectId = project.json<{ id: string }>().id;
     const screenplay = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Draft', screenplay: screenplayFixture },
     });
     const screenplayId = screenplay.json<{ id: string }>().id;
@@ -381,14 +397,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const beforeDelete = await app!.inject({
       method: 'GET',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(beforeDelete.statusCode).toBe(200);
 
     const renamedRow = await app!.inject({
       method: 'PATCH',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Renamed Draft' },
     });
     expect(renamedRow.statusCode).toBe(200);
@@ -396,7 +412,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const afterRowRename = await app!.inject({
       method: 'GET',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     // Renaming the row must not touch the canonical document's own `title` field: the two are
     // deliberately independent fields (see the comment in projects.ts). The row title changed;
@@ -409,7 +425,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const deleted = await app!.inject({
       method: 'DELETE',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(deleted.statusCode).toBe(200);
     expect(deleted.json()).toEqual({ id: screenplayId });
@@ -417,7 +433,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const afterDelete = await app!.inject({
       method: 'GET',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(afterDelete.statusCode).toBe(404);
 
@@ -427,7 +443,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const saveAfterDelete = await app!.inject({
       method: 'PUT',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { expectedVersion: 1, screenplay: screenplayFor(screenplayId) },
     });
     expect(saveAfterDelete.statusCode).toBe(404);
@@ -450,14 +466,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const reviewerRestore = await app!.inject({
       method: 'POST',
       url: `/api/screenplays/${screenplayId}/restore`,
-      headers: { cookie: reviewer.cookie },
+      headers: { cookie: reviewer.cookie, origin: 'https://app.example.test' },
     });
     expect(reviewerRestore.statusCode).toBe(403);
 
     const editorRestore = await app!.inject({
       method: 'POST',
       url: `/api/screenplays/${screenplayId}/restore`,
-      headers: { cookie: editor.cookie },
+      headers: { cookie: editor.cookie, origin: 'https://app.example.test' },
     });
     expect(editorRestore.statusCode).toBe(200);
     expect(editorRestore.json()).toEqual({ id: screenplayId, title: 'Renamed Draft' });
@@ -465,7 +481,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const afterRestore = await app!.inject({
       method: 'GET',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(afterRestore.statusCode).toBe(200);
   });
@@ -475,14 +491,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const project = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Cascade project' },
     });
     const projectId = project.json<{ id: string }>().id;
     const screenplay = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Independently deleted', screenplay: screenplayFixture },
     });
     const screenplayId = screenplay.json<{ id: string }>().id;
@@ -491,7 +507,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const deletedScreenplay = await app!.inject({
       method: 'DELETE',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(deletedScreenplay.statusCode).toBe(200);
 
@@ -499,7 +515,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const deletedProject = await app!.inject({
       method: 'DELETE',
       url: `/api/projects/${projectId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(deletedProject.statusCode).toBe(200);
 
@@ -508,14 +524,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const restoreWhileProjectDeleted = await app!.inject({
       method: 'POST',
       url: `/api/screenplays/${screenplayId}/restore`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(restoreWhileProjectDeleted.statusCode).toBe(404);
 
     const restoredProject = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/restore`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(restoredProject.statusCode).toBe(200);
 
@@ -525,13 +541,13 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const screenplaysAfterProjectRestore = await app!.inject({
       method: 'GET',
       url: `/api/projects/${projectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(screenplaysAfterProjectRestore.json()).toEqual([]);
     const screenplayAfterProjectRestore = await app!.inject({
       method: 'GET',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(screenplayAfterProjectRestore.statusCode).toBe(404);
 
@@ -539,13 +555,13 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const screenplayRestore = await app!.inject({
       method: 'POST',
       url: `/api/screenplays/${screenplayId}/restore`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(screenplayRestore.statusCode).toBe(200);
     const screenplayAfterOwnRestore = await app!.inject({
       method: 'GET',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(screenplayAfterOwnRestore.statusCode).toBe(200);
   });
@@ -555,14 +571,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const project = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Active project' },
     });
     const projectId = project.json<{ id: string }>().id;
     const screenplay = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Active screenplay', screenplay: screenplayFixture },
     });
     const screenplayId = screenplay.json<{ id: string }>().id;
@@ -570,14 +586,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const projectRestore = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/restore`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(projectRestore.statusCode).toBe(404);
 
     const screenplayRestore = await app!.inject({
       method: 'POST',
       url: `/api/screenplays/${screenplayId}/restore`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(screenplayRestore.statusCode).toBe(404);
   });
@@ -589,7 +605,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const project = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Owner-only project' },
     });
     const projectId = project.json<{ id: string }>().id;
@@ -600,7 +616,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const screenplay = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Draft', screenplay: screenplayFixture },
     });
     const screenplayId = screenplay.json<{ id: string }>().id;
@@ -608,21 +624,21 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const editorDeletesProject = await app!.inject({
       method: 'DELETE',
       url: `/api/projects/${projectId}`,
-      headers: { cookie: editor.cookie },
+      headers: { cookie: editor.cookie, origin: 'https://app.example.test' },
     });
     expect(editorDeletesProject.statusCode).toBe(403);
 
     const editorDeletesScreenplay = await app!.inject({
       method: 'DELETE',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: editor.cookie },
+      headers: { cookie: editor.cookie, origin: 'https://app.example.test' },
     });
     expect(editorDeletesScreenplay.statusCode).toBe(200);
 
     const ownerDeletesProject = await app!.inject({
       method: 'DELETE',
       url: `/api/projects/${projectId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(ownerDeletesProject.statusCode).toBe(200);
   });
@@ -633,14 +649,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const keptProject = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Kept project' },
     });
     const keptProjectId = keptProject.json<{ id: string }>().id;
     const deletedProject = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Deleted project' },
     });
     const deletedProjectId = deletedProject.json<{ id: string }>().id;
@@ -651,7 +667,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const orphanedScreenplay = await app!.inject({
       method: 'POST',
       url: `/api/projects/${deletedProjectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Orphaned by project delete', screenplay: screenplayFixture },
     });
     const orphanedScreenplayId = orphanedScreenplay.json<{ id: string }>().id;
@@ -659,14 +675,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const keptScreenplay = await app!.inject({
       method: 'POST',
       url: `/api/projects/${keptProjectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Kept screenplay', screenplay: screenplayFixture },
     });
     const keptScreenplayId = keptScreenplay.json<{ id: string }>().id;
     const deletedScreenplay = await app!.inject({
       method: 'POST',
       url: `/api/projects/${keptProjectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Deleted screenplay', screenplay: screenplayFixture },
     });
     const deletedScreenplayId = deletedScreenplay.json<{ id: string }>().id;
@@ -674,7 +690,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const listedBeforeAnyDelete = await app!.inject({
       method: 'GET',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(listedBeforeAnyDelete.json<Array<{ id: string }>>().map((p) => p.id)).toEqual(
       expect.arrayContaining([keptProjectId, deletedProjectId]),
@@ -682,7 +698,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const listedScreenplaysBeforeAnyDelete = await app!.inject({
       method: 'GET',
       url: `/api/projects/${keptProjectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(listedScreenplaysBeforeAnyDelete.json<Array<{ id: string }>>().map((s) => s.id)).toEqual(
       expect.arrayContaining([keptScreenplayId, deletedScreenplayId]),
@@ -691,16 +707,20 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     await app!.inject({
       method: 'DELETE',
       url: `/api/projects/${deletedProjectId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     await app!.inject({
       method: 'DELETE',
       url: `/api/screenplays/${deletedScreenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
 
     const projectIds = (
-      await app!.inject({ method: 'GET', url: '/api/projects', headers: { cookie: owner.cookie } })
+      await app!.inject({
+        method: 'GET',
+        url: '/api/projects',
+        headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
+      })
     )
       .json<Array<{ id: string }>>()
       .map((p) => p.id);
@@ -711,7 +731,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       await app!.inject({
         method: 'GET',
         url: `/api/projects/${keptProjectId}/screenplays`,
-        headers: { cookie: owner.cookie },
+        headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       })
     )
       .json<Array<{ id: string }>>()
@@ -725,7 +745,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       await app!.inject({
         method: 'GET',
         url: `/api/projects/${deletedProjectId}/screenplays`,
-        headers: { cookie: owner.cookie },
+        headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       })
     )
       .json<Array<{ id: string }>>()
@@ -743,14 +763,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const project = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Direct get project' },
     });
     const projectId = project.json<{ id: string }>().id;
     const screenplay = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Direct get screenplay', screenplay: screenplayFixture },
     });
     const screenplayId = screenplay.json<{ id: string }>().id;
@@ -758,7 +778,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const before = await app!.inject({
       method: 'GET',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(before.statusCode).toBe(200);
 
@@ -766,14 +786,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const projectDelete = await app!.inject({
       method: 'DELETE',
       url: `/api/projects/${projectId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(projectDelete.statusCode).toBe(200);
 
     const after = await app!.inject({
       method: 'GET',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(after.statusCode).toBe(404);
 
@@ -792,7 +812,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const project = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Matrix project' },
     });
     const projectId = project.json<{ id: string }>().id;
@@ -805,14 +825,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const strangerRename = await app!.inject({
       method: 'PATCH',
       url: `/api/projects/${projectId}`,
-      headers: { cookie: stranger.cookie },
+      headers: { cookie: stranger.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Stolen' },
     });
     expect(strangerRename.statusCode).toBe(404);
     const strangerDelete = await app!.inject({
       method: 'DELETE',
       url: `/api/projects/${projectId}`,
-      headers: { cookie: stranger.cookie },
+      headers: { cookie: stranger.cookie, origin: 'https://app.example.test' },
     });
     expect(strangerDelete.statusCode).toBe(404);
 
@@ -821,21 +841,21 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const editorRename = await app!.inject({
       method: 'PATCH',
       url: `/api/projects/${projectId}`,
-      headers: { cookie: editor.cookie },
+      headers: { cookie: editor.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Renamed by editor' },
     });
     expect(editorRename.statusCode).toBe(200);
     const editorDelete = await app!.inject({
       method: 'DELETE',
       url: `/api/projects/${projectId}`,
-      headers: { cookie: editor.cookie },
+      headers: { cookie: editor.cookie, origin: 'https://app.example.test' },
     });
     expect(editorDelete.statusCode).toBe(403);
 
     const ownerDelete = await app!.inject({
       method: 'DELETE',
       url: `/api/projects/${projectId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(ownerDelete.statusCode).toBe(200);
 
@@ -844,19 +864,19 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const strangerRestore = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/restore`,
-      headers: { cookie: stranger.cookie },
+      headers: { cookie: stranger.cookie, origin: 'https://app.example.test' },
     });
     expect(strangerRestore.statusCode).toBe(404);
     const editorRestore = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/restore`,
-      headers: { cookie: editor.cookie },
+      headers: { cookie: editor.cookie, origin: 'https://app.example.test' },
     });
     expect(editorRestore.statusCode).toBe(403);
     const ownerRestore = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/restore`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(ownerRestore.statusCode).toBe(200);
   });
@@ -867,14 +887,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const project = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Stranger project' },
     });
     const projectId = project.json<{ id: string }>().id;
     const screenplay = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Stranger screenplay', screenplay: screenplayFixture },
     });
     const screenplayId = screenplay.json<{ id: string }>().id;
@@ -882,14 +902,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const strangerRename = await app!.inject({
       method: 'PATCH',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: stranger.cookie },
+      headers: { cookie: stranger.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Stolen' },
     });
     expect(strangerRename.statusCode).toBe(404);
     const strangerDelete = await app!.inject({
       method: 'DELETE',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: stranger.cookie },
+      headers: { cookie: stranger.cookie, origin: 'https://app.example.test' },
     });
     expect(strangerDelete.statusCode).toBe(404);
   });
@@ -899,21 +919,21 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const project = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Soon deleted' },
     });
     const projectId = project.json<{ id: string }>().id;
     const deleted = await app!.inject({
       method: 'DELETE',
       url: `/api/projects/${projectId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(deleted.statusCode).toBe(200);
 
     const createAttempt = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Should not exist', screenplay: screenplayFixture },
     });
     expect(createAttempt.statusCode).toBe(403);
@@ -929,7 +949,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const project = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Restorable project' },
     });
     const projectId = project.json<{ id: string }>().id;
@@ -940,7 +960,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const screenplay = await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Restorable screenplay', screenplay: screenplayFixture },
     });
     const screenplayId = screenplay.json<{ id: string }>().id;
@@ -951,26 +971,26 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const cascadeProject = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Cascade project' },
     });
     const cascadeProjectId = cascadeProject.json<{ id: string }>().id;
     const cascadeScreenplay = await app!.inject({
       method: 'POST',
       url: `/api/projects/${cascadeProjectId}/screenplays`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Independently deleted then orphaned', screenplay: screenplayFixture },
     });
     const cascadeScreenplayId = cascadeScreenplay.json<{ id: string }>().id;
     await app!.inject({
       method: 'DELETE',
       url: `/api/screenplays/${cascadeScreenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     await app!.inject({
       method: 'DELETE',
       url: `/api/projects/${cascadeProjectId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
 
     // Delete the screenplay before the project, exactly as with the cascade case above: once a
@@ -981,13 +1001,13 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const independentDelete = await app!.inject({
       method: 'DELETE',
       url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(independentDelete.statusCode).toBe(200);
     await app!.inject({
       method: 'DELETE',
       url: `/api/projects/${projectId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
 
     // `screenplayId` is now independently deleted under a project that is itself also deleted --
@@ -997,7 +1017,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const ownerListed = await app!.inject({
       method: 'GET',
       url: '/api/deleted',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(ownerListed.statusCode).toBe(200);
     const ownerBody = ownerListed.json<{
@@ -1019,12 +1039,12 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     await app!.inject({
       method: 'POST',
       url: `/api/projects/${projectId}/restore`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     const afterProjectRestore = await app!.inject({
       method: 'GET',
       url: '/api/deleted',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     const afterRestoreBody = afterProjectRestore.json<{
       projects: Array<{ id: string }>;
@@ -1049,7 +1069,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const editorListedBeforeRestore = await app!.inject({
       method: 'GET',
       url: '/api/deleted',
-      headers: { cookie: editor.cookie },
+      headers: { cookie: editor.cookie, origin: 'https://app.example.test' },
     });
     const editorBodyBeforeRestore = editorListedBeforeRestore.json<{
       projects: unknown[];
@@ -1063,7 +1083,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const screenplayRestore = await app!.inject({
       method: 'POST',
       url: `/api/screenplays/${screenplayId}/restore`,
-      headers: { cookie: editor.cookie },
+      headers: { cookie: editor.cookie, origin: 'https://app.example.test' },
     });
     expect(screenplayRestore.statusCode).toBe(200);
 
@@ -1072,14 +1092,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const editorListedAfterRestore = await app!.inject({
       method: 'GET',
       url: '/api/deleted',
-      headers: { cookie: editor.cookie },
+      headers: { cookie: editor.cookie, origin: 'https://app.example.test' },
     });
     expect(editorListedAfterRestore.json<{ projects: unknown[] }>().projects).toEqual([]);
 
     const reviewerListed = await app!.inject({
       method: 'GET',
       url: '/api/deleted',
-      headers: { cookie: reviewer.cookie },
+      headers: { cookie: reviewer.cookie, origin: 'https://app.example.test' },
     });
     expect(reviewerListed.json()).toEqual({ projects: [], screenplays: [] });
   });
@@ -1089,14 +1109,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const project = await app!.inject({
       method: 'POST',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
       payload: { title: 'CSRF project' },
     });
     const projectId = project.json<{ id: string }>().id;
     const deleted = await app!.inject({
       method: 'DELETE',
       url: `/api/projects/${projectId}`,
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(deleted.statusCode).toBe(200);
 
@@ -1115,7 +1135,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     const stillDeleted = await app!.inject({
       method: 'GET',
       url: '/api/projects',
-      headers: { cookie: owner.cookie },
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(stillDeleted.json<Array<{ id: string }>>()).not.toContainEqual(
       expect.objectContaining({ id: projectId }),
@@ -1131,6 +1151,81 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       },
     });
     expect(legitimateRestore.statusCode).toBe(200);
+  });
+
+  // Every other test in this file adds `origin` to its request headers so writes are accepted
+  // under the tightened guard (see app.ts's `isTrustedOrigin`) -- this is the deliberate
+  // exception, proving the other half of that guard with a real session cookie: a safe method
+  // (GET) still succeeds with no `Origin` header at all, because real browsers do not attach one
+  // to an ordinary same-origin read. This is the exact scenario behind the owner's report that
+  // his projects page loaded correctly on an unfamiliar port -- if this regressed to requiring
+  // `Origin` on reads too, the whole signed-in workspace would 403 on first load.
+  it('accepts a GET request with a real session but no Origin header, since browsers do not attach one to ordinary same-origin reads', async () => {
+    const reader = await signUp('safe-method-owner@example.test');
+    const noOriginRead = await app!.inject({
+      method: 'GET',
+      url: '/api/projects',
+      headers: { cookie: reader.cookie },
+    });
+    expect(noOriginRead.statusCode).toBe(200);
+  });
+
+  it('rejects a state-changing request with a real session but no Origin header, since a real browser always attaches one to a same-origin write', async () => {
+    const writer = await signUp('unsafe-method-owner@example.test');
+    const noOriginWrite = await app!.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { cookie: writer.cookie },
+      payload: { title: 'Should never be created' },
+    });
+    expect(noOriginWrite.statusCode).toBe(403);
+    expect(noOriginWrite.json()).toEqual({ error: 'Cross-origin request rejected' });
+  });
+
+  it('rate-limits repeated sign-in attempts at the auth endpoint, closing the credential-stuffing window plan.md requires', async () => {
+    // A dedicated Better Auth instance, deliberately not the shared `authentication` built in
+    // `beforeAll` -- that one has `rateLimitEnabled: false` so the rest of this file's fixture
+    // setup isn't rate-limited. This one omits the override, so it runs under the real,
+    // enabled-by-default configuration a deployed instance would.
+    const rateLimited = createAuth({
+      DATABASE_URL: databaseUrl!,
+      BETTER_AUTH_SECRET: 'integration-test-secret-with-at-least-thirty-two-characters',
+      BETTER_AUTH_URL: 'http://127.0.0.1:3001',
+    });
+    const rateLimitedApp = await buildApp({
+      auth: {
+        baseUrl: 'http://127.0.0.1:3001',
+        handler: rateLimited.auth.handler,
+        getActorId: async (headers) =>
+          (await rateLimited.auth.api.getSession({ headers }))?.user.id ?? null,
+        trustedOrigins: rateLimited.trustedOrigins,
+      },
+      projects: store!,
+      // Isolated from the unrelated global per-client cap too, so a 429 here is unambiguously
+      // Better Auth's own sign-in rule (3 requests / 10 seconds), not app.ts's global one.
+      rateLimit: { max: 100_000, timeWindowMs: 60_000 },
+    });
+    try {
+      const attemptSignIn = () =>
+        rateLimitedApp.inject({
+          method: 'POST',
+          url: '/api/auth/sign-in/email',
+          payload: { email: 'rate-limit-target@example.test', password: 'wrong-password-entirely' },
+        });
+      const first = await attemptSignIn();
+      const second = await attemptSignIn();
+      const third = await attemptSignIn();
+      const fourth = await attemptSignIn();
+      // The first three each fail on their own merits (no such user exists, so Better Auth
+      // rejects the credentials) -- rate limiting is orthogonal to whether the credentials are
+      // correct, which is exactly the credential-stuffing threat model this defends against. The
+      // fourth request is where Better Auth's built-in rule actually bites.
+      expect([first.statusCode, second.statusCode, third.statusCode]).not.toContain(429);
+      expect(fourth.statusCode).toBe(429);
+    } finally {
+      await rateLimitedApp.close();
+      await rateLimited.pool.end();
+    }
   });
 
   it('reports /api/health unavailable when the database is genuinely unreachable, and healthy when it is not, using the same real-pool probe server.ts wires in production', async () => {

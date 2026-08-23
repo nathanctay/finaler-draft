@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { buildApp, MAX_SCREENPLAY_REQUEST_BODY_BYTES } from './app.js';
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
+import { DEFAULT_API_RATE_LIMIT_MAX } from '@finaler-draft/server-config';
 import type { ProjectStore } from './projects.js';
 
 const app = await buildApp();
@@ -277,7 +278,7 @@ describe('persisted project API', () => {
     // mode for every route this refactor attached a response schema to.
     const app = await buildApp({ auth, projects: store });
     try {
-      const headers = { cookie: 'session=test' };
+      const headers = { cookie: 'session=test', origin: 'https://app.example.test' };
       expect((await app.inject({ method: 'GET', url: '/api/projects', headers })).json()).toEqual([
         {
           id: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
@@ -341,14 +342,14 @@ describe('persisted project API', () => {
       const response = await app.inject({
         method: 'PUT',
         url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
-        headers: { cookie: 'session=test' },
+        headers: { cookie: 'session=test', origin: 'https://app.example.test' },
         payload: { expectedVersion: 1, screenplay: screenplayFixture },
       });
       expect(response.statusCode).toBe(409);
       const invalid = await app.inject({
         method: 'PUT',
         url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
-        headers: { cookie: 'session=test' },
+        headers: { cookie: 'session=test', origin: 'https://app.example.test' },
         payload: { expectedVersion: 1, screenplay: { schemaVersion: 1 } },
       });
       expect(invalid.statusCode).toBe(400);
@@ -360,7 +361,7 @@ describe('persisted project API', () => {
   it('exposes every protected project operation and maps authorization outcomes', async () => {
     const app = await buildApp({ auth, projects: store });
     try {
-      const headers = { cookie: 'session=test' };
+      const headers = { cookie: 'session=test', origin: 'https://app.example.test' };
       expect(
         (
           await app.inject({
@@ -468,7 +469,7 @@ describe('persisted project API', () => {
   it('accepts the full canonical worst-case wire body and rejects oversized bodies', async () => {
     const app = await buildApp({ auth, projects: store });
     try {
-      const headers = { cookie: 'session=test' };
+      const headers = { cookie: 'session=test', origin: 'https://app.example.test' };
       updateResult = { version: 2 };
       const payload = JSON.stringify({ expectedVersion: 1, screenplay: maximumWireScreenplay() });
       expect(Buffer.byteLength(payload)).toBeGreaterThan(10 * 1024 * 1024);
@@ -553,7 +554,7 @@ describe('persisted project API', () => {
       const response = await app.inject({
         method: 'PUT',
         url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
-        headers: { cookie: 'session=test' },
+        headers: { cookie: 'session=test', origin: 'https://app.example.test' },
         payload: { expectedVersion: 1, screenplay: { schemaVersion: 1 } },
       });
       expect(response.statusCode).toBe(400);
@@ -593,7 +594,7 @@ describe('persisted project API', () => {
   describe('rename, soft delete, and restore', () => {
     const projectId = '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f';
     const screenplayId = 'ecf1118c-3a2e-4656-84e6-fce75c461710';
-    const headers = { cookie: 'session=test' };
+    const headers = { cookie: 'session=test', origin: 'https://app.example.test' };
 
     it('renames a project and returns the exact store response, unstripped', async () => {
       renameProjectResult = { id: projectId, title: 'New Title' };
@@ -951,7 +952,14 @@ describe('persisted project API', () => {
       }
     });
 
-    it('does not reject a request with no Origin header at all, since current browsers always attach one to same-origin state-changing requests', async () => {
+    // Safe and unsafe methods are judged differently on an absent `Origin` header -- this is the
+    // refinement plan.md's security-gates section asks for, not a rewrite of the guard above.
+    // Real browsers always attach `Origin` to a same-origin POST/PUT/PATCH/DELETE, so an unsafe
+    // method arriving with none is refused; they omit it on ordinary same-origin GETs, so a safe
+    // method arriving with none still succeeds. This pair of tests is the actual specification of
+    // that behavior; the `origin` header added to every other request in this file's other
+    // describe blocks only makes those tests realistic, it doesn't test this distinction itself.
+    it('rejects a state-changing request with no Origin header at all, since a real browser always attaches one to a same-origin write', async () => {
       const app = await buildApp({ auth, projects: store });
       try {
         const noOrigin = await app.inject({
@@ -959,9 +967,26 @@ describe('persisted project API', () => {
           url: `/api/projects/${projectId}`,
           headers: { cookie: 'session=test' },
         });
-        expect(noOrigin.statusCode).toBe(200);
+        expect(noOrigin.statusCode).toBe(403);
+        expect(noOrigin.json()).toEqual({ error: 'Cross-origin request rejected' });
       } finally {
-        deleteProjectResult = { id: projectId };
+        await app.close();
+      }
+    });
+
+    // This is the scenario behind the owner's own report: the projects page loaded correctly on
+    // an unfamiliar port because a same-origin GET carries no `Origin` header at all, and this
+    // route group is read from, not just written to, through the very same `preValidation` hook.
+    it('accepts a GET request with no Origin header at all, since browsers do not attach one to ordinary same-origin reads', async () => {
+      const app = await buildApp({ auth, projects: store });
+      try {
+        const noOriginRead = await app.inject({
+          method: 'GET',
+          url: '/api/projects',
+          headers: { cookie: 'session=test' },
+        });
+        expect(noOriginRead.statusCode).toBe(200);
+      } finally {
         await app.close();
       }
     });
@@ -1064,6 +1089,42 @@ describe('persisted project API', () => {
         await probedApp.close();
       }
     });
+  });
+});
+
+describe('global per-client request cap', () => {
+  // Distinct from Better Auth's own rate limiter (auth.test.ts, persistence.integration.test.ts):
+  // this one applies ahead of every route, including `/api/health`, which is never behind
+  // Better Auth's own limiter at all. A low explicit cap here, rather than driving the real
+  // production default past its threshold, keeps this test fast and independent of what that
+  // default happens to be set to.
+  it('refuses further requests once a single client exceeds the configured cap, regardless of endpoint', async () => {
+    const cappedApp = await buildApp({ rateLimit: { max: 2, timeWindowMs: 60_000 } });
+    try {
+      const first = await cappedApp.inject({ method: 'GET', url: '/api/health' });
+      const second = await cappedApp.inject({ method: 'GET', url: '/api/health' });
+      const third = await cappedApp.inject({ method: 'GET', url: '/api/health' });
+      expect(first.statusCode).toBe(200);
+      expect(second.statusCode).toBe(200);
+      expect(third.statusCode).toBe(429);
+      expect(third.json()).toEqual({ error: 'Too many requests' });
+    } finally {
+      await cappedApp.close();
+    }
+  });
+
+  // Asserts against the real default straight from `@finaler-draft/server-config` rather than a
+  // number restated here, so this fails the moment `buildApp`'s fallback drifts from the config
+  // package's own constant -- the exact silent-drift `plan.md`'s "a default that is right by luck
+  // is not a decision" concern is about.
+  it('applies the real production default from server-config when no override is supplied', async () => {
+    const defaultApp = await buildApp();
+    try {
+      const response = await defaultApp.inject({ method: 'GET', url: '/api/health' });
+      expect(response.headers['x-ratelimit-limit']).toBe(String(DEFAULT_API_RATE_LIMIT_MAX));
+    } finally {
+      await defaultApp.close();
+    }
   });
 });
 

@@ -17,6 +17,15 @@ try {
   }
   const appOptions = {
     serveClient: environment.NODE_ENV === 'production' || systemTestMode,
+    // Threaded through explicitly: `buildApp`'s own default already matches
+    // `@finaler-draft/server-config`'s constants, but only this wiring makes
+    // `API_RATE_LIMIT_MAX`/`API_RATE_LIMIT_WINDOW_MS` actually adjustable by an operator --
+    // without it, setting either environment variable would parse successfully and do nothing.
+    rateLimit: {
+      max: environment.API_RATE_LIMIT_MAX,
+      timeWindowMs: environment.API_RATE_LIMIT_WINDOW_MS,
+    },
+    disableAuthRateLimit: systemTestMode,
   };
   const app = persistence
     ? await buildPersistentApp(persistence, appOptions)
@@ -29,9 +38,21 @@ try {
 
 async function buildPersistentApp(
   persistence: NonNullable<ReturnType<typeof findPersistenceEnvironment>>,
-  options: { serveClient: boolean },
+  options: { serveClient: boolean; disableAuthRateLimit: boolean },
 ) {
-  const { auth, pool, trustedOrigins } = createAuth(persistence);
+  // The browser system suite runs several Playwright workers in parallel, and every one of them
+  // signs up a fresh writer from the same loopback address -- so Better Auth's own limit (3
+  // requests per 10 seconds on `/sign-up` and `/sign-in`, hardcoded in 1.6.25) throttles the
+  // workers against each other rather than defending anything. Measured directly: 4 of 11
+  // persistence tests fail with it on, repeatably.
+  //
+  // Disabled only under `FINALER_SYSTEM_TEST`, and named here rather than buried in a config
+  // default, so the opt-out is visible at the place it happens. The real behaviour keeps its own
+  // coverage: `persistence.integration.test.ts`'s "rate-limits repeated sign-in attempts" builds a
+  // dedicated instance with the override omitted, exercising exactly what a deployment runs.
+  const { auth, pool, trustedOrigins } = createAuth(persistence, {
+    rateLimitEnabled: !options.disableAuthRateLimit,
+  });
   const app = await buildApp({
     ...options,
     auth: {

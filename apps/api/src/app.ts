@@ -1,5 +1,10 @@
+import fastifyRateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
 import { screenplaySchema } from '@finaler-draft/screenplay';
+import {
+  DEFAULT_API_RATE_LIMIT_MAX,
+  DEFAULT_API_RATE_LIMIT_WINDOW_MS,
+} from '@finaler-draft/server-config';
 import Fastify from 'fastify';
 import { fromNodeHeaders } from 'better-auth/node';
 import {
@@ -45,6 +50,18 @@ export interface BuildAppOptions {
    * or an unreachable database from ever being marked healthy in the first place.
    */
   databaseReady?: () => Promise<boolean>;
+  /**
+   * The global per-client request cap (plan.md: "a global request cap, so a single client cannot
+   * exhaust the API regardless of endpoint" -- distinct from Better Auth's own rate limiter in
+   * `auth.ts`, which only ever sees `/api/auth/*`; reading its installed source confirmed nothing
+   * else is covered without this). Defaults to the real production values from
+   * `@finaler-draft/server-config` when omitted -- not to a number sized for test convenience.
+   * A caller that legitimately needs a different cap (the persistence integration suite drives
+   * one shared app instance through far more requests, in the same window, than any real client
+   * would) raises it explicitly here at its own call site instead of this default being loosened
+   * to accommodate it.
+   */
+  rateLimit?: { max: number; timeWindowMs: number };
 }
 
 const idParam = z.object({ id: z.string().uuid() });
@@ -77,19 +94,33 @@ export const MAX_SCREENPLAY_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
  * browser from the page's real origin and is not rewritten by the proxy, so comparing its scheme
  * is safe and `BETTER_AUTH_URL`'s own enforced HTTPS-in-production is naturally honored.
  *
- * A request with no `Origin` header at all is not rejected here. Every state-changing request
- * these routes accept is POST/PUT/PATCH/DELETE, and current browsers attach `Origin` to same-origin
- * fetch/XHR requests using those methods without exception, so an absent header is not the
- * legitimate case this function needs to protect. Failing closed on "absent" as well as "present
- * but wrong" was considered and rejected: it would reject every request made through Fastify's own
- * `.inject()` test helper (which sends no `Origin` unless a test sets one explicitly) across every
- * existing test in this file and the integration suite, for a case modern browsers don't produce.
+ * A request with no `Origin` header is judged by method, not waved through unconditionally.
+ * Current browsers attach `Origin` to same-origin fetch/XHR requests using POST/PUT/PATCH/DELETE
+ * without exception, so an unsafe method arriving with no `Origin` at all is not the legitimate
+ * case this function needs to protect -- it is refused. A safe method (GET/HEAD) is a different
+ * story: browsers omit `Origin` on ordinary same-origin reads (plain navigations included), and
+ * this route group is read from as well as written to (`GET /api/projects` and friends share this
+ * same `preValidation` hook), so requiring `Origin` on those would 403 the entire signed-in
+ * workspace the moment a real browser does what real browsers do. This is precisely how the
+ * owner's projects page loaded correctly on an unfamiliar port -- a GET with no `Origin` is
+ * supposed to pass -- while the 403 he then saw on sign-out (a POST, correctly carrying an
+ * `Origin` that didn't match `trustedOrigins`) was this guard working as designed, not this gap.
+ *
+ * Failing closed on "unsafe method, absent Origin" does mean every write exercised through
+ * Fastify's own `.inject()` test helper (which sends no `Origin` unless a test sets one) now
+ * needs an explicit `Origin` header to reach 200 -- the test suites were updated accordingly
+ * rather than left to rely on the old blanket allowance.
+ *
  * This is deliberately narrower than a full CSRF-token scheme; it closes the specific attack an
  * audit of this repository demonstrated (a forged `Origin` reaching a restore handler and
  * succeeding), not every conceivable request-forgery vector.
  */
-function isTrustedOrigin(originHeader: string | undefined, trustedOrigins: readonly string[]) {
-  if (!originHeader) return true;
+function isTrustedOrigin(
+  originHeader: string | undefined,
+  trustedOrigins: readonly string[],
+  method: string,
+) {
+  if (!originHeader) return method === 'GET' || method === 'HEAD';
   try {
     return trustedOrigins.includes(new URL(originHeader).origin);
   } catch {
@@ -169,6 +200,37 @@ export async function buildApp(options: BuildAppOptions = {}) {
   });
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
+  // Global per-client cap, ahead of every route including `/api/auth/*` and `/api/health` --
+  // "regardless of endpoint" per plan.md, and Better Auth's own limiter (auth.ts) never sees
+  // anything outside `/api/auth/*` to begin with. `fastify-plugin` (which this plugin uses
+  // internally) breaks the usual encapsulation, so this applies to every route the whole app
+  // registers -- not just ones declared after this line -- but it is registered first anyway so
+  // that is never load-bearing.
+  await app.register(fastifyRateLimit, {
+    max: options.rateLimit?.max ?? DEFAULT_API_RATE_LIMIT_MAX,
+    timeWindow: options.rateLimit?.timeWindowMs ?? DEFAULT_API_RATE_LIMIT_WINDOW_MS,
+    // Railway's edge sends the client's real address as `X-Real-IP`; Fastify's own `request.ip`
+    // reflects the proxy's address instead unless `trustProxy` is configured, which this app does
+    // not do. Left at the plugin's own default key (`request.ip`), every request behind Railway's
+    // proxy would collapse onto one shared bucket -- exactly the failure mode already fixed for
+    // Better Auth's own rate limiter in auth.ts (`advanced.ipAddress.ipAddressHeaders`), for the
+    // identical reason.
+    keyGenerator(request) {
+      const realIp = request.headers['x-real-ip'];
+      return typeof realIp === 'string' ? realIp : request.ip;
+    },
+    // Scoped to the API. This cap exists to bound work that reaches the application and the
+    // database; static asset serving does neither, and counting it spends the budget on the wrong
+    // thing. One page load pulls the bundle, the stylesheet and several font files, so an
+    // all-routes cap is consumed by ordinary browsing -- a writer reloading a few times in a
+    // minute can exhaust it, and the browser system suite did exactly that, exhausting it partway
+    // through a run and failing whichever test happened to be last.
+    //
+    // Note this is deliberately not the same boundary as the origin guard's (`/api/projects`,
+    // `/api/screenplays`, `/api/deleted`): `/api/auth/*` must be capped too, and is the endpoint
+    // that most needs it.
+    allowList: (request) => !request.url.startsWith('/api'),
+  });
   // See the `onSend` hook below: this marks a reply as "serving index.html via the SPA
   // fallback" structurally, so the no-cache override there does not depend on sniffing a
   // Content-Type header that a 304 response is free to omit.
@@ -176,6 +238,10 @@ export async function buildApp(options: BuildAppOptions = {}) {
   const typedApp = app.withTypeProvider<ZodTypeProvider>();
   app.setErrorHandler((error, request, reply) => {
     if (error.statusCode === 413) return reply.code(413).send({ error: 'Request too large' });
+    // @fastify/rate-limit (registered below) throws rather than replying directly, so its 429
+    // would otherwise fall into the generic 4xx branch below and come back as the misleading
+    // "Invalid request" -- nothing about a rate-limited request was invalid.
+    if (error.statusCode === 429) return reply.code(429).send({ error: 'Too many requests' });
     // The whole workspace resolves a single zod v4 install (verified via `pnpm prune` and the
     // lockfile: apps/api and @finaler-draft/screenplay both depend on the identical pinned
     // version, and pnpm dedupes them to one copy in the store), so `instanceof` reliably
@@ -299,7 +365,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
         return;
       // Checked ahead of the session lookup: a forged cross-origin request is rejected outright
       // rather than paying for a database-backed session check first.
-      if (!isTrustedOrigin(request.headers.origin, options.auth!.trustedOrigins))
+      if (!isTrustedOrigin(request.headers.origin, options.auth!.trustedOrigins, request.method))
         return reply.code(403).send({ error: 'Cross-origin request rejected' });
       const actorId = await options.auth!.getActorId(fromNodeHeaders(request.headers));
       if (!actorId) return reply.code(401).send({ error: 'Authentication required' });

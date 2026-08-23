@@ -550,11 +550,17 @@ test.describe('page rendering: real editor, real DOM', () => {
       { id: crypto.randomUUID(), type: 'character', text: 'ADA' },
       { id: crypto.randomUUID(), type: 'dialogue', text: 'y'.repeat(35 * 3 + 1) },
     ];
+    // `page.request` is Playwright's own API client, not the browser page, so it sends no `Origin`
+    // header of its own -- and the API now refuses unsafe methods that arrive without one (CSRF
+    // hardening, `app.ts`'s origin guard: safe methods may omit it, unsafe ones may not). A real
+    // browser always sends it on a PUT, so setting it here makes this seeding request behave like
+    // the application it stands in for, rather than relaxing the rule to accommodate a test client.
     const seedResponse = await page.request.put(`/api/screenplays/${screenplayId}`, {
       data: {
         expectedVersion: existing.version,
         screenplay: { ...existing.screenplay, blocks: seeded },
       },
+      headers: { origin: new URL(page.url()).origin },
     });
     expect(seedResponse.ok()).toBe(true);
     await page.reload();
