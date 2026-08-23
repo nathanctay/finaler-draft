@@ -15,6 +15,24 @@
  */
 import { z } from 'zod';
 
+/**
+ * The global per-client request cap (plan.md, "Launch readiness": "Rate limiting on
+ * authentication and a global request cap" — foundation work, not pre-launch work, since
+ * credential stuffing and simple floods are live the moment the service is reachable). This is
+ * distinct from Better Auth's own built-in rate limiter (`auth.ts`), which only ever sees
+ * `/api/auth/*`; nothing else in the API is covered without this.
+ *
+ * These are the real production numbers, not values sized for test convenience: `apps/api`'s
+ * `buildApp` defaults to them whenever a caller doesn't override `rateLimit` explicitly. A test
+ * that legitimately needs a different cap (the persistence integration suite drives one shared
+ * app instance through far more requests, in the same window, than any real client would) raises
+ * it explicitly at its own call site instead of this default being loosened to accommodate it —
+ * otherwise nobody could ever tighten this number later without chasing down a mysterious test
+ * failure first.
+ */
+export const DEFAULT_API_RATE_LIMIT_MAX = 300;
+export const DEFAULT_API_RATE_LIMIT_WINDOW_MS = 60_000;
+
 const serverEnvironment = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3001),
@@ -22,6 +40,12 @@ const serverEnvironment = z.object({
   BETTER_AUTH_SECRET: z.string().min(32).optional(),
   BETTER_AUTH_URL: z.string().url().optional(),
   CLIENT_ORIGIN: z.string().url().optional(),
+  API_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(DEFAULT_API_RATE_LIMIT_MAX),
+  API_RATE_LIMIT_WINDOW_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(DEFAULT_API_RATE_LIMIT_WINDOW_MS),
 });
 
 export type ServerEnvironment = z.infer<typeof serverEnvironment>;

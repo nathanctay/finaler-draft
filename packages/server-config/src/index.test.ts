@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_API_RATE_LIMIT_MAX,
+  DEFAULT_API_RATE_LIMIT_WINDOW_MS,
   findPersistenceEnvironment,
   parseServerEnvironment,
   requirePersistenceEnvironment,
@@ -7,11 +9,27 @@ import {
 
 describe('parseServerEnvironment', () => {
   it('uses safe development defaults', () => {
-    expect(parseServerEnvironment({})).toEqual({ NODE_ENV: 'development', PORT: 3001 });
+    expect(parseServerEnvironment({})).toEqual({
+      NODE_ENV: 'development',
+      PORT: 3001,
+      API_RATE_LIMIT_MAX: DEFAULT_API_RATE_LIMIT_MAX,
+      API_RATE_LIMIT_WINDOW_MS: DEFAULT_API_RATE_LIMIT_WINDOW_MS,
+    });
   });
 
   it('rejects ports outside the TCP range', () => {
     expect(() => parseServerEnvironment({ PORT: '70000' })).toThrow(/65535/);
+  });
+
+  it('rejects a non-positive global rate limit configuration', () => {
+    expect(() => parseServerEnvironment({ API_RATE_LIMIT_MAX: '0' })).toThrow();
+    expect(() => parseServerEnvironment({ API_RATE_LIMIT_WINDOW_MS: '-1' })).toThrow();
+  });
+
+  it('honors an explicit global rate limit override', () => {
+    expect(
+      parseServerEnvironment({ API_RATE_LIMIT_MAX: '50', API_RATE_LIMIT_WINDOW_MS: '5000' }),
+    ).toMatchObject({ API_RATE_LIMIT_MAX: 50, API_RATE_LIMIT_WINDOW_MS: 5000 });
   });
 
   it('keeps persistence optional for health and static-server environments', () => {
