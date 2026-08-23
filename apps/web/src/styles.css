@@ -938,9 +938,124 @@ select:focus-visible,
 }
 
 .script-body .page-break-spacer {
-  /* position: relative anchors .page-break-number below without a per-page container -- see the
-     doc comment on buildPageBreakWidget in pagination.ts for the geometry this depends on. */
+  /* position: relative anchors .page-break-number and .page-break-edge below without a per-page
+     container -- see the doc comment on buildPageBreakWidget in pagination.ts for the geometry
+     this depends on. */
   position: relative;
+}
+
+/*
+ * The seam (progress/page-separation.md): a body-page boundary was previously one grey stripe
+ * through a single box-shadow wrapping the whole multi-page flow, so it read as part of one long
+ * sheet rather than the gap between two sheets -- unlike the title-page/page-1 boundary, which
+ * already looks right because those are two separate elements each with their own box-shadow. The
+ * fix stays paint-only and keeps the manuscript one contiguous flow (required for selection,
+ * cursor movement and undo across a break): two small clipped "masks", each showing a sliver of
+ * the identical `0 1px 5px var(--shadow-02)` shadow `.page` and `.title-page` already use,
+ * positioned by pagination.ts at the exact inch offsets where the background gradient already
+ * switches between its white and --surface-11 bands. Both are `position: absolute`, so -- like
+ * `.page-break-number` -- neither contributes to flow or changes anything the persistence gate
+ * measures; this is decoration on top of geometry that was already correct, not a change to it.
+ *
+ * Naively drawing the shadow directly on a hairline the height of the boundary line itself
+ * (tried first) produced a visibly flatter, weaker falloff than `.page`'s own edge, even with the
+ * identical box-shadow value -- verified side by side against the real title-page/page-1 boundary,
+ * which uses that same value on an 11in-tall box. A box-shadow's falloff along a straight edge
+ * needs the casting box to be tall relative to the blur radius (5px here) to read as a real sheet
+ * edge; a box only ~1px tall is a blurred point source, not a blurred edge, and visibly weaker no
+ * matter the box-shadow value used on it. `--fd-page-break-edge-mask-depth` (10px, comfortably
+ * covering the falloff of a 5px blur) is the visible clipped strip; `.page-break-edge-caster` is
+ * the actual shadow-casting box inside it, `--fd-page-break-edge-caster-height` (40px) tall --
+ * far taller than the blur radius, so its near edge (the one flush with the physical boundary)
+ * casts the same weight of shadow `.page`'s own 11in-tall box does. Only that near edge ever falls
+ * inside the mask's clipped strip; the caster's far edge sits well outside it and is clipped away
+ * entirely, so nothing of the caster besides the one edge's falloff is ever visible.
+ *
+ * The incoming mask's `top` is the physical boundary minus its own depth (not the boundary itself,
+ * the way the outgoing mask's is) because the incoming edge's shadow rises *up* into the gap
+ * above the boundary, not down from it -- the mask has to occupy the gap-side space to clip
+ * correctly, and pagination.ts sets `--fd-page-break-edge-top` (not `top` directly) precisely so
+ * this `calc()` has something to subtract from.
+ *
+ * left/right break out of .script-body's own margins to reach .page's full physical width, the
+ * same negative-offset technique .page-break-number already uses against --fd-page-number-right,
+ * so the shadow spans edge to edge like .page's and .title-page's own box-shadow does.
+ */
+/*
+ * The gap between two sheets, painted in the canvas colour so it reads as background rather than as
+ * part of the paper. `.page` is a single element spanning every page, so its own box-shadow runs
+ * continuously down the column's left and right edges -- including through each gap, which left a
+ * shadow on both sides of the gap and made it look like a stripe on one long sheet. The horizontal
+ * extension past `--fd-page-margin-*` is what covers that bleed: it must exceed the blur radius of
+ * `.page`'s shadow (5px) or a sliver of it survives at each side.
+ *
+ * Appended before the two edge masks (pagination.ts) so their shadows paint over it in DOM order,
+ * with no z-index needed.
+ */
+.script-body .page-break-gap {
+  position: absolute;
+  top: var(--fd-page-break-edge-top);
+  left: calc(-1 * var(--fd-page-margin-left) - 8px);
+  right: calc(-1 * var(--fd-page-margin-right) - 8px);
+  height: var(--fd-page-gap);
+  background: var(--surface-11);
+}
+
+.script-body .page-break-edge {
+  --fd-page-break-edge-mask-depth: 10px;
+  --fd-page-break-edge-caster-height: 40px;
+  position: absolute;
+  left: calc(-1 * var(--fd-page-margin-left));
+  right: calc(-1 * var(--fd-page-margin-right));
+  height: var(--fd-page-break-edge-mask-depth);
+  overflow: hidden;
+}
+
+.script-body .page-break-edge-outgoing {
+  top: var(--fd-page-break-edge-top);
+}
+
+.script-body .page-break-edge-incoming {
+  top: calc(var(--fd-page-break-edge-top) - var(--fd-page-break-edge-mask-depth));
+}
+
+.script-body .page-break-edge-caster {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: var(--fd-page-break-edge-caster-height);
+  box-shadow: 0 1px 5px var(--shadow-02);
+}
+
+/* The caster's bottom edge sits flush with the outgoing mask's top edge (the physical boundary),
+   extending upward -- entirely outside the mask's own box, so entirely clipped -- leaving only its
+   bottom edge's downward falloff visible inside the mask. */
+.script-body .page-break-edge-outgoing .page-break-edge-caster {
+  top: calc(-1 * var(--fd-page-break-edge-caster-height));
+}
+
+/* The caster's top edge sits flush with the incoming mask's bottom edge (the physical boundary),
+   extending downward -- entirely outside the mask's own box, so entirely clipped -- leaving only
+   its top edge's upward falloff visible inside the mask. */
+.script-body .page-break-edge-incoming .page-break-edge-caster {
+  top: var(--fd-page-break-edge-mask-depth);
+}
+
+/*
+ * Continuous scroll draws no page edges at all (plan.md's "Page presentation", the
+ * `.page.continuous` rule above removing the background gradient) -- the seam is a drawn edge like
+ * that gradient, so it is removed the same way rather than the widget knowing about view mode.
+ * pagination.ts's own module comment is explicit that nothing in the decoration layer reads or
+ * reacts to view mode; only styles.css differs between the two.
+ */
+/* Continuous scroll draws no page edges at all, so the gap cover has nothing to sit between and
+   would paint a canvas-coloured band across an unbroken sheet. */
+.page.continuous .page-break-gap {
+  display: none;
+}
+
+.page.continuous .page-break-edge {
+  display: none;
 }
 
 .script-body .page-break-number {

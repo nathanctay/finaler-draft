@@ -300,6 +300,62 @@ export function buildPageBreakWidget(
   spacer.className = 'page-break-spacer';
   spacer.style.height = `${pageBreak.spacerHeightIn}in`;
 
+  // The seam: two full-width edges, each casting the same box-shadow `.page` and `.title-page`
+  // already use, so a body-page boundary reads as two shadowed sheets instead of a grey stripe
+  // through one sheet -- see progress/page-separation.md. Both positions are pure arithmetic on
+  // `spacerHeightIn` (itself `page.bottomMarginIn + PAGE_GAP_IN + MARGIN_TOP_IN`, per
+  // `computePageBreaks`), so no field beyond what the decoration key already encodes
+  // (`buildPaginationDecorations`) feeds either one:
+  //  - the outgoing edge sits at the outgoing page's bottom margin -- where the background's
+  //    white band ends and the gap band begins,
+  //  - the incoming edge sits `PAGE_GAP_IN` further down -- where the gap band ends and the
+  //    incoming page's top margin begins.
+  // Each edge is a small clipped "mask" (styles.css) containing a `.page-break-edge-caster` child
+  // much taller than the shadow's own blur radius. A box-shadow's falloff along a straight edge
+  // needs the casting box to be tall relative to the blur radius to read as a real sheet edge
+  // (verified directly: the same box-shadow rule on a too-short box painted a visibly flatter
+  // shadow than `.page`'s, which is 11in tall) -- see the caster's own comment in styles.css.
+  // Only the caster's near edge -- the one flush with the physical boundary -- is ever within the
+  // mask's clipped strip, so the mask shows exactly the falloff a real tall sheet edge would cast,
+  // without the caster's far edge (which sits nowhere near the boundary) contributing anything.
+  //
+  // The top offset is set as a CSS custom property, not `style.top` directly, because the incoming
+  // mask's own `top` (styles.css) has to subtract its clip depth from this value with `calc()`,
+  // which only works against a custom property, not an already-resolved inline `top`. styles.css
+  // positions both masks full page width by breaking out of .script-body's own margins, the same
+  // technique .page-break-number already uses against --fd-page-number-right, and hides them in
+  // continuous mode, which draws no page edges at all.
+  // Painted first, so the two edge shadows below land on top of it. `.page`'s own box-shadow is
+  // cast by a single element spanning every page, so it runs continuously down the left and right
+  // of the whole column -- straight through each gap, which made the gap read as a band belonging
+  // to the sheets rather than as the canvas showing between them. This covers that bleed with the
+  // canvas colour, extending past both page edges far enough to clear the shadow's blur.
+  const gapCover = document.createElement('div');
+  gapCover.className = 'page-break-gap';
+  gapCover.style.setProperty(
+    '--fd-page-break-edge-top',
+    `${pageBreak.spacerHeightIn - PAGE_GAP_IN - MARGIN_TOP_IN}in`,
+  );
+  spacer.appendChild(gapCover);
+
+  const outgoingEdge = document.createElement('div');
+  outgoingEdge.className = 'page-break-edge page-break-edge-outgoing';
+  outgoingEdge.style.setProperty(
+    '--fd-page-break-edge-top',
+    `${pageBreak.spacerHeightIn - PAGE_GAP_IN - MARGIN_TOP_IN}in`,
+  );
+  outgoingEdge.appendChild(document.createElement('div')).className = 'page-break-edge-caster';
+  spacer.appendChild(outgoingEdge);
+
+  const incomingEdge = document.createElement('div');
+  incomingEdge.className = 'page-break-edge page-break-edge-incoming';
+  incomingEdge.style.setProperty(
+    '--fd-page-break-edge-top',
+    `${pageBreak.spacerHeightIn - MARGIN_TOP_IN}in`,
+  );
+  incomingEdge.appendChild(document.createElement('div')).className = 'page-break-edge-caster';
+  spacer.appendChild(incomingEdge);
+
   const pageNumber = document.createElement('div');
   pageNumber.className = 'page-break-number';
   pageNumber.textContent = `${formatPageNumber(pageBreak.pageNumber, pageNumberStyle)}.`;
