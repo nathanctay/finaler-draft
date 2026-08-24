@@ -8,6 +8,7 @@ import {
 } from '@finaler-draft/screenplay/pageFormat';
 import { PAGE_GAP_IN, pageStackMinHeightIn } from '../src/pagination.js';
 import { requireCourierPrime } from './requireCourierPrime.js';
+import { signIn, verifyEmail } from './testMail.js';
 
 /**
  * The real-editor replacement for the synthetic multi-page fixture this spec used to build (see
@@ -61,9 +62,14 @@ function fourPageMixedAnchorFixture(): ScreenplayBlock[] {
   ];
 }
 
-/** Copied from `persistence.spec.ts` (its own comment explains why this is the only route to a
+/**
+ * Copied from `persistence.spec.ts` (its own comment explains why this is the only route to a
  * real signed-in writer with a real screenplay open in the real editor) rather than shared, per
- * the scope's own instruction to copy that flow. */
+ * the scope's own instruction to copy that flow. `verifyEmail`/`signIn` (testMail.ts) are shared,
+ * not part of that instruction: they are test-mailbox plumbing, not the user-facing flow the
+ * instruction was about, and duplicating a fetch-and-follow-a-link helper across every spec file
+ * that needs it would just be copy-paste with no readability benefit.
+ */
 async function createAndOpenScreenplay(page: Page): Promise<{ canvas: Locator }> {
   const token = crypto.randomUUID();
   const email = `writer-${token}@example.test`;
@@ -75,6 +81,9 @@ async function createAndOpenScreenplay(page: Page): Promise<{ canvas: Locator }>
   await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByLabel('Confirm password').fill(password);
   await page.getByRole('button', { name: 'Create account' }).click();
+  await expect(page.getByRole('heading', { name: 'Check your email.' })).toBeVisible();
+  await verifyEmail(page, email);
+  await signIn(page, email, password);
   await expect(page.getByRole('heading', { name: 'Your writing desk' })).toBeVisible();
   await page.getByLabel('New project title').fill('Page rendering project');
   await page.getByRole('button', { name: 'New project' }).click();

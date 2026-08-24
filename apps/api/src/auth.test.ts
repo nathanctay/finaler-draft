@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { MailPort } from './mail.js';
 
 const createDatabase = vi.fn();
 const drizzleAdapter = vi.fn();
@@ -10,23 +11,26 @@ vi.mock('better-auth', () => ({ betterAuth }));
 
 const { createAuth } = await import('./auth.js');
 
+const environment = {
+  DATABASE_URL: 'postgresql://localhost/finaler',
+  BETTER_AUTH_SECRET: 'x'.repeat(32),
+  BETTER_AUTH_URL: 'https://app.example.test',
+  CLIENT_ORIGIN: 'https://writer.example.test',
+};
+
 describe('createAuth', () => {
+  let mail: MailPort;
+
   beforeEach(() => {
     vi.resetAllMocks();
     createDatabase.mockReturnValue({ database: { marker: 'database' }, pool: { marker: 'pool' } });
     drizzleAdapter.mockReturnValue({ marker: 'adapter' });
     betterAuth.mockReturnValue({ marker: 'auth' });
+    mail = { send: vi.fn().mockResolvedValue(undefined) };
   });
 
   it('configures the Drizzle adapter, local auth route, and trusted client origin', () => {
-    expect(
-      createAuth({
-        DATABASE_URL: 'postgresql://localhost/finaler',
-        BETTER_AUTH_SECRET: 'x'.repeat(32),
-        BETTER_AUTH_URL: 'https://app.example.test',
-        CLIENT_ORIGIN: 'https://writer.example.test',
-      }),
-    ).toEqual({
+    expect(createAuth(environment, { mail })).toEqual({
       auth: { marker: 'auth' },
       database: { marker: 'database' },
       pool: { marker: 'pool' },
@@ -58,18 +62,24 @@ describe('createAuth', () => {
           enabled: true,
           minPasswordLength: 12,
           maxPasswordLength: 128,
-          requireEmailVerification: false,
+          // New accounts require verification; existing accounts were backfilled as verified in
+          // the migration that ships with this (see the ruling in
+          // progress/transactional-email.md), so this cannot be `false` any more.
+          requireEmailVerification: true,
         }),
       }),
     );
   });
 
   it('disables cookie security and forces HTTP-derived cookie attributes when BETTER_AUTH_URL is plain HTTP', () => {
-    createAuth({
-      DATABASE_URL: 'postgresql://localhost/finaler',
-      BETTER_AUTH_SECRET: 'x'.repeat(32),
-      BETTER_AUTH_URL: 'http://localhost:3001',
-    });
+    createAuth(
+      {
+        DATABASE_URL: 'postgresql://localhost/finaler',
+        BETTER_AUTH_SECRET: 'x'.repeat(32),
+        BETTER_AUTH_URL: 'http://localhost:3001',
+      },
+      { mail },
+    );
     expect(betterAuth).toHaveBeenCalledWith(
       expect.objectContaining({
         advanced: expect.objectContaining({
@@ -87,7 +97,7 @@ describe('createAuth', () => {
         BETTER_AUTH_SECRET: 'x'.repeat(32),
         BETTER_AUTH_URL: 'https://app.example.test',
       },
-      { rateLimitEnabled: false },
+      { mail, rateLimitEnabled: false },
     );
     expect(betterAuth).toHaveBeenCalledWith(
       expect.objectContaining({ rateLimit: { enabled: false, storage: 'memory' } }),
@@ -95,14 +105,138 @@ describe('createAuth', () => {
   });
 
   it('uses only the server origin when no separate client origin is configured', () => {
-    const result = createAuth({
-      DATABASE_URL: 'postgresql://localhost/finaler',
-      BETTER_AUTH_SECRET: 'x'.repeat(32),
-      BETTER_AUTH_URL: 'http://localhost:3001',
-    });
+    const result = createAuth(
+      {
+        DATABASE_URL: 'postgresql://localhost/finaler',
+        BETTER_AUTH_SECRET: 'x'.repeat(32),
+        BETTER_AUTH_URL: 'http://localhost:3001',
+      },
+      { mail },
+    );
     expect(betterAuth).toHaveBeenCalledWith(
       expect.objectContaining({ trustedOrigins: ['http://localhost:3001'] }),
     );
     expect(result.trustedOrigins).toEqual(['http://localhost:3001']);
+  });
+
+  it('sends verification on sign-up but never automatically on a rejected sign-in', () => {
+    // `sendOnSignIn` was `true` when this slice first landed, making "try signing in again" the
+    // way to get a fresh link. It also meant every further attempt sent another email, so a
+    // visitor who did not verify promptly accumulated them. The owner asked for an explicit
+    // affordance instead, and sign-in.tsx now offers one on both stuck states -- so the automatic
+    // send is off, and this assertion pins that rather than the behaviour it replaced.
+    createAuth(environment, { mail });
+    const options = betterAuth.mock.calls[0]![0];
+    expect(options.emailVerification).toMatchObject({ sendOnSignUp: true, sendOnSignIn: false });
+  });
+
+  describe('sendResetPassword', () => {
+    function capturedCallback() {
+      createAuth(environment, { mail });
+      const options = betterAuth.mock.calls[0]![0];
+      return options.emailAndPassword.sendResetPassword as (data: {
+        user: { email: string };
+        url: string;
+      }) => Promise<void>;
+    }
+
+    it('sends a message to the requesting user containing the reset URL', async () => {
+      const sendResetPassword = capturedCallback();
+      await sendResetPassword({
+        user: { email: 'writer@example.test' },
+        url: 'https://app.example.test/api/auth/reset-password/abc123?callbackURL=%2Freset-password',
+      });
+      expect(mail.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: 'writer@example.test',
+          subject: expect.stringContaining('password'),
+          text: expect.stringContaining(
+            'https://app.example.test/api/auth/reset-password/abc123?callbackURL=%2Freset-password',
+          ),
+        }),
+      );
+    });
+
+    it('logs a structured failure and rethrows when the mail port rejects, rather than swallowing the error here', async () => {
+      const failure = new Error('Resend is down');
+      (mail.send as ReturnType<typeof vi.fn>).mockRejectedValueOnce(failure);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const sendResetPassword = capturedCallback();
+
+      await expect(
+        sendResetPassword({ user: { email: 'writer@example.test' }, url: 'https://x/y' }),
+      ).rejects.toThrow('Resend is down');
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const logged = JSON.parse(errorSpy.mock.calls[0]![0] as string);
+      expect(logged).toEqual({
+        event: 'password_reset_email_failed',
+        to: 'writer@example.test',
+        error: 'Resend is down',
+      });
+      errorSpy.mockRestore();
+    });
+
+    it('stringifies a non-Error rejection rather than losing its content to an implicit conversion', async () => {
+      (mail.send as ReturnType<typeof vi.fn>).mockRejectedValueOnce('rate limited');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const sendResetPassword = capturedCallback();
+
+      await expect(
+        sendResetPassword({ user: { email: 'writer@example.test' }, url: 'https://x/y' }),
+      ).rejects.toBe('rate limited');
+
+      const logged = JSON.parse(errorSpy.mock.calls[0]![0] as string);
+      expect(logged.error).toBe('rate limited');
+      errorSpy.mockRestore();
+    });
+  });
+
+  describe('sendVerificationEmail', () => {
+    function capturedCallback() {
+      createAuth(environment, { mail });
+      const options = betterAuth.mock.calls[0]![0];
+      return options.emailVerification.sendVerificationEmail as (data: {
+        user: { email: string };
+        url: string;
+      }) => Promise<void>;
+    }
+
+    it('sends a message to the account being verified containing the verification URL', async () => {
+      const sendVerificationEmail = capturedCallback();
+      await sendVerificationEmail({
+        user: { email: 'newwriter@example.test' },
+        url: 'https://app.example.test/api/auth/verify-email?token=abc&callbackURL=%2Fverify-email',
+      });
+      expect(mail.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          to: 'newwriter@example.test',
+          subject: expect.stringContaining('Verify'),
+          text: expect.stringContaining(
+            'https://app.example.test/api/auth/verify-email?token=abc&callbackURL=%2Fverify-email',
+          ),
+        }),
+      );
+    });
+
+    it('logs a structured failure and rethrows when the mail port rejects', async () => {
+      const failure = new Error('Resend is down');
+      (mail.send as ReturnType<typeof vi.fn>).mockRejectedValueOnce(failure);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const sendVerificationEmail = capturedCallback();
+
+      await expect(
+        sendVerificationEmail({ user: { email: 'newwriter@example.test' }, url: 'https://x/y' }),
+      ).rejects.toThrow('Resend is down');
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const logged = JSON.parse(errorSpy.mock.calls[0]![0] as string);
+      expect(logged).toEqual({
+        event: 'verification_email_failed',
+        to: 'newwriter@example.test',
+        error: 'Resend is down',
+      });
+      errorSpy.mockRestore();
+    });
   });
 });

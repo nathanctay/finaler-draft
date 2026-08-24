@@ -1304,6 +1304,10 @@ select:focus-visible,
 }
 
 .text-button {
+  /* `block` so consecutive text buttons stack rather than sitting side by side on one line. The
+     entry screens now render two together -- "Resend verification email" and "I already have an
+     account" -- and as inline elements they ran into each other and read as one sentence. */
+  display: block;
   border: 0;
   background: transparent;
   color: var(--border-13);

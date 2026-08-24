@@ -23,8 +23,8 @@ describe('API client', () => {
       .mockResolvedValueOnce(
         response({ user: { email: 'writer@example.com', id: 'writer-1', name: 'Writer' } }),
       )
-      .mockResolvedValueOnce(response({}))
-      .mockResolvedValueOnce(response({}))
+      .mockResolvedValueOnce(response({ token: 'session-token' }))
+      .mockResolvedValueOnce(response({ token: 'session-token' }))
       .mockResolvedValueOnce(response({}))
       .mockResolvedValueOnce(
         response([{ id: projectId, role: 'owner', title: 'Feature', updatedAt: '2026-01-01' }]),

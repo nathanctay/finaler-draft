@@ -60,12 +60,16 @@ describe('parseServerEnvironment', () => {
       BETTER_AUTH_SECRET: 'x'.repeat(32),
       BETTER_AUTH_URL: 'https://app.example.test',
       CLIENT_ORIGIN: 'https://writer.example.test',
+      RESEND_API_KEY: 're_test_key',
+      MAIL_FROM_ADDRESS: 'noreply@example.test',
     });
     expect(findPersistenceEnvironment(environment)).toEqual({
       DATABASE_URL: 'postgresql://localhost/finaler',
       BETTER_AUTH_SECRET: 'x'.repeat(32),
       BETTER_AUTH_URL: 'https://app.example.test',
       CLIENT_ORIGIN: 'https://writer.example.test',
+      RESEND_API_KEY: 're_test_key',
+      MAIL_FROM_ADDRESS: 'noreply@example.test',
     });
   });
 
@@ -80,5 +84,60 @@ describe('parseServerEnvironment', () => {
         }),
       ),
     ).toMatchObject({ BETTER_AUTH_URL: 'http://127.0.0.1:4174' });
+  });
+
+  it('does not require Resend configuration outside production', () => {
+    expect(
+      requirePersistenceEnvironment(
+        parseServerEnvironment({
+          NODE_ENV: 'test',
+          DATABASE_URL: 'postgresql://localhost/finaler',
+          BETTER_AUTH_SECRET: 'x'.repeat(32),
+          BETTER_AUTH_URL: 'http://127.0.0.1:4174',
+        }),
+      ),
+    ).not.toHaveProperty('RESEND_API_KEY');
+  });
+
+  it('refuses to start in production without a Resend API key and from address, even with a valid HTTPS URL', () => {
+    expect(() =>
+      requirePersistenceEnvironment(
+        parseServerEnvironment({
+          NODE_ENV: 'production',
+          DATABASE_URL: 'postgresql://localhost/finaler',
+          BETTER_AUTH_SECRET: 'x'.repeat(32),
+          BETTER_AUTH_URL: 'https://app.example.test',
+        }),
+      ),
+    ).toThrow(/RESEND_API_KEY/);
+  });
+
+  it('refuses to start in production with a Resend API key but no from address', () => {
+    expect(() =>
+      requirePersistenceEnvironment(
+        parseServerEnvironment({
+          NODE_ENV: 'production',
+          DATABASE_URL: 'postgresql://localhost/finaler',
+          BETTER_AUTH_SECRET: 'x'.repeat(32),
+          BETTER_AUTH_URL: 'https://app.example.test',
+          RESEND_API_KEY: 're_test_key',
+        }),
+      ),
+    ).toThrow(/MAIL_FROM_ADDRESS/);
+  });
+
+  it('starts in production once both Resend fields are present, alongside HTTPS', () => {
+    expect(
+      requirePersistenceEnvironment(
+        parseServerEnvironment({
+          NODE_ENV: 'production',
+          DATABASE_URL: 'postgresql://localhost/finaler',
+          BETTER_AUTH_SECRET: 'x'.repeat(32),
+          BETTER_AUTH_URL: 'https://app.example.test',
+          RESEND_API_KEY: 're_test_key',
+          MAIL_FROM_ADDRESS: 'noreply@example.test',
+        }),
+      ),
+    ).toMatchObject({ RESEND_API_KEY: 're_test_key', MAIL_FROM_ADDRESS: 'noreply@example.test' });
   });
 });

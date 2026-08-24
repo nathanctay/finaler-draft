@@ -32,6 +32,30 @@ export const invalidateQueries = vi.fn();
 export const clearQueryCache = vi.fn();
 export const removeQueries = vi.fn();
 
+/**
+ * A fetch `Response` stand-in complete enough for either request path in this codebase: `json()`
+ * for the hand-rolled `request()`/`json()` helpers in api.ts, and `text()` plus a real `headers`
+ * for Better Auth's client (authClient.ts) -- `@better-fetch/fetch` always reads
+ * `response.headers.get('content-type')` to pick a response type and then reads the body through
+ * `.text()`, never `.json()` (confirmed against the installed `@better-fetch/fetch` source: an
+ * object with only `.json()`, the shape every mock in this file used before
+ * `requestPasswordReset`/`resetPassword` needed the client, throws inside `detectResponseType`
+ * the moment it tries `undefined.get(...)`). Every fetch mock a test builds for a route that calls
+ * through `authClient()` needs this, not a bare `{json, ok, status}` object.
+ */
+export function fakeJsonResponse(
+  body: unknown,
+  init?: { ok?: boolean; status?: number },
+): Response {
+  return {
+    headers: new Headers({ 'content-type': 'application/json' }),
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+    ok: init?.ok ?? true,
+    status: init?.status ?? 200,
+  } as Response;
+}
+
 export function reactQueryMock(): Record<string, unknown> {
   return {
     queryOptions: (options: unknown) => options,
@@ -108,17 +132,24 @@ export function resetRouteHarness() {
   removeQueries.mockReset();
   fetchMock.mockReset();
   vi.stubGlobal('fetch', fetchMock);
-  fetchMock.mockImplementation(
-    async (path, init) =>
-      ({
-        json: async () =>
-          path === '/api/projects' && init?.method === 'POST'
-            ? { id: projectId, title: 'Feature' }
-            : path === `/api/projects/${projectId}/screenplays` && init?.method === 'POST'
-              ? { id: screenplayId, version: 1 }
-              : [],
-        ok: true,
-        status: 200,
-      }) as Response,
+  fetchMock.mockImplementation(async (path, init) =>
+    fakeJsonResponse(
+      path === '/api/projects' && init?.method === 'POST'
+        ? { id: projectId, title: 'Feature' }
+        : path === `/api/projects/${projectId}/screenplays` && init?.method === 'POST'
+          ? { id: screenplayId, version: 1 }
+          : // `signIn`/`signUp` (api.ts) both parse `{token}` out of the response body now that
+            // `requireEmailVerification` (auth.ts) means sign-up may or may not return one; a
+            // non-null token here is the default "this succeeded and created a session" case
+            // every existing test using this mock already assumes. Tests that specifically need
+            // the unverified (`token: null`) outcome override this with their own
+            // `fetchMock.mockImplementation`, the same way error-response tests already do below.
+            path === '/api/auth/sign-in/email' || path === '/api/auth/sign-up/email'
+            ? { token: 'test-session-token' }
+            : // `requestPasswordReset`/`resetPassword` (api.ts, via authClient.ts) both parse
+              // whatever body comes back through `unwrapAuthClientResult`, which only ever reads
+              // `.error`; an empty object is a safe default success body for either.
+              {},
+    ),
   );
 }

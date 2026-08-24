@@ -2,6 +2,7 @@ import { drizzleAdapter } from '@better-auth/drizzle-adapter';
 import { betterAuth } from 'better-auth';
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from '@finaler-draft/config';
 import { createDatabase, schema } from '@finaler-draft/database';
+import type { MailMessage, MailPort } from './mail.js';
 
 export interface AuthEnvironment {
   BETTER_AUTH_SECRET: string;
@@ -11,6 +12,7 @@ export interface AuthEnvironment {
 }
 
 export interface CreateAuthOptions {
+  mail: MailPort;
   /**
    * Better Auth's own `rateLimit.enabled` defaults to `options.rateLimit?.enabled ?? isProduction`
    * (confirmed against the installed 1.6.25 source, `create-context.mjs`) -- correct in
@@ -34,7 +36,40 @@ export interface CreateAuthOptions {
   rateLimitEnabled?: boolean;
 }
 
-export function createAuth(environment: AuthEnvironment, options: CreateAuthOptions = {}) {
+/**
+ * Sends through `mail` and, on failure, logs a structured line before rethrowing -- deliberately
+ * not left to Better Auth's own `runInBackgroundOrAwait` (the mechanism both
+ * `/request-password-reset` and the sign-up-triggered verification send use to invoke this
+ * callback; confirmed by reading the installed `better-auth` package's
+ * `api/routes/password.mjs`, `api/routes/sign-up.mjs`, and `context/create-context.mjs`).
+ * Without a configured `advanced.backgroundTasks.handler` -- this project has none --
+ * `runInBackgroundOrAwait`'s default implementation is `try { await promise } catch (e) {
+ * logger.error(...) }`: it catches and only logs, it never rethrows into the route handler. That
+ * is deliberate on Better Auth's part, not a bug: `/request-password-reset` always answers with
+ * the same generic "if this email exists..." message so the response itself can never reveal
+ * whether an address is registered, and letting a send failure flip that response to an error
+ * would leak exactly that. This wrapper cannot change that HTTP-level behaviour and does not try
+ * to -- weakening the anti-enumeration response to make a failure "louder" would be the wrong
+ * trade to make unilaterally. What it guarantees is a structured, greppable log line
+ * (`password_reset_email_failed` / `verification_email_failed`) distinct from Better Auth's own
+ * generic logger call, so a Resend outage on the single most important flow in this slice
+ * (plan.md: "until this exists there is no account recovery path at all") is loud in production
+ * logs even though the client-visible response stays generic.
+ */
+function sendOrLogFailure(mail: MailPort, event: string, message: MailMessage): Promise<void> {
+  return mail.send(message).catch((error: unknown) => {
+    console.error(
+      JSON.stringify({
+        event,
+        to: message.to,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    throw error;
+  });
+}
+
+export function createAuth(environment: AuthEnvironment, dependencies: CreateAuthOptions) {
   const { database, pool } = createDatabase(environment.DATABASE_URL);
   // Computed once and handed back to the caller (see server.ts) rather than recomputed there:
   // this is the exact same allowlist app.ts's origin guard needs to enforce (see the
@@ -80,7 +115,7 @@ export function createAuth(environment: AuthEnvironment, options: CreateAuthOpti
       defaultCookieAttributes: { httpOnly: true, sameSite: 'lax', secure: useSecureCookies },
     },
     rateLimit: {
-      enabled: options.rateLimitEnabled ?? true,
+      enabled: dependencies.rateLimitEnabled ?? true,
       // Better Auth 1.6.25 only ships a working `'memory'` and `'secondary-storage'` backend.
       // The type also permits `'database'`, but reading the installed rate-limiter source shows
       // that path (`createDatabaseStorageWrapper`) reads and writes a `rateLimit` model through
@@ -102,7 +137,56 @@ export function createAuth(environment: AuthEnvironment, options: CreateAuthOpti
       enabled: true,
       minPasswordLength: PASSWORD_MIN_LENGTH,
       maxPasswordLength: PASSWORD_MAX_LENGTH,
-      requireEmailVerification: false,
+      // Ruling recorded in progress/transactional-email.md: new accounts require verification,
+      // and every account that already existed before this change was backfilled to
+      // `email_verified = true` in the migration that ships alongside it (see
+      // packages/database/drizzle for the backfill and packages/database/src/schema.ts for the
+      // column -- it already existed, this only starts enforcing it). Without that backfill,
+      // flipping this to `true` would lock out every existing account, including the owner's own,
+      // the exact self-inflicted outage the ruling exists to prevent.
+      requireEmailVerification: true,
+      sendResetPassword: async ({ user, url }) => {
+        await sendOrLogFailure(dependencies.mail, 'password_reset_email_failed', {
+          to: user.email,
+          subject: 'Reset your Finaler Draft password',
+          text:
+            `Someone requested a password reset for this Finaler Draft account. If this was ` +
+            `you, set a new password using the link below. It expires in one hour and can only ` +
+            `be used once.\n\n${url}\n\n` +
+            `If you did not request this, you can safely ignore this email -- your password has ` +
+            `not been changed.`,
+        });
+      },
+    },
+    emailVerification: {
+      sendVerificationEmail: async ({ user, url }) => {
+        await sendOrLogFailure(dependencies.mail, 'verification_email_failed', {
+          to: user.email,
+          subject: 'Verify your Finaler Draft email address',
+          text:
+            `Confirm this email address to finish setting up your Finaler Draft account. This ` +
+            `link expires in one hour.\n\n${url}\n\n` +
+            `If you did not create this account, you can safely ignore this email.`,
+        });
+      },
+      // Explicit rather than relying on the installed `sign-up.mjs`'s own fallback (`sendOnSignUp
+      // ?? emailAndPassword.requireEmailVerification`, so this would already default to `true`
+      // now that the setting above is `true`) -- spelling it out here means a reader doesn't have
+      // to trace that fallback through Better Auth's source to know a new account actually gets a
+      // verification email, not just a requirement it can never satisfy.
+      sendOnSignUp: true,
+      // Deliberately off. A rejected sign-in used to resend automatically, which made "try
+      // signing in again" the recovery path -- but it also meant every further attempt sent
+      // another email, so a visitor who did not verify promptly would accumulate them. The
+      // owner asked for an explicit affordance instead, and there now is one: sign-in.tsx offers
+      // a "Resend verification email" button on both the post-sign-up panel and the rejected
+      // sign-in, calling `/send-verification-email` directly. One click, one email.
+      //
+      // Note this path only ever fired on a *correct* password -- confirmed by reading the
+      // installed `api/routes/sign-in.mjs`, where the verification check sits after the password
+      // comparison -- so it was never a way to post mail to an address you did not control.
+      // Turning it off is about not surprising the account's real owner, not about abuse.
+      sendOnSignIn: false,
     },
   });
 

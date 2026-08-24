@@ -1,6 +1,7 @@
 import { screenplaySchema, type Screenplay } from '@finaler-draft/screenplay';
 import { PASSWORD_REQUIREMENTS_MESSAGE } from '@finaler-draft/config';
 import { z } from 'zod';
+import { authClient } from './authClient.js';
 
 const projectSchema = z.object({
   id: z.string().uuid(),
@@ -27,6 +28,13 @@ const sessionUserSchema = z.object({
   name: z.string(),
 });
 const sessionResponseSchema = z.object({ user: sessionUserSchema }).nullable();
+// Better Auth's `/sign-up/email` and `/sign-in/email` both return `{token, user}` (installed
+// `api/routes/sign-up.mjs`/`sign-in.mjs`). Only `signUp` below reads `token`: now that
+// `requireEmailVerification` (auth.ts) is on, a fresh sign-up no longer creates a session --
+// Better Auth skips auto-sign-in for an unverified account -- so `token` comes back `null`
+// instead of a session token, and that is exactly the signal sign-in.tsx needs to show "check
+// your email" instead of navigating to /projects as if a session had actually been created.
+const authTokenResponseSchema = z.object({ token: z.string().nullable() });
 const renameResponseSchema = z.object({ id: z.string().uuid(), title: z.string() });
 const deleteResponseSchema = z.object({ id: z.string().uuid() });
 const deletedProjectSchema = z.object({
@@ -66,6 +74,15 @@ async function json<T>(path: string, schema: z.ZodType<T>, init?: RequestInit): 
   return schema.parse(await response.json());
 }
 
+// Rendered anywhere an authentication mutation fails for a reason that isn't one of
+// `authErrorMessages`' specific codes -- a network failure, a 5xx, or a code this map doesn't
+// recognize. Exported (rather than kept file-local, as it was before this slice added the new
+// entry screens below) so `forgot-password.tsx` and `reset-password.tsx` can render the exact
+// same fallback sign-in.tsx always has, instead of a second copy of the same sentence drifting
+// out of sync with it.
+export const GENERIC_AUTH_ERROR_MESSAGE =
+  'We could not complete that request. Check your details and try again.';
+
 const authErrorMessages = {
   INVALID_EMAIL: 'Enter a valid email address.',
   INVALID_EMAIL_OR_PASSWORD: 'Invalid email or password.',
@@ -74,6 +91,14 @@ const authErrorMessages = {
   PASSWORD_TOO_LONG: PASSWORD_REQUIREMENTS_MESSAGE,
   USER_ALREADY_EXISTS: 'An account already exists for this email address.',
   USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL: 'An account already exists for this email address.',
+  // Reachable only from `resetPassword` below: the token in a password-reset link has already
+  // been used, was never valid, or its one-hour expiry (auth.ts) has passed.
+  INVALID_TOKEN: 'This link is invalid or has expired. Request a new one.',
+  // Reachable from `signIn` once `requireEmailVerification` (auth.ts) is on: the account exists
+  // and the password is correct, but the account has not verified its email. `sendOnSignIn`
+  // (also auth.ts) means this same rejected attempt already triggered a fresh verification email,
+  // so the message can honestly tell the visitor to look for one.
+  EMAIL_NOT_VERIFIED: 'Verify your email before signing in.',
 } as const;
 
 export type AuthValidationErrorCode = keyof typeof authErrorMessages;
@@ -125,6 +150,26 @@ export class AuthApiError extends ApiError {
 }
 
 /**
+ * Better Auth's client (authClient.ts) resolves to `{data, error}` rather than throwing --
+ * `@better-fetch/fetch`'s default, unchanged here. `error`, when present, spreads the parsed JSON
+ * error body (Better Auth's own `{code, message}` shape, the same one every hand-rolled request
+ * in this file already expects) together with `status`/`statusText` (confirmed against the
+ * installed `@better-fetch/fetch` source). Normalizing that into the same `AuthApiError`/`ApiError`
+ * pair `authenticationJson` throws means every consumer, regardless of which of the two request
+ * paths it used, can check `instanceof AuthApiError` the one way.
+ */
+function unwrapAuthClientResult<T>(result: {
+  data: T | null;
+  error: { code?: unknown; status: number } | null;
+}): T {
+  if (!result.error) return result.data as T;
+  const code = typeof result.error.code === 'string' ? result.error.code : undefined;
+  throw code && isAuthValidationErrorCode(code)
+    ? new AuthApiError(result.error.status, code)
+    : new ApiError(result.error.status);
+}
+
+/**
  * `GET /api/auth/get-session` returns HTTP 200 with a body of literally `null` when
  * signed out, not an error. Resolve that to `null` rather than throwing; still reject
  * a non-OK status and a body that is neither `null` nor a valid session.
@@ -136,19 +181,74 @@ async function session(): Promise<SessionUser | null> {
   return body?.user ?? null;
 }
 
+/**
+ * An absolute URL on the origin the visitor is actually looking at, for the pages emailed links
+ * land on.
+ *
+ * These were relative paths, and Better Auth resolves a relative `callbackURL`/`redirectTo`
+ * against `BETTER_AUTH_URL` -- the API's own origin. In production that is the same origin that
+ * serves the client, so a relative path happens to work. In development it is not: the API is on
+ * :3001 and Vite serves the app on :5173, so a verification link redirected the browser to
+ * `http://localhost:3001/verify-email`, where Fastify has no such route and answered 404. The
+ * emailed link was therefore unusable for anyone running the app locally -- found by the owner
+ * doing exactly that, and invisible to every test, because the browser suites run against the
+ * production build where both origins coincide.
+ *
+ * `window.location.origin` is the right source: it is by definition where the visitor's app is
+ * served from, in either environment. Better Auth validates these against its own trusted-origin
+ * list (`createAuth`'s `trustedOrigins`, which includes `CLIENT_ORIGIN`), so an absolute URL here
+ * is checked rather than blindly followed.
+ */
+function appUrl(path: string): string {
+  return new URL(path, window.location.origin).toString();
+}
+
 export const api = {
   session,
+  // Typed the same way `signUp` below is (`{token}`, not `z.unknown()`) so `sign-in.tsx` can read
+  // `.token` off either mutation's result without a runtime type guard. Sign-in's own `token` is
+  // never actually `null` in practice -- an unverified account is rejected before that response
+  // is ever built (`EMAIL_NOT_VERIFIED`, auth.ts) -- but sharing one schema keeps both call sites
+  // honest about the same real response shape instead of one of them being asserted away.
   signIn: (email: string, password: string) =>
-    authenticationJson('/api/auth/sign-in/email', z.unknown(), {
+    authenticationJson('/api/auth/sign-in/email', authTokenResponseSchema, {
       body: JSON.stringify({ email, password }),
       method: 'POST',
     }),
+  // `callbackURL` is where the verification link (auth.ts's `sendVerificationEmail`) redirects
+  // the browser after the server has already verified the token -- see verify-email.tsx, the
+  // landing page that link targets. Without this, Better Auth's own default (`encodeURIComponent
+  // ('/')`, installed `sign-up.mjs`) would land the visitor back at the app root instead of a
+  // page that actually says the email was confirmed.
   signUp: (name: string, email: string, password: string) =>
-    authenticationJson('/api/auth/sign-up/email', z.unknown(), {
-      body: JSON.stringify({ email, name, password }),
+    authenticationJson('/api/auth/sign-up/email', authTokenResponseSchema, {
+      body: JSON.stringify({ callbackURL: appUrl('/verify-email'), email, name, password }),
       method: 'POST',
     }),
   signOut: () => json('/api/auth/sign-out', z.unknown(), { method: 'POST' }),
+  // Better Auth's own anti-enumeration design (installed `api/routes/password.mjs`): this always
+  // answers the same generic success regardless of whether `email` is registered, so the caller
+  // cannot and must not branch on the result to reveal that -- see forgot-password.tsx, which
+  // renders one message unconditionally. `redirectTo` is where the emailed link sends the browser
+  // once the server has validated the token (with `?token=...` appended); reset-password.tsx is
+  // the page that reads it from there.
+  requestPasswordReset: (email: string) =>
+    authClient()
+      .requestPasswordReset({ email, redirectTo: appUrl('/reset-password') })
+      .then(unwrapAuthClientResult),
+  resetPassword: (newPassword: string, token: string) =>
+    authClient().resetPassword({ newPassword, token }).then(unwrapAuthClientResult),
+  // Requires no session, by design: an unverified account cannot sign in, so the visitor asking
+  // for a fresh link has no session to authenticate with (confirmed against the installed
+  // `api/routes/email-verification.mjs`, whose body is just `{ email }`). Better Auth applies its
+  // own 3-per-60-seconds limit to this path specifically, which is what keeps an unauthenticated
+  // send endpoint from becoming a way to post mail to an arbitrary address.
+  //
+  // `callbackURL` matches sign-up's, so a link from here lands on the same confirmation page.
+  sendVerificationEmail: (email: string) =>
+    authClient()
+      .sendVerificationEmail({ callbackURL: appUrl('/verify-email'), email })
+      .then(unwrapAuthClientResult),
   projects: () => json('/api/projects', z.array(projectSchema)),
   createProject: (title: string) =>
     json('/api/projects', projectSchema.pick({ id: true, title: true }), {
