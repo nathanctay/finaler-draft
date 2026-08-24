@@ -12,6 +12,7 @@ import {
   MAX_ROOT_BLOCKS,
   MAX_TOTAL_AUTHORED_TEXT_LENGTH,
   createDefaultTitlePage,
+  deriveCharacters,
   deriveScenes,
   parseScreenplay,
   safeParseScreenplay,
@@ -26,6 +27,14 @@ function uuidFor(index: number): string {
 
 function actionBlock(index: number, text = 'x') {
   return { id: uuidFor(index), type: 'action' as const, text };
+}
+
+function characterBlock(index: number, text: string) {
+  return { id: uuidFor(index), type: 'character' as const, text };
+}
+
+function dialogueBlock(index: number, text: string) {
+  return { id: uuidFor(index), type: 'dialogue' as const, text };
 }
 
 function fullDualDialogue(index: number) {
@@ -309,7 +318,287 @@ describe('screenplaySchema', () => {
     ]);
     expect(blocks).toEqual(before);
   });
+});
 
+describe('deriveCharacters', () => {
+  it('derives one character per name, covering both root cues and dual-dialogue cues', () => {
+    const characters = deriveCharacters(screenplayFixture.blocks);
+
+    expect(characters.map((character) => character.name)).toEqual(['ADA', 'MILES']);
+    expect(characters[0]?.cueBlockIds).toEqual([
+      '5e4c810d-75d9-4b2e-a1a2-0f7cb30fd77b',
+      'd5a7f0f4-235c-4d3c-8385-b5f7a3a97720',
+    ]);
+    expect(characters[1]?.cueBlockIds).toEqual(['311e1d44-8a79-42c0-a8f4-ee3a3ec2ddf7']);
+  });
+
+  // packages/layout's groups.ts speech grouping, mirrored here: a cue's `blockIds` extend past
+  // the cue itself to the parenthetical and dialogue that contiguously follow it, in both the
+  // root body (ADA's cue -> its own parenthetical -> its own dialogue, stopping at `transition`)
+  // and inside a dual_dialogue column (each cue -> the one dialogue line that follows it,
+  // stopping at the column's end). cueBlockIds stays cue-only throughout -- the two fields must
+  // not be conflated.
+  it("attributes a character's contiguous parenthetical and dialogue blocks, not only its cues", () => {
+    const characters = deriveCharacters(screenplayFixture.blocks);
+
+    expect(characters[0]?.name).toBe('ADA');
+    expect(characters[0]?.blockIds).toEqual([
+      '5e4c810d-75d9-4b2e-a1a2-0f7cb30fd77b', // ADA's root cue
+      'c3ca98bb-6720-45b1-85ae-8c851ba2f5be', // its parenthetical
+      '0f2b5f3c-6d17-4f18-8d95-90b06e93e13a', // its dialogue
+      'd5a7f0f4-235c-4d3c-8385-b5f7a3a97720', // ADA's dual_dialogue left-column cue
+      '76b460a1-1e89-45d9-89bd-f006ae87d0d7', // that column's dialogue
+    ]);
+
+    expect(characters[1]?.name).toBe('MILES');
+    expect(characters[1]?.blockIds).toEqual([
+      '311e1d44-8a79-42c0-a8f4-ee3a3ec2ddf7', // MILES's dual_dialogue right-column cue
+      'e6e0ff5d-988e-488d-9169-9c90bf9f97e4', // that column's dialogue
+    ]);
+  });
+
+  it('attributes a parenthetical between the cue and the dialogue to the same character', () => {
+    const blocks = [
+      characterBlock(480, 'MARA'),
+      { id: uuidFor(481), type: 'parenthetical' as const, text: '(beat)' },
+      dialogueBlock(482, 'Say it again.'),
+    ];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters).toHaveLength(1);
+    expect(characters[0]?.cueBlockIds).toEqual([uuidFor(480)]);
+    expect(characters[0]?.blockIds).toEqual([uuidFor(480), uuidFor(481), uuidFor(482)]);
+  });
+
+  // groups.ts's own degenerate case ("openOrphanSpeech"): schema-legal, not real screenplay
+  // convention. It must attribute to nobody -- not to whichever character happened to speak
+  // last -- because there is no cue to name an owner, and guessing would silently disagree with
+  // the paginator the moment the guess was wrong.
+  it('attributes an orphan dialogue block (no preceding cue) to nobody, not to the previous speaker', () => {
+    const blocks = [
+      characterBlock(490, 'MARA'),
+      dialogueBlock(491, 'Say it again.'),
+      { id: uuidFor(492), type: 'action' as const, text: 'A door slams.' },
+      dialogueBlock(493, 'An orphan line, spoken by no one in particular.'),
+    ];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters).toHaveLength(1);
+    expect(characters[0]?.name).toBe('MARA');
+    expect(characters[0]?.blockIds).toEqual([uuidFor(490), uuidFor(491)]);
+    expect(characters[0]?.blockIds).not.toContain(uuidFor(493));
+  });
+
+  it('does not carry a speech across a dual_dialogue column boundary, or in from the root before it', () => {
+    const dualDialogue = {
+      id: uuidFor(500),
+      type: 'dual_dialogue' as const,
+      left: {
+        id: uuidFor(501),
+        blocks: [characterBlock(502, 'ADA'), dialogueBlock(503, 'Go.')],
+      },
+      right: {
+        id: uuidFor(504),
+        blocks: [characterBlock(505, 'MILES'), dialogueBlock(506, 'Wait.')],
+      },
+    };
+    // A root-level MARA speech precedes the dual_dialogue block with no closing element between
+    // them, which must not leak into the left column's ADA speech.
+    const blocks = [characterBlock(507, 'MARA'), dialogueBlock(508, 'Before.'), dualDialogue];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters.map((character) => character.name)).toEqual(['MARA', 'ADA', 'MILES']);
+    expect(characters[0]?.blockIds).toEqual([uuidFor(507), uuidFor(508)]);
+    expect(characters[1]?.blockIds).toEqual([uuidFor(502), uuidFor(503)]);
+    expect(characters[2]?.blockIds).toEqual([uuidFor(505), uuidFor(506)]);
+  });
+
+  it('does not attribute a root dialogue block after a dual_dialogue to its last column speaker', () => {
+    const dualDialogue = {
+      id: uuidFor(510),
+      type: 'dual_dialogue' as const,
+      left: {
+        id: uuidFor(511),
+        blocks: [characterBlock(512, 'ADA'), dialogueBlock(513, 'Go.')],
+      },
+      right: {
+        id: uuidFor(514),
+        blocks: [characterBlock(515, 'MILES'), dialogueBlock(516, 'Wait.')],
+      },
+    };
+    // No character cue between the dual_dialogue block and this trailing dialogue -- it must be
+    // an orphan, not silently attributed to MILES because MILES's column happened to close last.
+    const blocks = [dualDialogue, dialogueBlock(517, 'An orphan line after the exchange.')];
+
+    const characters = deriveCharacters(blocks);
+
+    const miles = characters.find((character) => character.name === 'MILES');
+    expect(miles?.blockIds).toEqual([uuidFor(515), uuidFor(516)]);
+    expect(miles?.blockIds).not.toContain(uuidFor(517));
+    expect(characters.every((character) => !character.blockIds.includes(uuidFor(517)))).toBe(true);
+  });
+
+  it('does not mutate the input blocks', () => {
+    const blocks = structuredClone(screenplayFixture.blocks);
+    const before = structuredClone(blocks);
+
+    deriveCharacters(blocks);
+
+    expect(blocks).toEqual(before);
+  });
+
+  // The likeliest vacuous test for this derivation (per this scope's own progress file) is the
+  // grouping: it is not enough that the result list is non-empty, it must be exactly one entry.
+  // Includes the stacked form `MARA (V.O.) (CONT'D)` -- the standard rendering of a voice-over
+  // that continues across a page break -- because stopping extension-stripping after only the
+  // outermost parenthetical would leave it as a distinct fourth entry, splitting a real character
+  // silently on any imported script that has this line.
+  it("groups a plain cue with its V.O., O.S., and stacked V.O./CONT'D extensions as exactly one character", () => {
+    const blocks = [
+      characterBlock(400, 'MARA'),
+      characterBlock(401, 'MARA (V.O.)'),
+      characterBlock(402, 'MARA (O.S.)'),
+      characterBlock(403, "MARA (V.O.) (CONT'D)"),
+    ];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters).toHaveLength(1);
+    expect(characters[0]?.name).toBe('MARA');
+    expect(characters[0]?.cueBlockIds).toEqual([
+      uuidFor(400),
+      uuidFor(401),
+      uuidFor(402),
+      uuidFor(403),
+    ]);
+  });
+
+  it('normalizes period-less extension spellings to the punctuated form, deduplicated', () => {
+    const blocks = [
+      characterBlock(410, 'MARA (VO)'),
+      characterBlock(411, 'MARA (V.O.)'),
+      characterBlock(412, 'MARA (OS)'),
+      characterBlock(413, 'MARA (CONTD)'),
+    ];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters).toHaveLength(1);
+    expect(characters[0]?.extensions).toEqual(['V.O.', 'O.S.', "CONT'D"]);
+  });
+
+  it('strips an unrecognized trailing parenthetical as an extension without inventing a canonical spelling', () => {
+    const blocks = [characterBlock(420, 'MARA (SUBTITLED)')];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters).toEqual([
+      {
+        name: 'MARA',
+        extensions: ['SUBTITLED'],
+        cueBlockIds: [uuidFor(420)],
+        blockIds: [uuidFor(420)],
+      },
+    ]);
+  });
+
+  it('does not treat a parenthetical as an extension unless it is at the end of the line', () => {
+    const blocks = [characterBlock(430, 'MARA (LOUD) SCREAMING')];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters).toEqual([
+      {
+        name: 'MARA (LOUD) SCREAMING',
+        extensions: [],
+        cueBlockIds: [uuidFor(430)],
+        blockIds: [uuidFor(430)],
+      },
+    ]);
+  });
+
+  it('strips a stack of trailing parentheticals down to the bare name, in left-to-right order', () => {
+    const blocks = [characterBlock(435, "MARA (V.O.) (CONT'D)")];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters).toEqual([
+      {
+        name: 'MARA',
+        extensions: ['V.O.', "CONT'D"],
+        cueBlockIds: [uuidFor(435)],
+        blockIds: [uuidFor(435)],
+      },
+    ]);
+  });
+
+  it('counts every character cue in both columns of a dual_dialogue block, not only the first', () => {
+    const dualDialogue = {
+      id: uuidFor(440),
+      type: 'dual_dialogue' as const,
+      left: {
+        id: uuidFor(441),
+        blocks: [characterBlock(442, 'ADA'), dialogueBlock(443, 'Go.')],
+      },
+      right: {
+        id: uuidFor(444),
+        blocks: [
+          characterBlock(445, 'MILES'),
+          characterBlock(446, "MILES (CONT'D)"),
+          dialogueBlock(447, 'Wait.'),
+        ],
+      },
+    };
+
+    const characters = deriveCharacters([dualDialogue]);
+
+    expect(characters.map((character) => character.name)).toEqual(['ADA', 'MILES']);
+    expect(characters[1]?.cueBlockIds).toEqual([uuidFor(445), uuidFor(446)]);
+  });
+
+  it('preserves first-appearance order across root cues and dual-dialogue cues', () => {
+    const dualDialogue = {
+      id: uuidFor(450),
+      type: 'dual_dialogue' as const,
+      left: {
+        id: uuidFor(451),
+        blocks: [characterBlock(452, 'MILES'), dialogueBlock(453, 'Go.')],
+      },
+      right: {
+        id: uuidFor(454),
+        blocks: [characterBlock(455, 'ADA'), dialogueBlock(456, 'Wait.')],
+      },
+    };
+    const blocks = [characterBlock(457, 'ADA'), dualDialogue];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters.map((character) => character.name)).toEqual(['ADA', 'MILES']);
+  });
+
+  it('skips a character cue with no text at all', () => {
+    const blocks = [characterBlock(460, ''), characterBlock(461, 'MARA')];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters.map((character) => character.name)).toEqual(['MARA']);
+  });
+
+  it('keeps a cue that is only a parenthetical as its own literal name rather than dropping it', () => {
+    const blocks = [characterBlock(470, '(V.O.)')];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters).toEqual([
+      { name: '(V.O.)', extensions: [], cueBlockIds: [uuidFor(470)], blockIds: [uuidFor(470)] },
+    ]);
+  });
+});
+
+describe('screenplaySchema', () => {
   it('rejects annotations that do not anchor a text block or exceed its text range', () => {
     const unanchored = safeParseScreenplay({
       ...screenplayFixture,

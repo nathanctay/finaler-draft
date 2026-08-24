@@ -90,6 +90,40 @@ test('the real editor renders .script-body as the first in-flow child of .page, 
   expect(Math.abs((measured.firstLineTopIn ?? 0) - 1.0)).toBeLessThan(0.01);
 });
 
+// A sibling regression to the one the previous test guards against: `.panel-tabs > span`
+// (styles.css) stopped matching the Navigator's Scenes/Characters tabs the moment they became
+// real `<button role="tab">` controls, and nothing caught it -- every existing test asserted
+// behaviour (aria-selected, click-to-switch) and roles, never that a CSS rule still bound to the
+// real markup. A `<button>` carries browser-default chrome a `<span>` never had (a raised border,
+// a filled background), so an unmatched selector does not just do nothing -- it lets that default
+// chrome show through, which is exactly what the owner reported ("the large font and bezel...
+// looks like something from Windows 97"). Only a real browser computes this cascade at all
+// (jsdom-based unit tests do not apply the real stylesheet), so this has to live here.
+test('the Navigator tab buttons render as flat controls, not the browser default button chrome', async ({
+  page,
+}) => {
+  await createAndOpenScreenplay(page);
+  const scenesTab = page.getByRole('tab', { name: 'Scenes' });
+  await expect(scenesTab).toBeVisible();
+
+  const style = await scenesTab.evaluate((element) => {
+    const computed = getComputedStyle(element);
+    // Top/left/right, not the shorthand `borderWidth`: the design deliberately keeps a
+    // `border-bottom: 2px solid transparent` on every tab (reserved space for the underline
+    // `.selected` paints, so gaining it never shifts layout), which is real, intentional
+    // border-width on one side -- checking the shorthand would make this assertion fail on the
+    // correct, fixed styling as readily as on the regression. The browser's own default button
+    // bezel is uniform on all four sides, so a clean top edge alone already proves it is gone.
+    return {
+      borderTopWidth: computed.borderTopWidth,
+      backgroundColor: computed.backgroundColor,
+    };
+  });
+
+  expect(style.borderTopWidth).toBe('0px');
+  expect(style.backgroundColor).toBe('rgba(0, 0, 0, 0)');
+});
+
 test('a writer can create, autosave, and reload a private screenplay', async ({ page }) => {
   const token = crypto.randomUUID();
   const email = `writer-${token}@example.test`;
