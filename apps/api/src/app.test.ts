@@ -20,6 +20,84 @@ describe('GET /api/health', () => {
   });
 });
 
+describe('GET /api/test/last-mail', () => {
+  it('is not registered at all when no testMail option is supplied', async () => {
+    // The default `app` built above has no `testMail` option -- this is the production shape,
+    // and the assertion that matters: `undefined` here means the route was never registered, not
+    // that it exists and denies. A 404 that came from Fastify's own not-found handler (no
+    // `{error}` body shaped like the route's own 404 response) is how that's told apart from the
+    // route responding "no mail for this address."
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/test/last-mail?to=x@example.test',
+    });
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).not.toEqual({ error: 'No mail recorded for that address' });
+  });
+
+  it('refuses to exist under NODE_ENV=production even when testMail is supplied', async () => {
+    // Defence in depth against a single misplaced environment variable. This route returns the
+    // body of the last email sent to an address, which carries live password-reset and
+    // verification tokens -- and `FINALER_SYSTEM_TEST`, the flag that supplies `testMail`
+    // upstream, is not a production kill switch: `server.ts` also uses it to relax the
+    // "persistence required in production" check, so it can plausibly be set in a
+    // production-shaped environment. Being passed `testMail` must therefore not be sufficient.
+    const previous = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      const productionApp = await buildApp({
+        testMail: {
+          latestTo: () => ({
+            subject: 'Reset your password',
+            text: 'token-abc123',
+            to: 'writer@example.test',
+          }),
+        },
+      });
+      const response = await productionApp.inject({
+        method: 'GET',
+        url: '/api/test/last-mail?to=writer@example.test',
+      });
+      expect(response.statusCode).toBe(404);
+      // Not the route's own 404: the route must not have been registered at all. If it had been,
+      // this would return the recorded message and leak the token above.
+      expect(response.body).not.toContain('token-abc123');
+      expect(response.json()).not.toEqual({ error: 'No mail recorded for that address' });
+      await productionApp.close();
+    } finally {
+      process.env.NODE_ENV = previous;
+    }
+  });
+
+  it('returns the recorded message for the requested address when testMail is supplied', async () => {
+    const testMailApp = await buildApp({
+      testMail: {
+        latestTo: (to) =>
+          to === 'writer@example.test'
+            ? { to, subject: 'Verify your email', text: 'link: https://x' }
+            : undefined,
+      },
+    });
+    try {
+      const found = await testMailApp.inject({
+        method: 'GET',
+        url: '/api/test/last-mail?to=writer@example.test',
+      });
+      expect(found.statusCode).toBe(200);
+      expect(found.json()).toEqual({ subject: 'Verify your email', text: 'link: https://x' });
+
+      const notFound = await testMailApp.inject({
+        method: 'GET',
+        url: '/api/test/last-mail?to=nobody@example.test',
+      });
+      expect(notFound.statusCode).toBe(404);
+      expect(notFound.json()).toEqual({ error: 'No mail recorded for that address' });
+    } finally {
+      await testMailApp.close();
+    }
+  });
+});
+
 describe('production client serving', () => {
   it('uses the default client root when no override is supplied', async () => {
     const productionApp = await buildApp({ serveClient: true });

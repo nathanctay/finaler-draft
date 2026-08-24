@@ -3,6 +3,7 @@ import { createAuth } from './auth.js';
 import { buildApp } from './app.js';
 import { cachedProbe } from './cachedProbe.js';
 import { loadRootEnvironment, shouldLoadRootEnvironment } from './environment.js';
+import { createLoggingMailPort, createResendMailPort, type MailMessage } from './mail.js';
 import { createPostgresProjectStore } from './projects.js';
 
 try {
@@ -17,6 +18,7 @@ try {
   }
   const appOptions = {
     serveClient: environment.NODE_ENV === 'production' || systemTestMode,
+    systemTestMode,
     // Threaded through explicitly: `buildApp`'s own default already matches
     // `@finaler-draft/server-config`'s constants, but only this wiring makes
     // `API_RATE_LIMIT_MAX`/`API_RATE_LIMIT_WINDOW_MS` actually adjustable by an operator --
@@ -25,7 +27,6 @@ try {
       max: environment.API_RATE_LIMIT_MAX,
       timeWindowMs: environment.API_RATE_LIMIT_WINDOW_MS,
     },
-    disableAuthRateLimit: systemTestMode,
   };
   const app = persistence
     ? await buildPersistentApp(persistence, appOptions)
@@ -38,23 +39,55 @@ try {
 
 async function buildPersistentApp(
   persistence: NonNullable<ReturnType<typeof findPersistenceEnvironment>>,
-  options: { serveClient: boolean; disableAuthRateLimit: boolean },
+  options: {
+    serveClient: boolean;
+    systemTestMode: boolean;
+    rateLimit: { max: number; timeWindowMs: number };
+  },
 ) {
+  // `RESEND_API_KEY`/`MAIL_FROM_ADDRESS` unset selects the logging port -- always true outside
+  // production (server-config's `requirePersistenceEnvironment` refuses to start a production
+  // process without both), and also true here in every Playwright/system-test run, none of which
+  // set a real key.
+  //
+  // `testMailbox` and the `onSend` hook below exist only so a Playwright spec -- which has no way
+  // to inject a fake `MailPort` the way a Vitest test does -- can still complete the real
+  // Better Auth verification/reset flow against a real, just-issued token, instead of writing
+  // straight to the `email_verified` column and leaving `requireEmailVerification` itself
+  // unexercised by the browser-driven suites. It is only ever populated, and only ever served
+  // (see app.ts's `testMail` option), when `FINALER_SYSTEM_TEST` is set.
+  const testMailbox = new Map<string, MailMessage>();
+  const mail =
+    persistence.RESEND_API_KEY && persistence.MAIL_FROM_ADDRESS
+      ? createResendMailPort({
+          apiKey: persistence.RESEND_API_KEY,
+          from: persistence.MAIL_FROM_ADDRESS,
+        })
+      : createLoggingMailPort({
+          onSend: options.systemTestMode
+            ? (message) => testMailbox.set(message.to, message)
+            : undefined,
+        });
   // The browser system suite runs several Playwright workers in parallel, and every one of them
   // signs up a fresh writer from the same loopback address -- so Better Auth's own limit (3
   // requests per 10 seconds on `/sign-up` and `/sign-in`, hardcoded in 1.6.25) throttles the
   // workers against each other rather than defending anything. Measured directly: 4 of 11
-  // persistence tests fail with it on, repeatably.
+  // persistence tests fail with it on, repeatably. This slice adds *more* auth-endpoint traffic
+  // per test (verification, sign-in-after-verification), so the failure mode without this is even
+  // more pronounced, not less.
   //
-  // Disabled only under `FINALER_SYSTEM_TEST`, and named here rather than buried in a config
-  // default, so the opt-out is visible at the place it happens. The real behaviour keeps its own
-  // coverage: `persistence.integration.test.ts`'s "rate-limits repeated sign-in attempts" builds a
-  // dedicated instance with the override omitted, exercising exactly what a deployment runs.
+  // Reuses the same `systemTestMode` flag `testMailbox` above is gated on, rather than a second,
+  // separately named boolean meaning the same thing -- named here, visibly, at the one place it
+  // happens. The real behaviour keeps its own coverage:
+  // `persistence.integration.test.ts`'s "rate-limits repeated sign-in attempts" builds a dedicated
+  // instance with the override omitted, exercising exactly what a deployment runs.
   const { auth, pool, trustedOrigins } = createAuth(persistence, {
-    rateLimitEnabled: !options.disableAuthRateLimit,
+    mail,
+    rateLimitEnabled: !options.systemTestMode,
   });
   const app = await buildApp({
-    ...options,
+    serveClient: options.serveClient,
+    rateLimit: options.rateLimit,
     auth: {
       baseUrl: persistence.BETTER_AUTH_URL,
       handler: auth.handler,
@@ -62,6 +95,7 @@ async function buildPersistentApp(
       trustedOrigins,
     },
     projects: createPostgresProjectStore(pool),
+    testMail: options.systemTestMode ? { latestTo: (to) => testMailbox.get(to) } : undefined,
     // A cheap connectivity probe, not a migration-state check: it answers "can this process
     // reach the database at all," which is exactly what Railway's rollout gate needs to catch a
     // deployment whose DATABASE_URL is wrong or whose database is unreachable. It shares the same

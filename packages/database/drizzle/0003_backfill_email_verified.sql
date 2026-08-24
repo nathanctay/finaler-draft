@@ -1,0 +1,13 @@
+-- Data-only backfill, not a schema change: "user"."email_verified" already exists (it has been
+-- set, unconditionally false, by every sign-up since auth first shipped -- Better Auth's sign-up
+-- handler writes it regardless of whether verification was ever enforced). apps/api/src/auth.ts
+-- is switching `emailAndPassword.requireEmailVerification` from false to true in the same release
+-- this migration ships with. Without this backfill, every account created before that switch --
+-- including the owner's own -- would be refused sign-in the next time it tried, which is exactly
+-- the self-inflicted outage the ruling in progress/transactional-email.md exists to prevent.
+--
+-- Scoped to rows that are still false specifically so this migration is safe to run more than
+-- once (drizzle-kit's migrate command already tracks applied migrations and won't re-run this,
+-- but the predicate costs nothing and removes any doubt): a second run touches zero rows instead
+-- of re-writing every user row.
+update "user" set "email_verified" = true where "email_verified" = false;

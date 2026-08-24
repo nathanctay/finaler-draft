@@ -1,10 +1,16 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { signIn, verifyEmail } from './testMail.js';
 
 /**
  * A real signed-in writer with a real screenplay open in the real editor -- this is the only
  * route to that state, since `/projects/$projectId/screenplays/$screenplayId` requires both a
  * session and a screenplay to actually fetch, and this suite is the one place a disposable
  * database is available to provide both (see playwright.persistence.config.ts).
+ *
+ * Sign-up alone no longer reaches a signed-in workspace: `requireEmailVerification` (auth.ts)
+ * means Better Auth skips auto-sign-in for a freshly created, unverified account. `verifyEmail`
+ * and `signIn` (testMail.ts) are the real verification-then-sign-in path that now stands between
+ * "Create account" and "Your writing desk".
  */
 async function createAndOpenScreenplay(page: Page): Promise<{ canvas: Locator }> {
   const token = crypto.randomUUID();
@@ -17,6 +23,9 @@ async function createAndOpenScreenplay(page: Page): Promise<{ canvas: Locator }>
   await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByLabel('Confirm password').fill(password);
   await page.getByRole('button', { name: 'Create account' }).click();
+  await expect(page.getByRole('heading', { name: 'Check your email.' })).toBeVisible();
+  await verifyEmail(page, email);
+  await signIn(page, email, password);
   await expect(page.getByRole('heading', { name: 'Your writing desk' })).toBeVisible();
   await page.getByLabel('New project title').fill('Persistence project');
   await page.getByRole('button', { name: 'New project' }).click();
@@ -93,6 +102,9 @@ test('a writer can create, autosave, and reload a private screenplay', async ({ 
   await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByLabel('Confirm password').fill(password);
   await page.getByRole('button', { name: 'Create account' }).click();
+  await expect(page.getByRole('heading', { name: 'Check your email.' })).toBeVisible();
+  await verifyEmail(page, email);
+  await signIn(page, email, password);
   await expect(page.getByRole('heading', { name: 'Your writing desk' })).toBeVisible();
   await page.getByLabel('New project title').fill('Persistence project');
   await page.getByRole('button', { name: 'New project' }).click();
@@ -348,6 +360,9 @@ test('a writer can delete a screenplay from its overflow menu and undo the delet
   await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByLabel('Confirm password').fill(password);
   await page.getByRole('button', { name: 'Create account' }).click();
+  await expect(page.getByRole('heading', { name: 'Check your email.' })).toBeVisible();
+  await verifyEmail(page, email);
+  await signIn(page, email, password);
   await expect(page.getByRole('heading', { name: 'Your writing desk' })).toBeVisible();
   await page.getByLabel('New project title').fill('Delete-undo project');
   await page.getByRole('button', { name: 'New project' }).click();
@@ -399,6 +414,9 @@ test('a writer can delete a project and restore it from the Deleted page -- reac
   await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByLabel('Confirm password').fill(password);
   await page.getByRole('button', { name: 'Create account' }).click();
+  await expect(page.getByRole('heading', { name: 'Check your email.' })).toBeVisible();
+  await verifyEmail(page, email);
+  await signIn(page, email, password);
   await expect(page.getByRole('heading', { name: 'Your writing desk' })).toBeVisible();
   await page.getByLabel('New project title').fill('Delete-restore project');
   await page.getByRole('button', { name: 'New project' }).click();

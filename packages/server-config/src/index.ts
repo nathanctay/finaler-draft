@@ -46,6 +46,13 @@ const serverEnvironment = z.object({
     .int()
     .positive()
     .default(DEFAULT_API_RATE_LIMIT_WINDOW_MS),
+  // Resend's API key and the address transactional mail is sent from. Optional here for the same
+  // reason the persistence fields above are: a health/static-only process, and local development
+  // without a key, both need to start. `requirePersistenceEnvironment` below is what makes them
+  // mandatory in production -- see its comment for why plan.md treats a missing mail
+  // configuration as a launch blocker rather than a runtime surprise.
+  RESEND_API_KEY: z.string().optional(),
+  MAIL_FROM_ADDRESS: z.string().email().optional(),
 });
 
 export type ServerEnvironment = z.infer<typeof serverEnvironment>;
@@ -63,13 +70,25 @@ export function requirePersistenceEnvironment(environment: ServerEnvironment) {
       BETTER_AUTH_SECRET: z.string().min(32),
       BETTER_AUTH_URL: z.string().url(),
       CLIENT_ORIGIN: z.string().url().optional(),
+      RESEND_API_KEY: z.string().optional(),
+      MAIL_FROM_ADDRESS: z.string().email().optional(),
     })
     .parse(environment);
-  if (
-    environment.NODE_ENV === 'production' &&
-    new URL(persistence.BETTER_AUTH_URL).protocol !== 'https:'
-  ) {
-    throw new Error('BETTER_AUTH_URL must use HTTPS in production.');
+  if (environment.NODE_ENV === 'production') {
+    if (new URL(persistence.BETTER_AUTH_URL).protocol !== 'https:') {
+      throw new Error('BETTER_AUTH_URL must use HTTPS in production.');
+    }
+    // plan.md's launch-readiness section: "Until this exists there is no account recovery path
+    // at all." A production process that started without a working password-reset path should
+    // never happen quietly -- failing here, at startup, is what makes that a deploy-time error
+    // instead of the first stranded writer's problem. Development and test stay unaffected
+    // (`createLoggingMailPort` in mail.ts covers them: loud in the log, but never blocking).
+    if (!persistence.RESEND_API_KEY || !persistence.MAIL_FROM_ADDRESS) {
+      throw new Error(
+        'RESEND_API_KEY and MAIL_FROM_ADDRESS are required in production: without them, ' +
+          'password reset and email verification cannot be delivered.',
+      );
+    }
   }
   return persistence;
 }

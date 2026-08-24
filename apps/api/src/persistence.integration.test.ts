@@ -7,6 +7,7 @@ import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createAuth } from './auth.js';
 import { buildApp } from './app.js';
+import type { MailMessage, MailPort } from './mail.js';
 import { createPostgresProjectStore } from './projects.js';
 
 const adminUrl = process.env.TEST_DATABASE_URL;
@@ -18,6 +19,20 @@ let app: Awaited<ReturnType<typeof buildApp>> | undefined;
 let pool: Pool | undefined;
 let store: ReturnType<typeof createPostgresProjectStore> | undefined;
 let databaseCreated = false;
+
+// Captures the most recent message sent to each address, in place of a real Resend call. Test
+// doubles for the mail port -- not env-var trickery -- is how this suite keeps
+// `requireEmailVerification: true` (auth.ts) genuinely exercised: `signUp` below extracts the
+// real verification link from here and follows it through `app.inject`, rather than writing
+// `email_verified = true` straight into the database and leaving the production requirement
+// itself untested. See progress/transactional-email.md for why that distinction mattered enough
+// to be called out explicitly.
+const sentMail = new Map<string, MailMessage>();
+const mail: MailPort = {
+  async send(message) {
+    sentMail.set(message.to, message);
+  },
+};
 
 describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
   beforeAll(async () => {
@@ -39,7 +54,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       // enabled-by-default behavior, exercised by its own dedicated instance below instead
       // (see "rate-limits repeated sign-in attempts"). Disabled here explicitly, out loud, at
       // this call site, rather than the real default being loosened to accommodate this suite.
-      { rateLimitEnabled: false },
+      { mail, rateLimitEnabled: false },
     );
     pool = authentication.pool;
     store = createPostgresProjectStore(pool);
@@ -1187,11 +1202,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     // `beforeAll` -- that one has `rateLimitEnabled: false` so the rest of this file's fixture
     // setup isn't rate-limited. This one omits the override, so it runs under the real,
     // enabled-by-default configuration a deployed instance would.
-    const rateLimited = createAuth({
-      DATABASE_URL: databaseUrl!,
-      BETTER_AUTH_SECRET: 'integration-test-secret-with-at-least-thirty-two-characters',
-      BETTER_AUTH_URL: 'http://127.0.0.1:3001',
-    });
+    const rateLimited = createAuth(
+      {
+        DATABASE_URL: databaseUrl!,
+        BETTER_AUTH_SECRET: 'integration-test-secret-with-at-least-thirty-two-characters',
+        BETTER_AUTH_URL: 'http://127.0.0.1:3001',
+      },
+      { mail },
+    );
     const rateLimitedApp = await buildApp({
       auth: {
         baseUrl: 'http://127.0.0.1:3001',
@@ -1273,8 +1291,55 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       await unreachablePool.end();
     }
   });
+
+  it('refuses to sign in an account that has not verified its email, and allows it after real verification through the verify-email link', async () => {
+    // Deliberately not the `signUp` helper above -- that helper already verifies every account it
+    // creates, which is exactly the behaviour this test exists to prove is real rather than
+    // assumed. This drives sign-up, the pre-verification sign-in refusal, verification, and the
+    // post-verification sign-in directly, so a regression in `requireEmailVerification` (auth.ts)
+    // fails here even if every other test's use of `signUp` kept passing.
+    const email = 'verification-gate@example.test';
+    const password = 'correct-horse-battery-staple';
+
+    const signedUp = await app!.inject({
+      method: 'POST',
+      url: '/api/auth/sign-up/email',
+      payload: { name: 'Verification Gate', email, password },
+    });
+    expect(signedUp.statusCode).toBe(200);
+    // No session cookie: `requireEmailVerification: true` makes Better Auth skip auto-sign-in for
+    // a freshly created, unverified account (installed `api/routes/sign-up.mjs`'s
+    // `shouldSkipAutoSignIn`).
+    expect(signedUp.headers['set-cookie']).toBeUndefined();
+
+    const unverifiedSignIn = await app!.inject({
+      method: 'POST',
+      url: '/api/auth/sign-in/email',
+      payload: { email, password },
+    });
+    expect(unverifiedSignIn.statusCode).toBe(403);
+    expect(unverifiedSignIn.json()).toMatchObject({ code: 'EMAIL_NOT_VERIFIED' });
+
+    await verifyEmail(email);
+
+    const verifiedSignIn = await app!.inject({
+      method: 'POST',
+      url: '/api/auth/sign-in/email',
+      payload: { email, password },
+    });
+    expect(verifiedSignIn.statusCode).toBe(200);
+    expect(verifiedSignIn.headers['set-cookie']).toBeDefined();
+  });
 });
 
+/**
+ * Signs up, then completes real email verification and a real sign-in before returning a
+ * session cookie -- `requireEmailVerification: true` (auth.ts) means sign-up alone no longer
+ * creates a session (Better Auth skips auto-sign-in for an unverified account), so every one of
+ * this suite's ~20 call sites needs this to keep working exactly as before. Doing the real
+ * verification here, once, is what makes that transparent instead of requiring every call site to
+ * know about email verification at all.
+ */
 async function signUp(email: string) {
   const response = await app!.inject({
     method: 'POST',
@@ -1282,7 +1347,8 @@ async function signUp(email: string) {
     payload: { name: email.split('@')[0], email, password: 'correct-horse-battery-staple' },
   });
   expect(response.statusCode).toBe(200);
-  return { cookie: sessionCookie(response.headers['set-cookie']) };
+  await verifyEmail(email);
+  return { cookie: await signIn(email) };
 }
 
 async function signIn(email: string) {
@@ -1293,6 +1359,25 @@ async function signIn(email: string) {
   });
   expect(response.statusCode).toBe(200);
   return sessionCookie(response.headers['set-cookie']);
+}
+
+/**
+ * Extracts the real verification link Better Auth generated for `email` from the recording
+ * `MailPort` above and follows it through `app.inject` -- the same request a browser makes when a
+ * writer clicks the link in their inbox. A bug in the verification endpoint itself would still be
+ * caught here; writing `email_verified = true` directly into the database would not.
+ */
+async function verifyEmail(email: string) {
+  const message = sentMail.get(email);
+  if (!message) throw new Error(`No verification email was recorded for ${email}.`);
+  const link = message.text.match(/https?:\/\/\S+/)?.[0];
+  if (!link) throw new Error(`No verification link found in the email sent to ${email}.`);
+  const url = new URL(link);
+  const response = await app!.inject({ method: 'GET', url: `${url.pathname}${url.search}` });
+  // Success is a 302 redirect to `callbackURL` (sign-up's default is `/`, unless a test signed up
+  // through `/api/auth/sign-up/email` with its own `callbackURL`); Better Auth only answers 200
+  // with a JSON body when no `callbackURL` was supplied at all, which none of these requests omit.
+  expect(response.statusCode).toBe(302);
 }
 
 function sessionCookie(value: string | string[] | undefined) {

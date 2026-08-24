@@ -24,6 +24,7 @@
     "@tiptap/extension-history": "3.23.6",
     "@tiptap/pm": "3.23.6",
     "@tiptap/react": "3.23.6",
+    "better-auth": "1.6.25",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "zod": "4.4.3"

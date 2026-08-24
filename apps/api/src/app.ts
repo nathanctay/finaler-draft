@@ -13,6 +13,7 @@ import {
   validatorCompiler,
 } from 'fastify-type-provider-zod';
 import { z } from 'zod';
+import type { MailMessage } from './mail.js';
 import {
   ForbiddenError,
   type ProjectStore,
@@ -50,6 +51,18 @@ export interface BuildAppOptions {
    * or an unreachable database from ever being marked healthy in the first place.
    */
   databaseReady?: () => Promise<boolean>;
+  /**
+   * Exposes the most recent message sent to a given address. Registered only under
+   * `FINALER_SYSTEM_TEST` (see server.ts's `buildPersistentApp`) -- it is the one seam that lets
+   * a Playwright spec, which has no way to inject a fake `MailPort` the way a Vitest test does,
+   * complete the real `/api/auth/verify-email` (or reset) exchange against a real, just-issued
+   * token. The alternative -- writing straight to the `email_verified` column -- would leave
+   * `requireEmailVerification` itself unexercised by every browser-driven suite, which is exactly
+   * the "quietly configured off" failure mode progress/transactional-email.md warns against. It
+   * must never be reachable outside system-test mode: `undefined` here means the route below is
+   * not registered at all, not that it is registered and denies.
+   */
+  testMail?: { latestTo(to: string): MailMessage | undefined } | undefined;
   /**
    * The global per-client request cap (plan.md: "a global request cap, so a single client cannot
    * exhaust the API regardless of endpoint" -- distinct from Better Auth's own rate limiter in
@@ -238,7 +251,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   const typedApp = app.withTypeProvider<ZodTypeProvider>();
   app.setErrorHandler((error, request, reply) => {
     if (error.statusCode === 413) return reply.code(413).send({ error: 'Request too large' });
-    // @fastify/rate-limit (registered below) throws rather than replying directly, so its 429
+    // @fastify/rate-limit (registered above) throws rather than replying directly, so its 429
     // would otherwise fall into the generic 4xx branch below and come back as the misleading
     // "Invalid request" -- nothing about a rate-limited request was invalid.
     if (error.statusCode === 429) return reply.code(429).send({ error: 'Too many requests' });
@@ -318,6 +331,40 @@ export async function buildApp(options: BuildAppOptions = {}) {
       return { status: 'ok' as const };
     },
   );
+
+  // See `BuildAppOptions.testMail`'s comment: this route exists at all only under
+  // `FINALER_SYSTEM_TEST`, never in a real deployment, and it is registered here -- ahead of the
+  // actor-authorization hook below -- deliberately unauthenticated, the same as `/api/health`: a
+  // Playwright spec reads it before it has a session to authenticate with (it needs the
+  // verification link to *get* a session in the first place).
+  // Two independent conditions, deliberately. `options.testMail` alone is not enough: this route
+  // returns the body of the most recent email sent to an address, which is how a Playwright spec
+  // follows a real verification link -- and that body contains live password-reset and
+  // verification tokens. `FINALER_SYSTEM_TEST`, the flag that sets `testMail` upstream, is not a
+  // production kill switch: `server.ts` also uses it to *relax* the "persistence required in
+  // production" check, so it is a variable that can plausibly be set in a production-shaped
+  // environment. One misplaced environment variable must not be enough to serve account-recovery
+  // tokens to anyone who asks, so the route additionally refuses to exist under
+  // `NODE_ENV=production` regardless of what it was passed.
+  if (options.testMail && process.env.NODE_ENV !== 'production') {
+    typedApp.get(
+      '/api/test/last-mail',
+      {
+        schema: {
+          querystring: z.object({ to: z.string() }),
+          response: {
+            200: z.object({ subject: z.string(), text: z.string() }),
+            404: errorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        const message = options.testMail!.latestTo(request.query.to);
+        if (!message) return reply.code(404).send({ error: 'No mail recorded for that address' });
+        return { subject: message.subject, text: message.text };
+      },
+    );
+  }
 
   if (options.auth) {
     app.route({

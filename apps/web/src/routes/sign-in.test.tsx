@@ -291,4 +291,69 @@ describe('sign-in page', () => {
     expect(confirmInput).toHaveAttribute('type', 'text');
     expect(confirmInput).toHaveValue('a secure passphrase');
   });
+
+  it('offers a link to reset a forgotten password only in sign-in mode', async () => {
+    const user = userEvent.setup();
+    render(<SignInPage />);
+    expect(screen.getByRole('link', { name: 'Forgot password?' })).toHaveAttribute(
+      'href',
+      '/forgot-password',
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Create an account' }));
+    expect(screen.queryByRole('link', { name: 'Forgot password?' })).not.toBeInTheDocument();
+  });
+
+  it('shows a check-your-email message instead of navigating when sign-up succeeds without creating a session', async () => {
+    fetchMock.mockImplementation(
+      async (path) =>
+        ({
+          json: async () => (path === '/api/auth/sign-up/email' ? { token: null } : []),
+          ok: true,
+          status: 200,
+        }) as Response,
+    );
+    const user = userEvent.setup();
+    render(<SignInPage />);
+    await user.click(screen.getByRole('button', { name: 'Create an account' }));
+    await user.type(screen.getByLabelText('Name'), 'Writer');
+    await user.type(screen.getByLabelText('Email'), 'writer@example.com');
+    await user.type(screen.getByLabelText('Password'), 'a secure passphrase');
+    await user.type(screen.getByLabelText('Confirm password'), 'a secure passphrase');
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+
+    await screen.findByRole('heading', { name: 'Check your email.' });
+    expect(screen.getByRole('status')).toHaveTextContent('writer@example.com');
+    expect(routeState.navigate).not.toHaveBeenCalled();
+    expect(removeQueries).not.toHaveBeenCalled();
+
+    // The form itself is gone -- nothing left to submit until the link is followed -- but
+    // switching back to sign-in is still available, and clears the message.
+    expect(screen.queryByLabelText('Email')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'I already have an account' }));
+    expect(screen.queryByRole('heading', { name: 'Check your email.' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Email')).toBeInTheDocument();
+  });
+
+  it('navigates normally when sign-up returns a real session token', async () => {
+    fetchMock.mockImplementation(
+      async (path) =>
+        ({
+          json: async () => (path === '/api/auth/sign-up/email' ? { token: 'real-token' } : []),
+          ok: true,
+          status: 200,
+        }) as Response,
+    );
+    const user = userEvent.setup();
+    render(<SignInPage />);
+    await user.click(screen.getByRole('button', { name: 'Create an account' }));
+    await user.type(screen.getByLabelText('Name'), 'Writer');
+    await user.type(screen.getByLabelText('Email'), 'writer@example.com');
+    await user.type(screen.getByLabelText('Password'), 'a secure passphrase');
+    await user.type(screen.getByLabelText('Confirm password'), 'a secure passphrase');
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+
+    await vi.waitFor(() => expect(routeState.navigate).toHaveBeenCalledWith({ to: '/projects' }));
+    expect(removeQueries).toHaveBeenCalledWith({ queryKey: ['session'] });
+  });
 });

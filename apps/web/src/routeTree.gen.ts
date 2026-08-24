@@ -9,7 +9,10 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as SignInRouteImport } from './routes/sign-in'
+import { Route as ResetPasswordRouteImport } from './routes/reset-password'
+import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
 import { Route as DeletedRouteImport } from './routes/deleted'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ProjectsIndexRouteImport } from './routes/projects/index'
@@ -17,9 +20,24 @@ import { Route as ProjectsProjectIdRouteImport } from './routes/projects/$projec
 import { Route as ProjectsProjectIdIndexRouteImport } from './routes/projects/$projectId/index'
 import { Route as ProjectsProjectIdScreenplaysScreenplayIdRouteImport } from './routes/projects/$projectId.screenplays.$screenplayId'
 
+const VerifyEmailRoute = VerifyEmailRouteImport.update({
+  id: '/verify-email',
+  path: '/verify-email',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SignInRoute = SignInRouteImport.update({
   id: '/sign-in',
   path: '/sign-in',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResetPasswordRoute = ResetPasswordRouteImport.update({
+  id: '/reset-password',
+  path: '/reset-password',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ForgotPasswordRoute = ForgotPasswordRouteImport.update({
+  id: '/forgot-password',
+  path: '/forgot-password',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DeletedRoute = DeletedRouteImport.update({
@@ -57,7 +75,10 @@ const ProjectsProjectIdScreenplaysScreenplayIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/deleted': typeof DeletedRoute
+  '/forgot-password': typeof ForgotPasswordRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/sign-in': typeof SignInRoute
+  '/verify-email': typeof VerifyEmailRoute
   '/projects/$projectId': typeof ProjectsProjectIdRouteWithChildren
   '/projects': typeof ProjectsIndexRoute
   '/projects/$projectId/': typeof ProjectsProjectIdIndexRoute
@@ -66,7 +87,10 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/deleted': typeof DeletedRoute
+  '/forgot-password': typeof ForgotPasswordRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/sign-in': typeof SignInRoute
+  '/verify-email': typeof VerifyEmailRoute
   '/projects': typeof ProjectsIndexRoute
   '/projects/$projectId': typeof ProjectsProjectIdIndexRoute
   '/projects/$projectId/screenplays/$screenplayId': typeof ProjectsProjectIdScreenplaysScreenplayIdRoute
@@ -75,7 +99,10 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/deleted': typeof DeletedRoute
+  '/forgot-password': typeof ForgotPasswordRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/sign-in': typeof SignInRoute
+  '/verify-email': typeof VerifyEmailRoute
   '/projects/$projectId': typeof ProjectsProjectIdRouteWithChildren
   '/projects/': typeof ProjectsIndexRoute
   '/projects/$projectId/': typeof ProjectsProjectIdIndexRoute
@@ -86,7 +113,10 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/deleted'
+    | '/forgot-password'
+    | '/reset-password'
     | '/sign-in'
+    | '/verify-email'
     | '/projects/$projectId'
     | '/projects'
     | '/projects/$projectId/'
@@ -95,7 +125,10 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/deleted'
+    | '/forgot-password'
+    | '/reset-password'
     | '/sign-in'
+    | '/verify-email'
     | '/projects'
     | '/projects/$projectId'
     | '/projects/$projectId/screenplays/$screenplayId'
@@ -103,7 +136,10 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/deleted'
+    | '/forgot-password'
+    | '/reset-password'
     | '/sign-in'
+    | '/verify-email'
     | '/projects/$projectId'
     | '/projects/'
     | '/projects/$projectId/'
@@ -113,18 +149,42 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   DeletedRoute: typeof DeletedRoute
+  ForgotPasswordRoute: typeof ForgotPasswordRoute
+  ResetPasswordRoute: typeof ResetPasswordRoute
   SignInRoute: typeof SignInRoute
+  VerifyEmailRoute: typeof VerifyEmailRoute
   ProjectsProjectIdRoute: typeof ProjectsProjectIdRouteWithChildren
   ProjectsIndexRoute: typeof ProjectsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/verify-email': {
+      id: '/verify-email'
+      path: '/verify-email'
+      fullPath: '/verify-email'
+      preLoaderRoute: typeof VerifyEmailRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/sign-in': {
       id: '/sign-in'
       path: '/sign-in'
       fullPath: '/sign-in'
       preLoaderRoute: typeof SignInRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reset-password': {
+      id: '/reset-password'
+      path: '/reset-password'
+      fullPath: '/reset-password'
+      preLoaderRoute: typeof ResetPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/forgot-password': {
+      id: '/forgot-password'
+      path: '/forgot-password'
+      fullPath: '/forgot-password'
+      preLoaderRoute: typeof ForgotPasswordRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/deleted': {
@@ -189,7 +249,10 @@ const ProjectsProjectIdRouteWithChildren =
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   DeletedRoute: DeletedRoute,
+  ForgotPasswordRoute: ForgotPasswordRoute,
+  ResetPasswordRoute: ResetPasswordRoute,
   SignInRoute: SignInRoute,
+  VerifyEmailRoute: VerifyEmailRoute,
   ProjectsProjectIdRoute: ProjectsProjectIdRouteWithChildren,
   ProjectsIndexRoute: ProjectsIndexRoute,
 }
