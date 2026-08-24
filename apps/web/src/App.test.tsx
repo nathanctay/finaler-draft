@@ -65,6 +65,40 @@ function persistedScreenplay(
   };
 }
 
+// A small, editable (no dual dialogue, notes, page breaks, or extra title pages -- see
+// `editorContentFromScreenplay`'s own limits) screenplay with two characters, one of them cued
+// with a period-less and a punctuated extension, for the Characters tab tests below. MARA's two
+// cues must collapse to one Navigator entry with a single, normalized `V.O.` extension.
+const twoCharacterScreenplay: Screenplay = {
+  schemaVersion: 1,
+  id: '2c9f1b1a-1b1a-4b1a-8b1a-1b1a2c9f1b1a',
+  title: 'Two Voices',
+  documentSettings: DEFAULT_DOCUMENT_SETTINGS,
+  titlePages: [],
+  blocks: [
+    {
+      id: '2c9f1b1a-1b1a-4b1a-8b1a-000000000001',
+      type: 'scene_heading',
+      text: 'INT. STUDIO - NIGHT',
+    },
+    { id: '2c9f1b1a-1b1a-4b1a-8b1a-000000000002', type: 'character', text: 'MARA' },
+    { id: '2c9f1b1a-1b1a-4b1a-8b1a-000000000003', type: 'dialogue', text: 'Say it again.' },
+    { id: '2c9f1b1a-1b1a-4b1a-8b1a-000000000004', type: 'character', text: 'MARA (VO)' },
+    { id: '2c9f1b1a-1b1a-4b1a-8b1a-000000000005', type: 'dialogue', text: 'She never did.' },
+    { id: '2c9f1b1a-1b1a-4b1a-8b1a-000000000006', type: 'character', text: 'JOE' },
+    { id: '2c9f1b1a-1b1a-4b1a-8b1a-000000000007', type: 'dialogue', text: 'Neither did I.' },
+  ],
+  annotations: [],
+};
+
+const twoCharacterPersisted: PersistedScreenplay = {
+  id: twoCharacterScreenplay.id,
+  projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+  screenplay: twoCharacterScreenplay,
+  title: twoCharacterScreenplay.title,
+  version: 1,
+};
+
 describe('local semantic screenplay editor', () => {
   it('fails closed for canonical features the text-block editor cannot preserve', () => {
     expect(() => editorContentFromScreenplay(screenplayFixture)).toThrow(/not editable/i);
@@ -509,6 +543,173 @@ describe('local semantic screenplay editor', () => {
     await user.click(screen.getByRole('button', { name: 'Toggle navigator' }));
     expect(screen.getByRole('complementary', { name: 'Navigator' })).toBeVisible();
     expect(canvas).toBeVisible();
+  });
+
+  // plan.md's design rules: "full keyboard operation, visible focus, semantic controls." The
+  // Characters tab was, per plan.md's own description of the prior state, "a plain
+  // `<span>Characters</span>`... with no click handler, no derived character list, and no
+  // click-to-navigate" -- these tests exercise the replacement: a real `role="tab"`/`role="tabpanel"`
+  // pair, switchable by click or arrow key, with selection exposed via `aria-selected` rather than
+  // painted only through a CSS class, and a derived, groupable, clickable character list.
+  describe('Characters tab', () => {
+    it('is a real tab pair: aria-selected flips on click, and the rendered tabpanel actually swaps', async () => {
+      const user = userEvent.setup();
+      render(<App initial={twoCharacterPersisted} />);
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+      const scenesTab = screen.getByRole('tab', { name: 'Scenes' });
+      const charactersTab = screen.getByRole('tab', { name: 'Characters' });
+
+      // Asserted before any interaction: Scenes is the default-selected tab, per plan.md's
+      // description of the prior markup ("a plain `<span>Characters</span>` beside the working
+      // `Scenes` tab").
+      expect(scenesTab).toHaveAttribute('aria-selected', 'true');
+      expect(charactersTab).toHaveAttribute('aria-selected', 'false');
+      expect(screen.getByRole('tabpanel')).toHaveAttribute('id', 'navigator-panel-scenes');
+
+      await user.click(charactersTab);
+
+      expect(scenesTab).toHaveAttribute('aria-selected', 'false');
+      expect(charactersTab).toHaveAttribute('aria-selected', 'true');
+
+      // The likeliest vacuous version of this assertion is checking that a character's name
+      // appears anywhere on the page, which would pass even if the click never switched anything
+      // -- MARA's name never disappears from the DOM in this app (there is no second place it
+      // could render), so that assertion alone proves nothing. Scoping to the actual `tabpanel`
+      // (and to `id="navigator-panel-characters"` specifically, not just any `tabpanel`) is what
+      // proves the switch happened.
+      const panel = screen.getByRole('tabpanel');
+      expect(panel).toHaveAttribute('id', 'navigator-panel-characters');
+      expect(panel).toHaveAttribute('aria-labelledby', 'navigator-tab-characters');
+      expect(within(panel).getByRole('button', { name: /^MARA/ })).toBeVisible();
+      expect(within(panel).getByRole('button', { name: /^JOE/ })).toBeVisible();
+    });
+
+    it('groups MARA and MARA (VO) into one entry and renders its normalized extension beside the name', async () => {
+      render(<App initial={twoCharacterPersisted} />);
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+      const user = userEvent.setup();
+      await user.click(screen.getByRole('tab', { name: 'Characters' }));
+      const panel = screen.getByRole('tabpanel');
+
+      // Exactly one MARA row, not two -- the grouping guarantee this scope exists to build (see
+      // packages/screenplay's own `deriveCharacters` tests for the derivation-level coverage;
+      // this is the one place that grouping becomes writer-visible).
+      expect(within(panel).getAllByRole('button', { name: /^MARA/ })).toHaveLength(1);
+
+      const maraRow = within(panel).getByRole('button', { name: /^MARA/ });
+      // Period-less `(VO)` normalizes to `V.O.` -- plan.md: "accept the period-less spellings on
+      // import but normalise on output" -- and renders in the list, not only in derivation data
+      // nothing in the UI ever reads.
+      expect(maraRow).toHaveTextContent('V.O.');
+      expect(maraRow).not.toHaveTextContent('VO)');
+
+      // JOE has no extension, so nothing after "lines" should render for it -- no stray
+      // separator or empty extension list.
+      const joeRow = within(panel).getByRole('button', { name: /^JOE/ });
+      expect(joeRow).not.toHaveTextContent('·');
+    });
+
+    it('moves focus and switches the active tab with ArrowRight/ArrowLeft, not only by click', async () => {
+      const user = userEvent.setup();
+      render(<App initial={twoCharacterPersisted} />);
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+      const scenesTab = screen.getByRole('tab', { name: 'Scenes' });
+      const charactersTab = screen.getByRole('tab', { name: 'Characters' });
+      scenesTab.focus();
+      expect(scenesTab).toHaveFocus();
+      expect(scenesTab).toHaveAttribute('tabindex', '0');
+      expect(charactersTab).toHaveAttribute('tabindex', '-1');
+
+      await user.keyboard('{ArrowRight}');
+
+      expect(charactersTab).toHaveFocus();
+      expect(charactersTab).toHaveAttribute('aria-selected', 'true');
+      expect(charactersTab).toHaveAttribute('tabindex', '0');
+      expect(scenesTab).toHaveAttribute('tabindex', '-1');
+      expect(screen.getByRole('tabpanel')).toHaveAttribute('id', 'navigator-panel-characters');
+
+      await user.keyboard('{ArrowLeft}');
+
+      expect(scenesTab).toHaveFocus();
+      expect(scenesTab).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('tabpanel')).toHaveAttribute('id', 'navigator-panel-scenes');
+    });
+
+    it('ignores a key other than ArrowLeft/ArrowRight on a tab, leaving focus and selection alone', async () => {
+      const user = userEvent.setup();
+      render(<App initial={twoCharacterPersisted} />);
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+      const scenesTab = screen.getByRole('tab', { name: 'Scenes' });
+      scenesTab.focus();
+
+      await user.keyboard('a');
+
+      expect(scenesTab).toHaveFocus();
+      expect(scenesTab).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('tabpanel')).toHaveAttribute('id', 'navigator-panel-scenes');
+    });
+
+    it('navigates the editor to a character cue on click, mirroring how the Scenes tab already behaves', async () => {
+      const user = userEvent.setup();
+      render(<App initial={twoCharacterPersisted} />);
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+      // Starts on the scene heading, not a character cue, so the assertion below actually
+      // demonstrates the click moved the cursor rather than it having started there.
+      expect(screen.getByRole('combobox', { name: 'Active screenplay element' })).toHaveValue(
+        'scene_heading',
+      );
+
+      await user.click(screen.getByRole('tab', { name: 'Characters' }));
+      await user.click(within(screen.getByRole('tabpanel')).getByRole('button', { name: /^JOE/ }));
+
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: 'Active screenplay element' })).toHaveValue(
+          'character',
+        ),
+      );
+      // Selection is exposed on the row itself too, matching the Scenes tab's own convention.
+      expect(
+        within(screen.getByRole('tabpanel')).getByRole('button', { name: /^JOE/ }),
+      ).toHaveClass('selected');
+    });
+
+    it('highlights a character while the caret is in their dialogue, not only on their cue', async () => {
+      render(<App initial={twoCharacterPersisted} />);
+      const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+      const page = canvas.closest('.page');
+      if (!page) {
+        throw new Error('Missing .page ancestor of the editing canvas.');
+      }
+
+      // `twoCharacterScreenplay`'s last root block is JOE's own dialogue ('Neither did I.'), not
+      // his cue -- so moving the caret there and finding JOE highlighted is proof this reads
+      // `deriveCharacters`' full `blockIds` attribution (cue plus contiguous dialogue), not just
+      // `cueBlockIds`. Reuses the same "click below the last element moves the caret to the
+      // document end" mechanism the near-empty-screenplay test above already exercises and
+      // proves reliable in this environment (jsdom has no real layout, so a literal click inside
+      // a specific text node cannot be simulated -- `handlePageMouseDown`'s `'end'` focus is the
+      // one already-tested way to land the caret inside a block that is not a Navigator target).
+      vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 500, 100));
+      fireEvent.mouseDown(page, { clientY: 500 });
+
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: 'Active screenplay element' })).toHaveValue(
+          'dialogue',
+        ),
+      );
+
+      const user = userEvent.setup();
+      await user.click(screen.getByRole('tab', { name: 'Characters' }));
+      const panel = screen.getByRole('tabpanel');
+
+      expect(within(panel).getByRole('button', { name: /^JOE/ })).toHaveClass('selected');
+      expect(within(panel).getByRole('button', { name: /^MARA/ })).not.toHaveClass('selected');
+    });
   });
 
   it('converts the active element through the selector without changing its stable id', async () => {

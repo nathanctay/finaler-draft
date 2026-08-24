@@ -389,8 +389,18 @@ select:focus-visible,
   border-bottom: 1px solid var(--border-02);
 }
 
-.panel-tabs > span {
+/* `.panel-tabs`' children are `<button role="tab">` (App.tsx), not `<span>`s -- selecting on tag
+   name here rather than a class keeps this rule tied to what a tab structurally is, matching
+   `.panel-heading button` and `.scene-list button` just below, which do the same. A `<button>`
+   brings chrome a `<span>` never had (a UA border, a UA background, and on some browsers a
+   different font); `border: 0` and `background: transparent` remove the border and the fill,
+   and `font-size` restates the one property the global `button { font: inherit }` reset (see
+   this file's own top) does not itself guarantee identical to a `<span>`'s inherited size. Font
+   inheritance and the pointer cursor are already covered by that same global reset, so neither
+   is restated here. */
+.panel-tabs > button {
   padding: 7px 8px;
+  border: 0;
   border-bottom: 2px solid transparent;
   background: transparent;
   color: var(--text-10);
