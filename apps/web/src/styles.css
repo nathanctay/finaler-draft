@@ -931,10 +931,13 @@ select:focus-visible,
 }
 
 .script-body .page-break-continued {
-  /* CONT'D repeats the character cue it follows, so it takes the same bold weight a real
-     character element gets (see [data-screenplay-element='character'], [data-screenplay-element='scene_heading']
-     above). (MORE) is not a cue and stays regular weight, the default. */
-  font-weight: 700;
+  /* Not bolded, matching (MORE): both are generated page-break furniture, not an authored cue,
+     and Final Draft renders them identically. `packages/fdx/fixtures/final-draft-13-reference.fdx`'s
+     <MoresAndContinueds> carries a single <FontSpec ... Style=""/> covering both DialogueBottom
+     ("(MORE)") and DialogueTop ("(CONT'D)"), not two separate styles. This previously bolded
+     CONT'D on the reasoning that it repeats the character cue it follows; the reference fixture
+     settles that as a defect, not a stylistic choice (plan.md's "Writing-flow behaviours borrowed
+     from Final Draft", progress/writing-flow.md). */
 }
 
 .script-body .page-break-spacer {
