@@ -174,7 +174,14 @@ test.describe('page rendering: generated lines', () => {
     // Same physical indent as an authored character cue (3.7in from the page's left edge).
     expect(Math.abs(result.moreLeftIn - 3.7)).toBeLessThan(TOLERANCE_IN);
     expect(Math.abs(result.continuedLeftIn - 3.7)).toBeLessThan(TOLERANCE_IN);
-    expect(result.continuedFontWeight).toBe('700');
+    // Both render at the same, unbolded weight -- generated page-break furniture, not an authored
+    // cue, per `packages/fdx/fixtures/final-draft-13-reference.fdx`'s single, un-styled
+    // `<MoresAndContinueds><FontSpec ... Style=""/>` covering both `(MORE)` and `CONT'D` (see
+    // styles.css's `.page-break-continued` and plan.md's "Writing-flow behaviours borrowed from
+    // Final Draft"). This previously asserted CONT'D at 700 (bold); that was the defect this
+    // corrects, not a value this test should keep matching.
+    expect(result.continuedFontWeight).toBe(result.moreFontWeight);
+    expect(result.continuedFontWeight).toBe('400');
     expect(result.wrapperEditable).toBe('false');
     expect(result.wrapperUserSelect).toBe('none');
   });
