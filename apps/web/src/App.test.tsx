@@ -99,6 +99,72 @@ const twoCharacterPersisted: PersistedScreenplay = {
   version: 1,
 };
 
+// A screenplay cued entirely in lowercase/mixed case, for the case-insensitive grouping and
+// display-uppercase tests below. The writer never typed uppercase anywhere here -- the Navigator
+// must still display `MARA` (screenplay convention) without the block text itself ever being
+// rewritten, and the caret-highlighting membership test (`activeCharacter`, keyed on `blockIds`,
+// not on `name`'s case) must keep working when the authored text is not uppercase.
+const mixedCaseCharacterScreenplay: Screenplay = {
+  schemaVersion: 1,
+  id: '3d9f1b1a-1b1a-4b1a-8b1a-1b1a2c9f1b1a',
+  title: 'Mixed Case',
+  documentSettings: DEFAULT_DOCUMENT_SETTINGS,
+  titlePages: [],
+  blocks: [
+    {
+      id: '3d9f1b1a-1b1a-4b1a-8b1a-000000000001',
+      type: 'scene_heading',
+      text: 'INT. STUDIO - NIGHT',
+    },
+    { id: '3d9f1b1a-1b1a-4b1a-8b1a-000000000002', type: 'character', text: 'mara' },
+    { id: '3d9f1b1a-1b1a-4b1a-8b1a-000000000003', type: 'parenthetical', text: '(beat)' },
+    { id: '3d9f1b1a-1b1a-4b1a-8b1a-000000000004', type: 'dialogue', text: 'Say it again.' },
+    { id: '3d9f1b1a-1b1a-4b1a-8b1a-000000000005', type: 'character', text: 'Mara (v.o.)' },
+    { id: '3d9f1b1a-1b1a-4b1a-8b1a-000000000006', type: 'dialogue', text: 'She never did.' },
+  ],
+  annotations: [],
+};
+
+const mixedCaseCharacterPersisted: PersistedScreenplay = {
+  id: mixedCaseCharacterScreenplay.id,
+  projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+  screenplay: mixedCaseCharacterScreenplay,
+  title: mixedCaseCharacterScreenplay.title,
+  version: 1,
+};
+
+// A variant ending in a parenthetical (rather than dialogue) authored under a lowercase cue, so
+// the caret-in-a-parenthetical case of the highlighting test below can use the same "click below
+// the last element moves the caret to the document end" mechanism the dialogue case uses --
+// that mechanism only ever reaches whichever block is last, so each caret-position case needs its
+// own fixture with the target block type last.
+const mixedCaseParentheticalLastScreenplay: Screenplay = {
+  schemaVersion: 1,
+  id: '4d9f1b1a-1b1a-4b1a-8b1a-1b1a2c9f1b1a',
+  title: 'Mixed Case Parenthetical',
+  documentSettings: DEFAULT_DOCUMENT_SETTINGS,
+  titlePages: [],
+  blocks: [
+    {
+      id: '4d9f1b1a-1b1a-4b1a-8b1a-000000000001',
+      type: 'scene_heading',
+      text: 'INT. STUDIO - NIGHT',
+    },
+    { id: '4d9f1b1a-1b1a-4b1a-8b1a-000000000002', type: 'character', text: 'mara' },
+    { id: '4d9f1b1a-1b1a-4b1a-8b1a-000000000003', type: 'dialogue', text: 'Say it again.' },
+    { id: '4d9f1b1a-1b1a-4b1a-8b1a-000000000004', type: 'parenthetical', text: '(beat)' },
+  ],
+  annotations: [],
+};
+
+const mixedCaseParentheticalLastPersisted: PersistedScreenplay = {
+  id: mixedCaseParentheticalLastScreenplay.id,
+  projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+  screenplay: mixedCaseParentheticalLastScreenplay,
+  title: mixedCaseParentheticalLastScreenplay.title,
+  version: 1,
+};
+
 describe('local semantic screenplay editor', () => {
   it('fails closed for canonical features the text-block editor cannot preserve', () => {
     expect(() => editorContentFromScreenplay(screenplayFixture)).toThrow(/not editable/i);
@@ -609,6 +675,91 @@ describe('local semantic screenplay editor', () => {
       // separator or empty extension list.
       const joeRow = within(panel).getByRole('button', { name: /^JOE/ });
       expect(joeRow).not.toHaveTextContent('·');
+    });
+
+    // The product decision under test end-to-end: a writer who never types uppercase still gets
+    // one Navigator entry, displayed uppercase (screenplay convention), and clicking it still
+    // navigates into their lowercase-authored cue -- the display transform must not have broken
+    // navigation or turned two differently-cased cues into two rows.
+    it('groups lowercase and mixed-case cues into one uppercase-displayed entry, and navigates to the lowercase cue on click', async () => {
+      const user = userEvent.setup();
+      render(<App initial={mixedCaseCharacterPersisted} />);
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+      await user.click(screen.getByRole('tab', { name: 'Characters' }));
+      const panel = screen.getByRole('tabpanel');
+
+      // Exactly one row, displayed uppercase, even though neither authored cue ('mara',
+      // 'Mara (v.o.)') was ever typed uppercase.
+      const rows = within(panel).getAllByRole('button', { name: /mara/i });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toHaveTextContent('MARA');
+      expect(rows[0]).toHaveTextContent('V.O.');
+
+      await user.click(rows[0] as HTMLElement);
+
+      // Navigates to `cueBlockIds[0]`, the first-cued 'mara' block -- proving the click still
+      // resolves to a real block id despite the display name no longer matching the writer's
+      // literal text.
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: 'Active screenplay element' })).toHaveValue(
+          'character',
+        ),
+      );
+      expect(rows[0]).toHaveClass('selected');
+    });
+
+    it('highlights the uppercase-displayed row while the caret is in a lowercase-authored dialogue block', async () => {
+      render(<App initial={mixedCaseCharacterPersisted} />);
+      const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+      const page = canvas.closest('.page');
+      if (!page) {
+        throw new Error('Missing .page ancestor of the editing canvas.');
+      }
+
+      // Same "click below the last element moves the caret to the document end" mechanism the
+      // JOE dialogue-highlighting test above already relies on -- `mixedCaseCharacterScreenplay`'s
+      // last block is 'She never did.', dialogue following the mixed-case 'Mara (v.o.)' cue.
+      vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 500, 100));
+      fireEvent.mouseDown(page, { clientY: 500 });
+
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: 'Active screenplay element' })).toHaveValue(
+          'dialogue',
+        ),
+      );
+
+      const user = userEvent.setup();
+      await user.click(screen.getByRole('tab', { name: 'Characters' }));
+      const panel = screen.getByRole('tabpanel');
+
+      expect(within(panel).getByRole('button', { name: /^MARA/ })).toHaveClass('selected');
+    });
+
+    it('highlights the uppercase-displayed row while the caret is in a parenthetical under a lowercase cue', async () => {
+      render(<App initial={mixedCaseParentheticalLastPersisted} />);
+      const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+      const page = canvas.closest('.page');
+      if (!page) {
+        throw new Error('Missing .page ancestor of the editing canvas.');
+      }
+
+      // `mixedCaseParentheticalLastScreenplay`'s last block is the '(beat)' parenthetical
+      // following the lowercase 'mara' cue.
+      vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 500, 100));
+      fireEvent.mouseDown(page, { clientY: 500 });
+
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: 'Active screenplay element' })).toHaveValue(
+          'parenthetical',
+        ),
+      );
+
+      const user = userEvent.setup();
+      await user.click(screen.getByRole('tab', { name: 'Characters' }));
+      const panel = screen.getByRole('tabpanel');
+
+      expect(within(panel).getByRole('button', { name: /^MARA/ })).toHaveClass('selected');
     });
 
     it('moves focus and switches the active tab with ArrowRight/ArrowLeft, not only by click', async () => {

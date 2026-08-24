@@ -266,16 +266,28 @@ export function deriveScenes(blocks: readonly ScreenplayBlock[]): DerivedScene[]
 
 export type DerivedCharacter = {
   /**
-   * The extension-stripped, normalized grouping key. plan.md's "Character names and extensions":
-   * "`MARA`, `MARA (V.O.)`, and `MARA (O.S.)` are one character, not three" -- this is the one
-   * name they group under.
+   * The extension-stripped grouping key, in canonical uppercase. plan.md's "Character names and
+   * extensions": "`MARA`, `MARA (V.O.)`, and `MARA (O.S.)` are one character, not three" -- this
+   * is the one name they group under. Grouping is case-insensitive on top of that: `MARA`,
+   * `Mara`, and `mara` are also one character, because screenplay convention is that character
+   * cues are uppercase, and the Navigator displays that convention regardless of what the writer
+   * typed. The writer's own text is never rewritten to enforce this -- only this derived,
+   * display-facing field is uppercased. Whichever spelling was cued first in document order
+   * decides nothing observable here (the field is always uppercase), but does decide the case
+   * used internally to key the grouping map, which is why cues are folded to uppercase before
+   * lookup rather than compared case-insensitively on every read.
    */
   name: string;
   /**
-   * Every extension this character was cued with, normalized and deduplicated in first-seen
-   * order; empty when the character is never cued with a parenthetical. plan.md: "accept the
-   * period-less spellings on import but normalise on output" -- `(VO)` and `(V.O.)` both
-   * contribute the single normalized entry `'V.O.'` here, never two.
+   * Every extension this character was cued with, normalized and deduplicated case-insensitively
+   * in first-seen order; empty when the character is never cued with a parenthetical. plan.md:
+   * "accept the period-less spellings on import but normalise on output" -- `(VO)` and `(V.O.)`
+   * both contribute the single normalized entry `'V.O.'` here, never two, and that normalization
+   * already folds case (`CONVENTIONAL_CHARACTER_EXTENSIONS` is keyed by uppercased, punctuation-
+   * stripped letters). An unconventional extension such as `(SUBTITLED)` is not forced to any
+   * particular case -- it passes through exactly as the writer typed it, matching `name`'s "we do
+   * not rewrite what the writer typed" rule -- but two spellings differing only in case, such as
+   * `(subtitled)` and `(SUBTITLED)`, still dedupe to whichever spelling was cued first.
    */
   extensions: readonly string[];
   /**
@@ -389,10 +401,10 @@ type SpeechBlock = { id: string; type: 'character' | 'parenthetical' | 'dialogue
  * `dual_dialogue` block and whatever precedes or follows it at the root level.
  *
  * A cue whose text is nothing but an unusable parenthetical (see `splitCharacterCue`) still opens
- * a speech under its literal text rather than being dropped, so no authored cue silently vanishes
- * from the list; the empty-name case that *is* dropped is a `character` block with no text at
- * all, which closes whatever speech was open (via `closeSpeech`, matching `groups.ts`'s own
- * `character` case) without opening a new one.
+ * a speech under its own text (uppercased, per `DerivedCharacter.name`) rather than being
+ * dropped, so no authored cue silently vanishes from the list; the empty-name case that *is*
+ * dropped is a `character` block with no text at all, which closes whatever speech was open (via
+ * `closeSpeech`, matching `groups.ts`'s own `character` case) without opening a new one.
  */
 export function deriveCharacters(blocks: readonly ScreenplayBlock[]): DerivedCharacter[] {
   const order: string[] = [];
@@ -415,19 +427,32 @@ export function deriveCharacters(blocks: readonly ScreenplayBlock[]): DerivedCha
   let openEntry: CharacterEntry | undefined;
 
   const openCue = (cueBlock: { id: string; text: string }): void => {
-    const { name, extensions: cueExtensions } = splitCharacterCue(cueBlock.text);
-    if (name === '') {
+    const { name: rawName, extensions: cueExtensions } = splitCharacterCue(cueBlock.text);
+    if (rawName === '') {
       // No name to open a speech under -- closes whatever was open, same as any other block this
       // derivation does not recognize as continuing a speech.
       openEntry = undefined;
       return;
     }
 
+    // Grouping is case-insensitive and the displayed name is always uppercase (see
+    // `DerivedCharacter.name`'s doc comment), so the map key -- and the value stored in `name` --
+    // is the uppercased spelling, not the writer's literal text. `MARA`, `Mara`, and `mara` all
+    // fold to the same key and the same displayed `'MARA'`, regardless of which one was cued
+    // first.
+    const name = rawName.toUpperCase();
     const entry = getOrCreateEntry(name);
     entry.cueBlockIds.push(cueBlock.id);
     entry.blockIds.push(cueBlock.id);
     for (const extension of cueExtensions) {
-      if (!entry.extensions.includes(extension)) {
+      // Case-insensitive dedup: `(subtitled)` and `(SUBTITLED)` are the same extension, and
+      // whichever spelling was cued first is the one kept -- matching the same "don't invent a
+      // canonical spelling for what we don't already normalize" rule `normalizeCharacterExtension`
+      // follows for conventional extensions.
+      const alreadyPresent = entry.extensions.some(
+        (existing) => existing.toUpperCase() === extension.toUpperCase(),
+      );
+      if (!alreadyPresent) {
         entry.extensions.push(extension);
       }
     }

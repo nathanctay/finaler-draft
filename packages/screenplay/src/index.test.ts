@@ -596,6 +596,64 @@ describe('deriveCharacters', () => {
       { name: '(V.O.)', extensions: [], cueBlockIds: [uuidFor(470)], blockIds: [uuidFor(470)] },
     ]);
   });
+
+  // The product decision under test: character cues group case-insensitively, and the Navigator
+  // always displays the canonical uppercase form -- screenplay convention -- regardless of what
+  // the writer actually typed. The writer's own text (the block's `text` field) is never rewritten;
+  // only this derived `name` is uppercased. Three differently-cased cues for the same character,
+  // one of them carrying a lowercase-spelled extension, must still be exactly one entry.
+  it('groups character cues case-insensitively and displays the canonical uppercase name', () => {
+    const blocks = [
+      characterBlock(600, 'VIVAMUS'),
+      characterBlock(601, 'Vivamus'),
+      characterBlock(602, 'vivamus (v.o.)'),
+    ];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters).toHaveLength(1);
+    expect(characters[0]?.name).toBe('VIVAMUS');
+    expect(characters[0]?.extensions).toEqual(['V.O.']);
+    expect(characters[0]?.cueBlockIds).toEqual([uuidFor(600), uuidFor(601), uuidFor(602)]);
+    expect(characters[0]?.blockIds).toEqual([uuidFor(600), uuidFor(601), uuidFor(602)]);
+
+    // The writer's literal text is untouched -- uppercasing is display-only, on the derived
+    // `name`, never a rewrite of authored content.
+    expect(blocks[1]?.text).toBe('Vivamus');
+    expect(blocks[2]?.text).toBe('vivamus (v.o.)');
+  });
+
+  it('groups mixed-case cues under whichever spelling was cued first, still displayed uppercase', () => {
+    const blocks = [characterBlock(610, 'mara'), characterBlock(611, 'MARA')];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters).toHaveLength(1);
+    expect(characters[0]?.name).toBe('MARA');
+    expect(characters[0]?.cueBlockIds).toEqual([uuidFor(610), uuidFor(611)]);
+  });
+
+  it('dedupes an unconventional extension case-insensitively, keeping the first-seen spelling', () => {
+    const blocks = [
+      characterBlock(620, 'MARA (subtitled)'),
+      characterBlock(621, 'MARA (SUBTITLED)'),
+      characterBlock(622, 'MARA (Subtitled)'),
+    ];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters).toHaveLength(1);
+    expect(characters[0]?.extensions).toEqual(['subtitled']);
+  });
+
+  it('still normalizes a lowercase-spelled conventional extension to the punctuated uppercase form', () => {
+    const blocks = [characterBlock(630, 'mara (vo)')];
+
+    const characters = deriveCharacters(blocks);
+
+    expect(characters[0]?.name).toBe('MARA');
+    expect(characters[0]?.extensions).toEqual(['V.O.']);
+  });
 });
 
 describe('screenplaySchema', () => {
