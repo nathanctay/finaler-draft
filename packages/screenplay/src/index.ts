@@ -264,6 +264,236 @@ export function deriveScenes(blocks: readonly ScreenplayBlock[]): DerivedScene[]
   return scenes;
 }
 
+export type DerivedCharacter = {
+  /**
+   * The extension-stripped, normalized grouping key. plan.md's "Character names and extensions":
+   * "`MARA`, `MARA (V.O.)`, and `MARA (O.S.)` are one character, not three" -- this is the one
+   * name they group under.
+   */
+  name: string;
+  /**
+   * Every extension this character was cued with, normalized and deduplicated in first-seen
+   * order; empty when the character is never cued with a parenthetical. plan.md: "accept the
+   * period-less spellings on import but normalise on output" -- `(VO)` and `(V.O.)` both
+   * contribute the single normalized entry `'V.O.'` here, never two.
+   */
+  extensions: readonly string[];
+  /**
+   * Every character-cue block id naming this character, in document order, including both
+   * columns of any `dual_dialogue` block. A cue only -- not the dialogue or parentheticals that
+   * follow it. Used for navigation: the Navigator jumps to `cueBlockIds[0]`.
+   */
+  cueBlockIds: readonly string[];
+  /**
+   * Every block id attributed to this character: each id in `cueBlockIds`, plus the contiguous
+   * run of `parenthetical`/`dialogue` blocks that follows it, ending at the first block that is
+   * neither -- a superset of `cueBlockIds`, in document order. This is the same "speech" grouping
+   * `packages/layout`'s `groups.ts` (`buildGroups`) uses for pagination ("a character cue plus
+   * its contiguous parentheticals and dialogue"), deliberately reused rather than reinvented: if
+   * the Navigator and the paginator ever disagreed about which character owns a line, the
+   * Navigator would be wrong. A `parenthetical`/`dialogue` block with no preceding cue in its own
+   * contiguous run (schema-legal, not real screenplay convention -- `groups.ts` calls this an
+   * orphan speech) attributes to nobody, matching `groups.ts` exactly: it has no character name to
+   * attribute to, and guessing "whichever character spoke last" would silently disagree with the
+   * paginator the moment that guess was wrong. Used for membership tests: the Navigator highlights
+   * a character whenever the caret is anywhere in `blockIds`, not only on a cue.
+   */
+  blockIds: readonly string[];
+};
+
+/**
+ * The conventional screenplay character extensions (plan.md's "Character names and extensions"
+ * names exactly this set), keyed by their letters alone -- periods and apostrophes stripped -- so
+ * `(V.O.)`, `(V.O)`, and `(VO)` all resolve to the same key. Used only to *normalize* a
+ * recognized extension's spelling; which parenthetical counts as an extension in the first place
+ * is decided structurally in `splitCharacterCue`, not by membership in this table -- plan.md is
+ * explicit that the fixed set is "what to test against, not what to implement against."
+ */
+const CONVENTIONAL_CHARACTER_EXTENSIONS: Readonly<Record<string, string>> = {
+  VO: 'V.O.',
+  OS: 'O.S.',
+  OC: 'O.C.',
+  CONTD: "CONT'D",
+};
+
+function normalizeCharacterExtension(rawExtension: string): string {
+  const key = rawExtension.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return CONVENTIONAL_CHARACTER_EXTENSIONS[key] ?? rawExtension;
+}
+
+/**
+ * Splits a character cue's raw text into its base name and every extension stacked on it -- the
+ * parenthetical that can follow a character on the same line, as in `MARA (V.O.)`. Strips *any*
+ * trailing parenthetical, matched structurally (a `(...)` group anchored at the end of the line),
+ * rather than checking membership in `CONVENTIONAL_CHARACTER_EXTENSIONS`: plan.md requires "treat
+ * any trailing parenthetical on a character line as an extension rather than matching a fixed
+ * list. The conventional set... is what to test against, not what to implement against." Only a
+ * trailing group strips -- `MARA (LOUD) SCREAMING` has no parenthetical at the end of the line, so
+ * nothing strips and the whole line is the name.
+ *
+ * Stripping repeats until no trailing parenthetical remains, rather than stopping after one:
+ * `MARA (V.O.) (CONT'D)` -- the standard rendering of a voice-over that continues across a page
+ * break, not an exotic case -- must still group under `MARA`, per plan.md's own grouping
+ * guarantee ("`MARA`, `MARA (V.O.)`, and `MARA (O.S.)` are one character, not three"). Stopping at
+ * the outermost group would leave `MARA (V.O.)` as a name distinct from `MARA`, splitting one
+ * real character into two Navigator entries on any script that has this line. Extensions are
+ * returned in the order a reader encounters them left to right in the original text (innermost,
+ * i.e. closest to the name, first), which for `MARA (V.O.) (CONT'D)` is `['V.O.', "CONT'D"]`.
+ *
+ * A name-less or empty parenthetical (`(V.O.)` alone, or `MARA ()`) has nothing usable either
+ * side of the split, so stripping stops there and that remaining text -- not further parentheticals
+ * that might precede it -- is left as the literal name.
+ */
+function splitCharacterCue(rawText: string): { name: string; extensions: string[] } {
+  let remaining = rawText.trim();
+  const extensions: string[] = [];
+
+  for (;;) {
+    const match = /^(.*)\((.*)\)\s*$/.exec(remaining);
+    if (!match) {
+      break;
+    }
+
+    const namePart = (match[1] ?? '').trim();
+    const rawExtension = (match[2] ?? '').trim();
+    if (namePart === '' || rawExtension === '') {
+      break;
+    }
+
+    extensions.unshift(normalizeCharacterExtension(rawExtension));
+    remaining = namePart;
+  }
+
+  return { name: remaining, extensions };
+}
+
+type CharacterEntry = { extensions: string[]; cueBlockIds: string[]; blockIds: string[] };
+
+type SpeechBlock = { id: string; type: 'character' | 'parenthetical' | 'dialogue'; text: string };
+
+/**
+ * Derives the screenplay's character list from the ordered canonical body without changing it.
+ * Mirrors `packages/layout`'s `groups.ts` (`buildGroups`) speech grouping deliberately, not by
+ * coincidence: a character cue opens a "speech" that absorbs every contiguous
+ * `parenthetical`/`dialogue` block that follows it, ending at the first block that is neither --
+ * another cue, or anything else. Reusing that exact rule (rather than, say, walking upward from a
+ * caret position and re-deriving the same boundary independently) is what guarantees the
+ * Navigator and the paginator can never disagree about which character owns a line; if they did,
+ * the Navigator would be the one that's wrong, since `groups.ts` is what pagination actually
+ * builds on.
+ *
+ * `dual_dialogue` columns follow the same rule independently: each column is its own contiguous
+ * run (`dialogueColumnBlockSchema` permits `character` anywhere in a column, not only as its
+ * first block, so every `character`-typed block there opens its own speech exactly as at the root
+ * level), and a speech never carries across the boundary between columns, or between the
+ * `dual_dialogue` block and whatever precedes or follows it at the root level.
+ *
+ * A cue whose text is nothing but an unusable parenthetical (see `splitCharacterCue`) still opens
+ * a speech under its literal text rather than being dropped, so no authored cue silently vanishes
+ * from the list; the empty-name case that *is* dropped is a `character` block with no text at
+ * all, which closes whatever speech was open (via `closeSpeech`, matching `groups.ts`'s own
+ * `character` case) without opening a new one.
+ */
+export function deriveCharacters(blocks: readonly ScreenplayBlock[]): DerivedCharacter[] {
+  const order: string[] = [];
+  const entriesByName = new Map<string, CharacterEntry>();
+
+  const getOrCreateEntry = (name: string): CharacterEntry => {
+    let entry = entriesByName.get(name);
+    if (!entry) {
+      entry = { extensions: [], cueBlockIds: [], blockIds: [] };
+      entriesByName.set(name, entry);
+      order.push(name);
+    }
+    return entry;
+  };
+
+  // The character entry the currently open speech belongs to, or `undefined` for an orphan run
+  // (a `parenthetical`/`dialogue` block with no preceding cue in its own contiguous run --
+  // schema-legal, not real screenplay convention; see `groups.ts`'s own `openOrphanSpeech`) or
+  // when nothing is currently open at all.
+  let openEntry: CharacterEntry | undefined;
+
+  const openCue = (cueBlock: { id: string; text: string }): void => {
+    const { name, extensions: cueExtensions } = splitCharacterCue(cueBlock.text);
+    if (name === '') {
+      // No name to open a speech under -- closes whatever was open, same as any other block this
+      // derivation does not recognize as continuing a speech.
+      openEntry = undefined;
+      return;
+    }
+
+    const entry = getOrCreateEntry(name);
+    entry.cueBlockIds.push(cueBlock.id);
+    entry.blockIds.push(cueBlock.id);
+    for (const extension of cueExtensions) {
+      if (!entry.extensions.includes(extension)) {
+        entry.extensions.push(extension);
+      }
+    }
+    openEntry = entry;
+  };
+
+  const continueSpeech = (blockId: string): void => {
+    openEntry?.blockIds.push(blockId);
+  };
+
+  const closeSpeech = (): void => {
+    openEntry = undefined;
+  };
+
+  const processSpeechBlock = (block: SpeechBlock): void => {
+    if (block.type === 'character') {
+      openCue(block);
+    } else {
+      continueSpeech(block.id);
+    }
+  };
+
+  for (const block of blocks) {
+    switch (block.type) {
+      case 'character':
+      case 'parenthetical':
+      case 'dialogue':
+        processSpeechBlock(block);
+        break;
+      case 'dual_dialogue':
+        // A structurally separate block, not a continuation of whatever speech preceded it, and
+        // its two columns are simultaneous, independent speeches rather than one continuous run
+        // -- so each boundary (before the left column, between columns, and after the right
+        // column) closes whatever speech is open, matching the doc comment above.
+        closeSpeech();
+        for (const columnBlock of block.left.blocks) {
+          processSpeechBlock(columnBlock);
+        }
+        closeSpeech();
+        for (const columnBlock of block.right.blocks) {
+          processSpeechBlock(columnBlock);
+        }
+        closeSpeech();
+        break;
+      default:
+        // scene_heading, action, shot, transition, page_break: none of these continue a speech,
+        // matching every `groups.ts` case that is not `character`/`parenthetical`/`dialogue`.
+        closeSpeech();
+        break;
+    }
+  }
+
+  return order.map((name) => {
+    const entry = entriesByName.get(name);
+    if (!entry) {
+      throw new Error(`deriveCharacters: missing entry for '${name}'; this is a derivation bug.`);
+    }
+    return {
+      name,
+      extensions: entry.extensions,
+      cueBlockIds: entry.cueBlockIds,
+      blockIds: entry.blockIds,
+    };
+  });
+}
+
 function collectBlockIds(block: ScreenplayBlock): string[] {
   if (block.type !== 'dual_dialogue') {
     return [block.id];

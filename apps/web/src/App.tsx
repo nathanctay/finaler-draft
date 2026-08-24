@@ -9,8 +9,10 @@ import {
 } from 'react';
 import {
   DEFAULT_DOCUMENT_SETTINGS,
+  deriveCharacters,
   deriveScenes,
   screenplayToPlainText,
+  type DerivedCharacter,
   type DerivedScene,
   type DocumentSettings,
   type Screenplay,
@@ -115,6 +117,39 @@ function activeScene(
   );
 }
 
+// Unlike `activeScene`, there is no "current character" to default to when nothing is focused
+// yet, so this stays unselected (rather than falling back to `characters[0]`) until the caret is
+// somewhere real. `character.blockIds` -- the cue plus its contiguous parenthetical/dialogue run,
+// per `deriveCharacters`'s own doc comment -- is what makes this a membership test rather than a
+// walk: standing anywhere in a character's speech highlights them, not only on the cue line
+// itself, and the boundary is decided once, in the derivation, by the same rule
+// `packages/layout`'s `groups.ts` uses for pagination.
+function activeCharacter(
+  activeBlockId: string | undefined,
+  characters: readonly DerivedCharacter[],
+): DerivedCharacter | undefined {
+  if (!activeBlockId) {
+    return undefined;
+  }
+
+  return characters.find((character) => character.blockIds.includes(activeBlockId));
+}
+
+/**
+ * The Navigator's two tabs (`App.tsx`'s `.panel-tabs`). Previously a pair of inert `<span>`s --
+ * plan.md's own description: "no click handler, no derived character list, and no
+ * click-to-navigate." Modeled as `role="tab"`/`role="tabpanel"` per the WAI-ARIA tabs pattern
+ * (arrow keys move focus and switch tabs, only the active tab is in the Tab order, selection is
+ * exposed via `aria-selected`) rather than the ad hoc `<span className="selected">` it replaces,
+ * per plan.md's design rules: "full keyboard operation, visible focus, semantic controls."
+ */
+const NAVIGATOR_TABS = [
+  { id: 'scenes', label: 'Scenes' },
+  { id: 'characters', label: 'Characters' },
+] as const;
+
+type NavigatorTabId = (typeof NAVIGATOR_TABS)[number]['id'];
+
 const legacyInitial: PersistedScreenplay = {
   id: '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
   projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
@@ -169,6 +204,9 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     navigator: true,
     inspector: true,
   });
+  // Which Navigator tab is showing -- view state, not document state, same category as `zoom` and
+  // `showLabels` below: it never travels with the canonical screenplay.
+  const [navigatorTab, setNavigatorTab] = useState<NavigatorTabId>('scenes');
   const [zoom, setZoom] = useState(100);
   const [dark, setDark] = useState(false);
   // View state, not document state: never travels with the canonical screenplay, and defaults
@@ -619,6 +657,37 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     }
   };
 
+  // packages/screenplay's own doc comment on `deriveCharacters`: "the same derivation feeds
+  // SmartType" -- computed here, beside `scenes`, so both live in the one place a future
+  // SmartType increment would already be looking.
+  const characters = useMemo(
+    () => (projection.valid ? deriveCharacters(projection.screenplay.blocks) : []),
+    [projection],
+  );
+  const selectedCharacter = activeCharacter(activeBlockId, characters);
+
+  // Navigates to the character's first cue. `dual_dialogue` blocks are not addressable here --
+  // `findScreenplayBlockPosition` walks the ProseMirror document, and this text-block editor
+  // cannot open a screenplay containing one (see `initialProjection` above) -- so `position` is
+  // simply `undefined` for those and the click harmlessly does nothing, the same failure mode
+  // `selectScene` already accepts for content the editor cannot represent.
+  const selectCharacter = (character: DerivedCharacter) => {
+    if (!editor) {
+      return;
+    }
+    // The cue specifically, not `blockIds[0]`: both happen to agree today (a speech's cue is
+    // always its first block), but `cueBlockIds` says "navigate to a cue" without depending on
+    // that ordering fact staying true.
+    const firstBlockId = character.cueBlockIds[0];
+    if (firstBlockId === undefined) {
+      return;
+    }
+    const position = findScreenplayBlockPosition(editor, firstBlockId);
+    if (position !== undefined) {
+      editor.commands.focus(position + 1, { scrollIntoView: false });
+    }
+  };
+
   // A near-empty screenplay is nearly all blank page: `.script-body` is content-sized (see
   // styles.css), so its actual DOM box ends a few lines down while `.page` still paints the full
   // manuscript height beneath it. A click in that gap lands outside the editable content
@@ -873,25 +942,102 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                 ×
               </button>
             </div>
-            <div className="panel-tabs">
-              <span className="selected">Scenes</span>
-              <span>Characters</span>
-            </div>
-            <ol className="scene-list">
-              {scenes.map((scene, index) => (
-                <li key={scene.id}>
-                  <button
-                    className={selectedScene?.id === scene.id ? 'selected' : ''}
-                    type="button"
-                    onClick={() => selectScene(scene)}
-                  >
-                    <span>{`${index + 1}. ${scene.heading.text}`}</span>
-                    <small>{scene.body.length} blocks</small>
-                  </button>
-                </li>
+            <div aria-label="Navigator sections" className="panel-tabs" role="tablist">
+              {NAVIGATOR_TABS.map((tab) => (
+                <button
+                  aria-controls={`navigator-panel-${tab.id}`}
+                  aria-selected={navigatorTab === tab.id}
+                  className={navigatorTab === tab.id ? 'selected' : ''}
+                  id={`navigator-tab-${tab.id}`}
+                  key={tab.id}
+                  onClick={() => setNavigatorTab(tab.id)}
+                  onKeyDown={(event) => {
+                    // Left/Right rather than Up/Down: `.panel-tabs` lays tabs out horizontally
+                    // (see styles.css), and the WAI-ARIA tabs pattern keys arrow direction to the
+                    // tablist's own orientation. Moves focus and switches the active tab together
+                    // ("automatic activation"), the same immediate-effect convention
+                    // `OverflowMenu.tsx`'s Up/Down already uses for its own list.
+                    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+                      return;
+                    }
+                    event.preventDefault();
+                    const currentIndex = NAVIGATOR_TABS.findIndex(
+                      (candidate) => candidate.id === navigatorTab,
+                    );
+                    const delta = event.key === 'ArrowRight' ? 1 : -1;
+                    const nextTab =
+                      NAVIGATOR_TABS[
+                        (currentIndex + delta + NAVIGATOR_TABS.length) % NAVIGATOR_TABS.length
+                      ];
+                    if (!nextTab) {
+                      return;
+                    }
+                    setNavigatorTab(nextTab.id);
+                    document.getElementById(`navigator-tab-${nextTab.id}`)?.focus();
+                  }}
+                  role="tab"
+                  // Roving tabindex: only the selected tab is a Tab stop, matching the WAI-ARIA
+                  // tabs pattern -- Tab moves focus in and out of the tablist as a single stop,
+                  // and the arrow-key handler above moves focus (and selection) within it.
+                  tabIndex={navigatorTab === tab.id ? 0 : -1}
+                  type="button"
+                >
+                  {tab.label}
+                </button>
               ))}
-            </ol>
-            <div className="navigator-footer">{`${scenes.length} scenes · local draft`}</div>
+            </div>
+            {navigatorTab === 'scenes' ? (
+              <ol
+                aria-labelledby="navigator-tab-scenes"
+                className="scene-list"
+                id="navigator-panel-scenes"
+                role="tabpanel"
+                tabIndex={0}
+              >
+                {scenes.map((scene, index) => (
+                  <li key={scene.id}>
+                    <button
+                      className={selectedScene?.id === scene.id ? 'selected' : ''}
+                      type="button"
+                      onClick={() => selectScene(scene)}
+                    >
+                      <span>{`${index + 1}. ${scene.heading.text}`}</span>
+                      <small>{scene.body.length} blocks</small>
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <ol
+                aria-labelledby="navigator-tab-characters"
+                className="scene-list"
+                id="navigator-panel-characters"
+                role="tabpanel"
+                tabIndex={0}
+              >
+                {characters.map((character) => (
+                  <li key={character.name}>
+                    <button
+                      className={selectedCharacter?.name === character.name ? 'selected' : ''}
+                      type="button"
+                      onClick={() => selectCharacter(character)}
+                    >
+                      <span>{character.name}</span>
+                      <small>
+                        {character.extensions.length > 0
+                          ? `${character.cueBlockIds.length} lines · ${character.extensions.join(', ')}`
+                          : `${character.cueBlockIds.length} lines`}
+                      </small>
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            )}
+            <div className="navigator-footer">
+              {navigatorTab === 'scenes'
+                ? `${scenes.length} scenes · local draft`
+                : `${characters.length} characters · local draft`}
+            </div>
           </aside>
         )}
         <section className="editor-region" aria-label="Screenplay editor">
