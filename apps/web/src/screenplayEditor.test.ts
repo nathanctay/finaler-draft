@@ -3,6 +3,7 @@ import { Editor } from '@tiptap/core';
 import { TextSelection } from '@tiptap/pm/state';
 import { DEFAULT_DOCUMENT_SETTINGS } from '@finaler-draft/screenplay';
 import {
+  convertActiveScreenplayBlock,
   projectDocumentScreenplay,
   screenplayExtensions,
   type ScreenplayElementType,
@@ -58,6 +59,33 @@ function blocksOf(editor: Editor): Array<{ element: unknown; text: string }> {
     result.push({ element: node.attrs.element, text: node.textContent });
   });
   return result;
+}
+
+/**
+ * Sets a selection inside the first (and, in the tests using this, only) block, `[from, to)`
+ * characters into its text -- a collapsed caret when `to` is omitted. Shared by the parenthetical
+ * and leading-space tests below, which need a caret or a range positioned precisely, not just at
+ * the block's edge the way `pressEnterAt` above only ever needs.
+ */
+function setSelectionInFirstBlock(editor: Editor, from: number, to: number = from): void {
+  const transaction = editor.state.tr.setSelection(
+    TextSelection.create(editor.state.doc, 1 + from, 1 + to),
+  );
+  editor.view.dispatch(transaction);
+}
+
+/**
+ * Dispatches `key` through the editor's real keymap, the same `someProp('handleKeyDown')` path
+ * `pressEnterAt` above uses, and returns whether some handler claimed it -- unlike `pressEnterAt`,
+ * callers here need to assert `false` (the guard under test declined to intervene) as often as
+ * `true`, so this returns the result instead of asserting it itself.
+ */
+function pressKey(editor: Editor, key: string): boolean {
+  return (
+    editor.view.someProp('handleKeyDown', (handler) =>
+      handler(editor.view, new KeyboardEvent('keydown', { key })),
+    ) ?? false
+  );
 }
 
 describe('Enter', () => {
@@ -135,6 +163,156 @@ describe('Enter', () => {
       { element: 'character', text: '' },
       { element: 'dialogue', text: '' },
     ]);
+    editor.destroy();
+    mount.remove();
+  });
+});
+
+/**
+ * plan.md, "Writing-flow behaviours borrowed from Final Draft": creating a parenthetical wraps
+ * the block's text in `()` unless it is already wrapped; converting a parenthetical away strips a
+ * leading `(` and trailing `)` only if both are present. Once written, the parentheses are
+ * ordinary text -- there is nothing here exercising Backspace or Delete, because nothing in
+ * `screenplayEditor.ts` treats them specially any more.
+ */
+describe('parentheticals own their parentheses', () => {
+  it('wraps an empty block in () with the caret between them on conversion to parenthetical', () => {
+    const { editor, mount } = buildEditor([{ element: 'dialogue', text: '' }]);
+    setSelectionInFirstBlock(editor, 0);
+
+    expect(convertActiveScreenplayBlock(editor, 'parenthetical')).toBe(true);
+
+    expect(blocksOf(editor)).toEqual([{ element: 'parenthetical', text: '()' }]);
+    expect(editor.state.selection.from).toBe(2);
+    expect(editor.state.selection.to).toBe(2);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('wraps a non-empty, unwrapped block in () and keeps the caret at the same relative position', () => {
+    const { editor, mount } = buildEditor([{ element: 'dialogue', text: 'to herself' }]);
+    setSelectionInFirstBlock(editor, 3);
+
+    expect(convertActiveScreenplayBlock(editor, 'parenthetical')).toBe(true);
+
+    expect(blocksOf(editor)).toEqual([{ element: 'parenthetical', text: '(to herself)' }]);
+    // Caret was 3 characters into "to herself"; it stays 3 characters past the same point, now
+    // shifted one further by the inserted leading "(".
+    expect(editor.state.selection.from).toBe(1 + 4);
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * The double-wrap guard, and the mutation most likely to pass vacuously if only tested against
+   * freshly wrapped text (progress/writing-flow.md's own warning): text that already looks like a
+   * parenthetical -- the shape an FDX-imported parenthetical arrives in -- must not be wrapped a
+   * second time. Converting from `action` here (not `parenthetical`) is deliberate: it proves the
+   * guard is about the text's shape, not about tracking where the block came from.
+   */
+  it('does not wrap text that already begins and ends with parentheses', () => {
+    const { editor, mount } = buildEditor([{ element: 'action', text: '(already wrapped)' }]);
+    setSelectionInFirstBlock(editor, 0);
+
+    expect(convertActiveScreenplayBlock(editor, 'parenthetical')).toBe(true);
+
+    expect(blocksOf(editor)).toEqual([{ element: 'parenthetical', text: '(already wrapped)' }]);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('strips both parentheses on conversion away from parenthetical', () => {
+    const { editor, mount } = buildEditor([{ element: 'parenthetical', text: '(to herself)' }]);
+    setSelectionInFirstBlock(editor, 6);
+
+    expect(convertActiveScreenplayBlock(editor, 'dialogue')).toBe(true);
+
+    expect(blocksOf(editor)).toEqual([{ element: 'dialogue', text: 'to herself' }]);
+    expect(editor.state.selection.from).toBe(1 + 5);
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * The asymmetric case the owner called out explicitly: a writer can delete just one of the two
+   * parentheses (ordinary text, ordinary Backspace) after creation, leaving a lone `(` or `)`.
+   * Converting away must leave that alone rather than stripping the surviving parenthesis, which
+   * would silently edit text the writer typed.
+   */
+  it('leaves a lone leading parenthesis alone on conversion away, rather than stripping it', () => {
+    const { editor, mount } = buildEditor([{ element: 'parenthetical', text: '(beat' }]);
+    setSelectionInFirstBlock(editor, 0);
+
+    expect(convertActiveScreenplayBlock(editor, 'dialogue')).toBe(true);
+
+    expect(blocksOf(editor)).toEqual([{ element: 'dialogue', text: '(beat' }]);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('leaves a lone trailing parenthesis alone on conversion away, rather than stripping it', () => {
+    const { editor, mount } = buildEditor([{ element: 'parenthetical', text: 'beat)' }]);
+    setSelectionInFirstBlock(editor, 0);
+
+    expect(convertActiveScreenplayBlock(editor, 'dialogue')).toBe(true);
+
+    expect(blocksOf(editor)).toEqual([{ element: 'dialogue', text: 'beat)' }]);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('leaves text with no real parentheses alone on conversion away from parenthetical', () => {
+    const { editor, mount } = buildEditor([{ element: 'parenthetical', text: 'no parens here' }]);
+    setSelectionInFirstBlock(editor, 0);
+
+    expect(convertActiveScreenplayBlock(editor, 'dialogue')).toBe(true);
+
+    expect(blocksOf(editor)).toEqual([{ element: 'dialogue', text: 'no parens here' }]);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('reaches the wrap behavior through the real Tab keymap, not only through calling the helper directly', () => {
+    const { editor, mount } = buildEditor([{ element: 'dialogue', text: '' }]);
+    setSelectionInFirstBlock(editor, 0);
+
+    const handled = editor.view.someProp('handleKeyDown', (handler) =>
+      handler(editor.view, new KeyboardEvent('keydown', { key: 'Tab' })),
+    );
+
+    expect(handled).toBe(true);
+    expect(blocksOf(editor)).toEqual([{ element: 'parenthetical', text: '()' }]);
+    editor.destroy();
+    mount.remove();
+  });
+});
+
+describe('a line cannot begin with a space', () => {
+  it('blocks a space typed as the first character of an empty block', () => {
+    const { editor, mount } = buildEditor([{ element: 'action', text: '' }]);
+    setSelectionInFirstBlock(editor, 0);
+
+    expect(pressKey(editor, ' ')).toBe(true);
+
+    expect(blocksOf(editor)).toEqual([{ element: 'action', text: '' }]);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('blocks a space that would replace a range selection starting at the first character', () => {
+    const { editor, mount } = buildEditor([{ element: 'action', text: 'Hello there.' }]);
+    setSelectionInFirstBlock(editor, 0, 5);
+
+    expect(pressKey(editor, ' ')).toBe(true);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('allows a space anywhere else in the block', () => {
+    const { editor, mount } = buildEditor([{ element: 'action', text: 'Hello' }]);
+    setSelectionInFirstBlock(editor, 5);
+
+    expect(pressKey(editor, ' ')).toBe(false);
     editor.destroy();
     mount.remove();
   });

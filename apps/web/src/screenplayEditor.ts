@@ -88,6 +88,28 @@ export function getActiveScreenplayBlock(editor: Editor): ActiveScreenplayBlock 
   return getActiveBlock(editor);
 }
 
+/**
+ * True when `text` already begins and ends with a matching pair of parentheses. Serves both
+ * directions of `convertActiveScreenplayBlock` below: the double-wrap guard on conversion *to*
+ * parenthetical (an FDX-imported parenthetical already carries its own `(` and `)` as authored
+ * text; wrapping it again would produce `((like this))`), and, on conversion *away*, the
+ * requirement that both parentheses be present before either is stripped -- a writer can delete
+ * just one after creation, leaving `(beat` or `beat)`, and that remainder is the writer's text,
+ * not punctuation to keep tidying (plan.md, "Writing-flow behaviours borrowed from Final Draft").
+ * `text.length >= 2` keeps a single stray `"("` or `")"` from matching both ends of itself.
+ */
+function isParenWrapped(text: string): boolean {
+  return text.length >= 2 && text.startsWith('(') && text.endsWith(')');
+}
+
+/**
+ * Converts the active block to `element`, additionally wrapping or unwrapping its text in `()`
+ * when the conversion crosses the parenthetical boundary in either direction (plan.md,
+ * "Writing-flow behaviours borrowed from Final Draft"). Once written, the parentheses are
+ * ordinary authored text like any other character in the block -- selectable, deletable,
+ * exportable -- not a structure this function polices afterward; `isParenWrapped` above is
+ * consulted only at the moment of conversion, never again.
+ */
 export function convertActiveScreenplayBlock(
   editor: Editor,
   element: ScreenplayElementType,
@@ -97,10 +119,46 @@ export function convertActiveScreenplayBlock(
     return false;
   }
 
-  const transaction = editor.state.tr.setNodeMarkup(activeBlock.position, undefined, {
-    element,
-    id: activeBlock.id,
-  });
+  const transaction = editor.state.tr;
+  const blockContentStart = activeBlock.position + 1;
+  const caretOffset = Math.min(
+    Math.max(editor.state.selection.from - blockContentStart, 0),
+    activeBlock.text.length,
+  );
+  let caretOffsetAfterEdit = caretOffset;
+  let contentEdited = false;
+
+  if (
+    element === 'parenthetical' &&
+    activeBlock.element !== 'parenthetical' &&
+    !isParenWrapped(activeBlock.text)
+  ) {
+    transaction.insertText('(', blockContentStart);
+    transaction.insertText(')', blockContentStart + 1 + activeBlock.text.length);
+    caretOffsetAfterEdit = caretOffset + 1;
+    contentEdited = true;
+  } else if (
+    activeBlock.element === 'parenthetical' &&
+    element !== 'parenthetical' &&
+    isParenWrapped(activeBlock.text)
+  ) {
+    // Deleting the trailing character first keeps the leading character's position
+    // (`blockContentStart`, used by both deletes) stable regardless of order.
+    transaction.delete(
+      blockContentStart + activeBlock.text.length - 1,
+      blockContentStart + activeBlock.text.length,
+    );
+    transaction.delete(blockContentStart, blockContentStart + 1);
+    caretOffsetAfterEdit = Math.min(Math.max(caretOffset - 1, 0), activeBlock.text.length - 2);
+    contentEdited = true;
+  }
+
+  transaction.setNodeMarkup(activeBlock.position, undefined, { element, id: activeBlock.id });
+  if (contentEdited) {
+    transaction.setSelection(
+      TextSelection.create(transaction.doc, blockContentStart + caretOffsetAfterEdit),
+    );
+  }
   editor.view.dispatch(transaction);
   return true;
 }
@@ -487,6 +545,23 @@ export const ScreenplayBlockNode = Node.create({
           return convertActiveScreenplayBlock(this.editor, 'parenthetical');
         }
         return false;
+      },
+      /**
+       * plan.md, "A line cannot begin with a space": indentation belongs to the element and the
+       * character grid positions it, so a space typed as the very first character of a block's
+       * text is rejected outright rather than accepted and left for the writer to notice later.
+       * Only the *typed* keystroke is guarded, at the exact position that would make it the first
+       * character -- a screenplay loaded with existing leading whitespace
+       * (`canonicalRoundTrip.test.ts`'s "leading whitespace" samples) is untouched, since nothing
+       * here runs outside this keymap entry.
+       */
+      Space: () => {
+        const activeBlock = getActiveBlock(this.editor);
+        if (!activeBlock) {
+          return false;
+        }
+        const blockContentStart = activeBlock.position + 1;
+        return this.editor.state.selection.from - blockContentStart === 0;
       },
     };
   },
