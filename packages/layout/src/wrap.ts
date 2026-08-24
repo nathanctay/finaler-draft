@@ -258,8 +258,15 @@ export function wrapBlockText(
  * every result at the specification's default settings is an exact integer, pinned by tests.
  */
 
-/** `character` starts at its (adjustable) indent and runs to the right margin. */
-function characterWrapBudgetFor(characterIndentIn: number): number {
+/**
+ * `character` starts at its (adjustable) indent and runs to the right margin.
+ *
+ * Exported for `pageBreak.ts`: the generated `CONT'D` heading renders at this same indent (plan.md)
+ * and must wrap at this same budget -- see `continuedLines` there for why a second, independent
+ * bound on the appended text would let the model and the DOM disagree on how many lines a heading
+ * occupies.
+ */
+export function characterWrapBudgetFor(characterIndentIn: number): number {
   return Math.round(
     (PAGE_WIDTH_IN - MARGIN_RIGHT_IN - characterIndentIn) * NOMINAL_CHARACTERS_PER_INCH,
   );

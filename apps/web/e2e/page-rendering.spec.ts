@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import {
   LINES_PER_INCH,
   MARGIN_TOP_IN,
+  NOMINAL_CHARACTERS_PER_INCH,
   PAGE_HEIGHT_IN,
   PAGE_NUMBER_RIGHT_IN,
   PAGE_NUMBER_TOP_IN,
@@ -185,6 +186,223 @@ test.describe('page rendering: generated lines', () => {
     expect(result.wrapperEditable).toBe('false');
     expect(result.wrapperUserSelect).toBe('none');
   });
+
+  /**
+   * The defect this suite exists to catch: `computePageBreaks` (pagination.ts) anchors a
+   * mid-block break INSIDE the host block's own node whenever the break has no block boundary to
+   * anchor at (see that function's own doc comment) -- not only for `dialogue`. `dialogue` is
+   * simply the one case with a name (`findDialogueSplitIndex`, pageBreak.ts), because it is the
+   * only one plan.md gives a `(MORE)`/`CONT'D` pair to; every `simple` group (`action`, `shot`,
+   * `transition` -- groups.ts) carries no keep-together rule at all, so `placeLinesPlain` may cut
+   * any of them mid-block, and an orphan `parenthetical` or `character` (no preceding/following
+   * cue to attribute a split to) falls through the same plain-reflow fallback in `pageBreak.ts`.
+   * Whichever element hosts the break, the widget renders as a DOM CHILD of
+   * `[data-screenplay-block][data-screenplay-element=<host>]`, not as `.script-body`'s sibling the
+   * way a block-boundary break renders. Before the dialogue-only fix, that extra ancestor's own
+   * `margin-left` doubled up with `.page-break-cue-line`'s own margin, and the dialogue block's
+   * fixed 3.5in width additionally clipped the line box -- see progress notes for the exact
+   * measured before: 4.7in indent, a 13-character line box (down from 38), which wrapped an
+   * ordinary two-line-worthy cue like "Vivamus (VO) (CONT'D)" onto two DOM lines the layout
+   * engine's model never counted. The dialogue-only fix then left the identical defect class
+   * unaddressed for every other element with a left offset (`character` 3.7in, `parenthetical`
+   * 3.1in) -- measured directly at 5.3in for a widget nested in `parenthetical`, 1.6in off.
+   *
+   * This builds the identical widget markup two ways for each host element below -- once as
+   * `.script-body`'s direct child (the sibling case every block-boundary break already gets right)
+   * and once nested one level inside a block of that element (the mid-block case) -- and asserts
+   * every measured figure is IDENTICAL between them: not just "close to 3.7in", but byte-for-byte
+   * the same number Chrome computes for the already-correct sibling case. `action` is included as
+   * a control: it has no left offset at all (`ELEMENT_INDENTS.action.leftIn` equals
+   * `MARGIN_LEFT_IN`), so nested already equals sibling before any correction, and the assertion
+   * on it stays trivially true both before and after the generic fix -- it is `dialogue`,
+   * `parenthetical`, and `character` that actually exercise the correction. Reproduced against
+   * real Chrome layout before the CSS fix existed; restoring the pre-fix `.page-break-widget` rule
+   * (removing its `width` and the generic `--fd-block-indent`-driven `margin-left` correction)
+   * reintroduces the failure this test would then catch, for every one of the non-`action` hosts.
+   */
+  for (const element of ['dialogue', 'parenthetical', 'character', 'action'] as const) {
+    test(`a mid-block break nested in ${element} renders at the identical cue-line indent, budget, and line count as a block-boundary (sibling) break`, async ({
+      page,
+    }) => {
+      const result = await page.evaluate((hostElement) => {
+        function measure(nested: boolean, text: string) {
+          const pageEl = document.createElement('article');
+          pageEl.className = 'page';
+          const pageNumber = document.createElement('div');
+          pageNumber.className = 'page-number';
+          pageEl.appendChild(pageNumber);
+          const body = document.createElement('div');
+          body.className = 'script-body';
+
+          let host: HTMLElement = body;
+          if (nested) {
+            // The exact host a mid-block break's widget actually lands inside: the block's own
+            // DOM element (screenplayEditor.ts's `screenplayBlockNode.toDOM`).
+            const block = document.createElement('div');
+            block.setAttribute('data-screenplay-block', '');
+            block.setAttribute('data-screenplay-element', hostElement);
+            block.textContent = 'Text before the break.';
+            body.appendChild(block);
+            host = block;
+          }
+
+          const wrapper = document.createElement('div');
+          wrapper.className = 'page-break-widget';
+          wrapper.contentEditable = 'false';
+          const continued = document.createElement('div');
+          continued.className = 'page-break-cue-line page-break-continued';
+          continued.textContent = text;
+          wrapper.appendChild(continued);
+          host.appendChild(wrapper);
+          pageEl.appendChild(body);
+          document.body.appendChild(pageEl);
+
+          const pageRect = pageEl.getBoundingClientRect();
+          const range = document.createRange();
+          range.selectNodeContents(continued);
+          // Distinct visual rows, not raw rect count: a wrapped line's trailing, wrap-consumed
+          // space can render as its own zero-content client rect sharing the same `top` as the
+          // text before it (a real Chrome quirk, confirmed directly), which would overcount rows
+          // if `getClientRects().length` were used as-is.
+          const lineCount = new Set(
+            Array.from(range.getClientRects()).map((r) => Math.round(r.top)),
+          ).size;
+          const leftIn = (continued.getBoundingClientRect().left - pageRect.left) / 96;
+          const widthIn = continued.getBoundingClientRect().width / 96;
+          document.body.removeChild(pageEl);
+          return { leftIn, widthIn, lineCount };
+        }
+
+        // Short enough to fit one line at 38 characters either way (control) and a
+        // name/parenthetical combination long enough to wrap at the pre-fix nested 13-character
+        // line box but not at the correct 38-character one (the actual defect this test
+        // reproduces).
+        return {
+          siblingShort: measure(false, "ADA (CONT'D)"),
+          nestedShort: measure(true, "ADA (CONT'D)"),
+          siblingLong: measure(false, "Vivamus (VO) (CONT'D)"),
+          nestedLong: measure(true, "Vivamus (VO) (CONT'D)"),
+        };
+      }, element);
+
+      expect(Math.abs(result.siblingShort.leftIn - 3.7)).toBeLessThan(TOLERANCE_IN);
+      expect(Math.abs(result.siblingShort.widthIn - 3.8)).toBeLessThan(TOLERANCE_IN);
+      expect(Math.round(result.siblingShort.widthIn * NOMINAL_CHARACTERS_PER_INCH)).toBe(38);
+      expect(result.siblingShort.lineCount).toBe(1);
+      expect(result.siblingLong.lineCount).toBe(1);
+
+      // The whole point: nested reproduces sibling exactly, for both the short control text and
+      // the longer text that would expose the defect (measured pre-fix, for `dialogue`: 4.7in /
+      // 1.3in width / 13 characters -- 2 lines for the long case).
+      expect(result.nestedShort).toEqual(result.siblingShort);
+      expect(result.nestedLong).toEqual(result.siblingLong);
+      expect(result.nestedLong.lineCount).toBe(1);
+    });
+
+    /**
+     * The highest-risk part of the fix, per its own review: `.page-break-widget`'s width and
+     * margin are what `.page-break-spacer`'s absolutely-positioned children
+     * (`.page-break-number`, `.page-break-edge`, `.page-break-gap`) position themselves against
+     * (see styles.css's own comments on both). Reproduced directly before the dialogue-only fix:
+     * nesting a widget inside a dialogue block shifted the page number 1.5in further from the
+     * right page edge than the sibling case (2.25in vs the correct 0.75in) and the
+     * page-separation seam masks 1.0-1.5in off the physical page edges -- exactly the regression
+     * Nathan was exacting about getting right the first time (progress/page-separation.md). A
+     * `parenthetical` host reproduces the identical class of defect at its own 1.6in offset,
+     * unfixed by the dialogue-scoped rule. This proves the generic, `--fd-block-indent`-driven
+     * correction does not, as a side effect, move any of this for any host: every measured figure
+     * is identical between the sibling and nested cases, matching what page-separation's own spec
+     * already pins for the sibling case elsewhere in this file.
+     */
+    test(`a break nested in ${element} does not move the page number or the page-separation seam masks relative to a sibling break`, async ({
+      page,
+    }) => {
+      const result = await page.evaluate((hostElement) => {
+        function measure(nested: boolean) {
+          const pageEl = document.createElement('article');
+          pageEl.className = 'page';
+          const pageNumber = document.createElement('div');
+          pageNumber.className = 'page-number';
+          pageEl.appendChild(pageNumber);
+          const body = document.createElement('div');
+          body.className = 'script-body';
+
+          let host: HTMLElement = body;
+          if (nested) {
+            const block = document.createElement('div');
+            block.setAttribute('data-screenplay-block', '');
+            block.setAttribute('data-screenplay-element', hostElement);
+            block.textContent = 'Text before the break.';
+            body.appendChild(block);
+            host = block;
+          }
+
+          // The full widget structure buildPageBreakWidget actually builds (pagination.ts), not
+          // just the cue line: the spacer, the seam masks, and the page number all have to be
+          // present to prove none of them moved.
+          const wrapper = document.createElement('div');
+          wrapper.className = 'page-break-widget';
+          wrapper.contentEditable = 'false';
+          const spacer = document.createElement('div');
+          spacer.className = 'page-break-spacer';
+          spacer.style.height = '2in';
+
+          const gapCover = document.createElement('div');
+          gapCover.className = 'page-break-gap';
+          gapCover.style.setProperty('--fd-page-break-edge-top', '1in');
+          spacer.appendChild(gapCover);
+
+          const outgoingEdge = document.createElement('div');
+          outgoingEdge.className = 'page-break-edge page-break-edge-outgoing';
+          outgoingEdge.style.setProperty('--fd-page-break-edge-top', '1in');
+          outgoingEdge.appendChild(document.createElement('div')).className =
+            'page-break-edge-caster';
+          spacer.appendChild(outgoingEdge);
+
+          const incomingEdge = document.createElement('div');
+          incomingEdge.className = 'page-break-edge page-break-edge-incoming';
+          incomingEdge.style.setProperty('--fd-page-break-edge-top', '1.25in');
+          incomingEdge.appendChild(document.createElement('div')).className =
+            'page-break-edge-caster';
+          spacer.appendChild(incomingEdge);
+
+          const numberEl = document.createElement('div');
+          numberEl.className = 'page-break-number';
+          numberEl.textContent = '2.';
+          numberEl.style.top = '1.5in';
+          spacer.appendChild(numberEl);
+          wrapper.appendChild(spacer);
+          host.appendChild(wrapper);
+          pageEl.appendChild(body);
+          document.body.appendChild(pageEl);
+
+          const pageRect = pageEl.getBoundingClientRect();
+          const numberRect = numberEl.getBoundingClientRect();
+          const outgoingRect = outgoingEdge.getBoundingClientRect();
+          const incomingRect = incomingEdge.getBoundingClientRect();
+          const out = {
+            numberRightFromPageRightIn: (pageRect.right - numberRect.right) / 96,
+            outgoingEdgeLeftIn: (outgoingRect.left - pageRect.left) / 96,
+            outgoingEdgeRightFromPageRightIn: (pageRect.right - outgoingRect.right) / 96,
+            incomingEdgeLeftIn: (incomingRect.left - pageRect.left) / 96,
+            incomingEdgeRightFromPageRightIn: (pageRect.right - incomingRect.right) / 96,
+          };
+          document.body.removeChild(pageEl);
+          return out;
+        }
+
+        return { sibling: measure(false), nested: measure(true) };
+      }, element);
+
+      // The masks span the full physical page width -- both edges flush with the page edge -- in
+      // the already-correct sibling case; this is what the nested case must match exactly.
+      expect(result.sibling.outgoingEdgeLeftIn).toBeCloseTo(0, 5);
+      expect(result.sibling.outgoingEdgeRightFromPageRightIn).toBeCloseTo(0, 5);
+      expect(result.sibling.numberRightFromPageRightIn).toBeCloseTo(0.75, 5);
+
+      expect(result.nested).toEqual(result.sibling);
+    });
+  }
 
   test('the page number sits 0.5in from a page top and 0.75in from the right, anchored to its spacer', async ({
     page,

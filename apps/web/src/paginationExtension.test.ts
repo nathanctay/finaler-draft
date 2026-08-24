@@ -33,6 +33,25 @@ function plainTwoPageBlocks(): ScreenplayBlock[] {
   return Array.from({ length: 29 }, (_, index) => actionBeat(index));
 }
 
+/**
+ * `linesOfLength`/`speechSplitBlocks`: the same recipe as `pagination.test.ts`'s own fixture of
+ * the same name -- a 50-line action block fills page 1 to room 5, forcing a 4-line dialogue
+ * speech to split 2-and-2 across the break, generating `(MORE)` and a `CONT'D` heading -- with
+ * UUID ids, since this file (unlike that one) exercises the full
+ * `projectDocumentScreenplay -> safeParseScreenplay -> paginateScreenplay` pipeline.
+ */
+function linesOfLength(budget: number, n: number): string {
+  return 'x'.repeat(budget * (n - 1) + 1);
+}
+
+function speechSplitBlocks(): ScreenplayBlock[] {
+  return [
+    { id: '00000000-0000-4000-a000-000000000000', type: 'action', text: linesOfLength(60, 50) },
+    { id: '00000000-0000-4000-a000-000000000001', type: 'character', text: 'ADA' },
+    { id: '00000000-0000-4000-a000-000000000002', type: 'dialogue', text: linesOfLength(35, 4) },
+  ];
+}
+
 function sceneHeading(index: number, text: string): ScreenplayBlock {
   return {
     id: `00000000-0000-4000-9000-${String(index).padStart(12, '0')}`,
@@ -231,6 +250,40 @@ describe('PaginationExtension', () => {
     editor.destroy();
     mount.remove();
     expect(cancelSpy).toHaveBeenCalledWith(scheduledHandle);
+  });
+
+  it("renders a mid-dialogue break's widget as a DESCENDANT of the dialogue block's own DOM element, not a sibling", () => {
+    // The precondition styles.css's page-break-widget CSS depends on (see its own comment there):
+    // a break whose page-break lands mid-speech has no block boundary to anchor at
+    // (pagination.ts's computePageBreaks), so the widget decoration is inserted inside the
+    // dialogue block's inline content and therefore renders as its DOM child, not its sibling.
+    // jsdom does not compute real layout (no font metrics, every getBoundingClientRect is zero),
+    // so this only proves the DOM ancestry the CSS fix's selector
+    // (`[data-screenplay-element='dialogue'] .page-break-widget`) matches against; the actual
+    // rendered geometry that ancestry produces is proven separately, against real Chrome layout,
+    // in page-rendering.spec.ts.
+    const { editor, mount } = buildEditor(speechSplitBlocks());
+    const widget = mount.querySelector('.page-break-widget');
+    expect(widget).not.toBeNull();
+    const dialogueAncestor = widget?.closest('[data-screenplay-block]');
+    expect(dialogueAncestor).not.toBeNull();
+    expect(dialogueAncestor?.getAttribute('data-screenplay-element')).toBe('dialogue');
+    // And the widget is genuinely a descendant, not the block element itself.
+    expect(dialogueAncestor).not.toBe(widget);
+    expect(dialogueAncestor?.contains(widget)).toBe(true);
+
+    // The control case, for contrast: a plain block-boundary break (plainTwoPageBlocks) renders
+    // its widget as a sibling of every block, inside .ProseMirror directly -- no
+    // `[data-screenplay-block]` ancestor at all.
+    const { editor: plainEditor, mount: plainMount } = buildEditor(plainTwoPageBlocks());
+    const plainWidget = plainMount.querySelector('.page-break-widget');
+    expect(plainWidget).not.toBeNull();
+    expect(plainWidget?.closest('[data-screenplay-block]')).toBeNull();
+
+    editor.destroy();
+    mount.remove();
+    plainEditor.destroy();
+    plainMount.remove();
   });
 });
 

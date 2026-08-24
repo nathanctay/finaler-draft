@@ -860,21 +860,38 @@ select:focus-visible,
  * from the page edge, because that is what `.page`'s padding is. Each rule below therefore
  * subtracts that margin with `calc()` rather than restating an already-offset number, so the
  * page-edge figure in `pageFormat.ts` stays the only place the indent is written down.
+ *
+ * The three rules that shift the content box to the right also restate that shift as
+ * `--fd-block-indent`, a custom property with no visual effect of its own -- nothing here reads
+ * it back. It exists only so `.page-break-widget` (below) can inherit it when a break lands mid-
+ * block and the widget is rendered as that block's DOM child rather than `.script-body`'s: see
+ * that rule's own comment for why a page-break widget needs to know its host's indent at all.
  */
 .script-body [data-screenplay-block][data-screenplay-element='character'] {
+  --fd-block-indent: var(--fd-character-indent);
   margin-left: calc(var(--fd-character-indent) - var(--fd-page-margin-left));
 }
 
 .script-body [data-screenplay-block][data-screenplay-element='dialogue'] {
+  --fd-block-indent: var(--fd-dialogue-indent);
   width: var(--fd-dialogue-width);
   margin-left: calc(var(--fd-dialogue-indent) - var(--fd-page-margin-left));
 }
 
 .script-body [data-screenplay-block][data-screenplay-element='parenthetical'] {
+  --fd-block-indent: var(--fd-parenthetical-indent);
   width: var(--fd-parenthetical-width);
   margin-left: calc(var(--fd-parenthetical-indent) - var(--fd-page-margin-left));
 }
 
+/*
+ * No `--fd-block-indent` here: `transition`'s own offset is a `margin-right` (it is right-
+ * aligned, per `pageFormat.ts`'s `ELEMENT_INDENTS.transition`), which never moves the content
+ * box's LEFT edge away from `.script-body`'s own. A widget nested inside a transition block (a
+ * transition long enough to wrap onto more than one line, split mid-block by `placeLinesPlain` --
+ * `pageBreak.ts`'s `simple` groups carry no keep-together rule) therefore already sits at the
+ * correct left coordinate with no correction, exactly like the top-level sibling case.
+ */
 .script-body [data-screenplay-block][data-screenplay-element='transition'] {
   margin-right: calc(var(--fd-transition-indent) - var(--fd-page-margin-right));
   text-align: right;
@@ -921,6 +938,54 @@ select:focus-visible,
  */
 .script-body .page-break-widget {
   user-select: none;
+  /*
+   * Explicit width, not auto. A break that falls mid-dialogue -- the only case a `(MORE)`/
+   * `CONT'D` pair is ever generated, since `findDialogueSplitIndex` (pageBreak.ts) only ever cuts
+   * between two `dialogue` lines -- has no block boundary to anchor at (computePageBreaks's own
+   * comment), so this widget is inserted as a CHILD of the dialogue block's own DOM node, not as
+   * its sibling in `.script-body`'s flat top-level flow. Left at `width: auto`, the widget would
+   * then shrink-wrap to the dialogue box's own content width (`--fd-dialogue-width`, 3.5in)
+   * instead of the full body measure every OTHER break gets -- and every rule below this one
+   * (`.page-break-cue-line`'s margin-left, and `.page-break-spacer`'s absolutely-positioned
+   * `.page-break-edge`/`.page-break-gap`/`.page-break-number` children, all of which position
+   * themselves relative to THIS box's own edges) already assumes that full measure.
+   * `--fd-body-width` is fixed specification (`PAGE_WIDTH_IN - MARGIN_LEFT_IN - MARGIN_RIGHT_IN`),
+   * identical to `.script-body`'s own content width, so stating it explicitly changes nothing for
+   * the ordinary sibling case (where `width: auto` already resolved to exactly this figure) and
+   * corrects only the nested one -- verified against real Chrome layout in page-rendering.spec.ts.
+   */
+  width: var(--fd-body-width);
+}
+
+/*
+ * Realigns the widget's own left edge back to `.script-body`'s content-box coordinate frame for
+ * the nested case the comment above describes -- which is not unique to `dialogue`. Every `simple`
+ * group (action, shot, transition -- `groups.ts`) carries no keep-together rule, so
+ * `placeLinesPlain` (`pageBreak.ts`) may cut any of them mid-block; an orphan parenthetical (one
+ * with no preceding character cue) falls through `placeSpeechGroup`'s own plain-reflow fallback
+ * the same way; and a `dialogue` split is simply the one case with a name (`findDialogueSplitIndex`)
+ * because it is the only one plan.md gives a `(MORE)`/`CONT'D` pair to. Every one of those blocks
+ * can host a nested widget, and each shifts its own content box by a different amount -- or, for
+ * `action`/`shot`/an un-adjusted `scene_heading`, by none.
+ *
+ * Rather than one rule per element (repeating the same shape four times, and silently wrong for
+ * any element added later), this reads `--fd-block-indent` -- the custom property each indented
+ * element rule above declares alongside its own `margin-left`. Custom properties inherit, so the
+ * nested widget picks up whatever indent its actual host block declared; a fallback of
+ * `--fd-page-margin-left` (making the `calc()` resolve to 0) covers both the top-level sibling
+ * case, which is never a descendant of any `[data-screenplay-block]` and so inherits nothing, and
+ * `action`/`shot`/`transition`/`scene_heading`, which are descendants but declare no property at
+ * all. Without this correction, every descendant of a nested widget (the CONT'D/MORE indent, the
+ * page-break-number, and the page-separation seam masks, all positioned relative to this box's own
+ * edges) would inherit its host's full offset instead. Combined with the explicit width above,
+ * this makes the widget's box occupy identical page-edge coordinates in the sibling case and every
+ * nested case, so nothing beneath it -- and this rule touches nothing beneath it -- needs to know
+ * which one it is in.
+ */
+.script-body [data-screenplay-block] .page-break-widget {
+  margin-left: calc(
+    var(--fd-page-margin-left) - var(--fd-block-indent, var(--fd-page-margin-left))
+  );
 }
 
 .script-body .page-break-cue-line {

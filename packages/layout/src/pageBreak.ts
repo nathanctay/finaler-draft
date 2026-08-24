@@ -40,6 +40,7 @@ import {
 import { DEFAULT_DOCUMENT_SETTINGS, type DocumentSettings } from '@finaler-draft/screenplay';
 import type { AuthoredLine, GeneratedLine, LayoutResult, Page, PageLine } from './model.js';
 import type { Group, SceneHeadingGroup, SimpleGroup, SpeechGroup } from './groups.js';
+import { characterWrapBudgetFor, wrapBlockText } from './wrap.js';
 
 function bottomMarginInFor(lineCount: number): number {
   return PAGE_HEIGHT_IN - MARGIN_TOP_IN - lineCount / LINES_PER_INCH;
@@ -229,13 +230,43 @@ function moreLine(sourceBlockId: string): GeneratedLine {
   return { kind: 'generated', reason: 'more', sourceBlockId, text: '(MORE)' };
 }
 
-function continuedLine(sourceBlockId: string, characterText: string | undefined): GeneratedLine {
-  return {
+/**
+ * Builds the `CONT'D` heading, wrapped through the identical `characterWrapBudgetFor` budget and
+ * `wrapBlockText` algorithm every authored character cue uses (`wrap.ts`), instead of emitting
+ * exactly one `GeneratedLine` unconditionally the way this function used to.
+ *
+ * `documentSettingsSchema` caps `characterIndentIn` at `MAX_ADJUSTABLE_INDENT_IN -
+ * MIN_CHARACTER_CUE_ROOM_IN` (6.5in, `packages/screenplay/src/index.ts`), which was reasoned
+ * about as "room for at least ten characters" for an AUTHORED cue -- but the ` (CONT'D)` this
+ * function appends is nine characters by itself, before a single character of the name it
+ * follows. At that legal-but-extreme indent (or any indent long enough combined with a long
+ * character name) the DOM wraps the heading onto a second line while the old single-`push` model
+ * still counted it as one, so the model's page-fill arithmetic silently drifted from what the
+ * screen actually painted, compounding on every later page.
+ *
+ * Reusing the exact function and budget every other character-indented line already wraps at,
+ * rather than adding a second, independent bound sized for this one case, is what keeps the model
+ * and the DOM in agreement by construction for any character-name length and any legal indent --
+ * with only one place (`wrap.ts`) that has to know what the character-cue budget is, matching
+ * this file's own top-of-file convention of deriving every capacity figure from one source. The
+ * `element` argument to `wrapBlockText` is `'character'` because that is what this text visually
+ * is (plan.md: `(MORE)`/`CONT'D` render at the character indent), even though the returned lines
+ * are `GeneratedLine`s, not `AuthoredLine`s -- see `GeneratedLine`'s own doc comment in model.ts
+ * for why it deliberately carries no `element` field of its own.
+ */
+function continuedLines(
+  sourceBlockId: string,
+  characterText: string | undefined,
+  characterIndentIn: number,
+): GeneratedLine[] {
+  const budget = characterWrapBudgetFor(characterIndentIn);
+  const text = `${characterText ?? ''} (CONT'D)`;
+  return wrapBlockText(sourceBlockId, 'character', text, budget).map((line) => ({
     kind: 'generated',
     reason: 'continued',
     sourceBlockId,
-    text: `${characterText ?? ''} (CONT'D)`,
-  };
+    text: line.text,
+  }));
 }
 
 /**
@@ -256,6 +287,7 @@ function placeSpeechContinuation(
   remaining: readonly AuthoredLine[],
   allowFreshBreak: boolean,
   autoMoreContinued: boolean,
+  characterIndentIn: number,
 ): void {
   if (remaining.length === 0) {
     return;
@@ -274,7 +306,7 @@ function placeSpeechContinuation(
     }
     builder.breakPage();
     if (autoMoreContinued) {
-      builder.push(continuedLine(characterBlockId, characterText));
+      builder.pushMany(continuedLines(characterBlockId, characterText, characterIndentIn));
     }
     placeSpeechContinuation(
       builder,
@@ -283,6 +315,7 @@ function placeSpeechContinuation(
       remaining.slice(cut),
       true,
       autoMoreContinued,
+      characterIndentIn,
     );
     return;
   }
@@ -290,7 +323,7 @@ function placeSpeechContinuation(
   if (allowFreshBreak) {
     builder.breakPage();
     if (autoMoreContinued) {
-      builder.push(continuedLine(characterBlockId, characterText));
+      builder.pushMany(continuedLines(characterBlockId, characterText, characterIndentIn));
     }
     placeSpeechContinuation(
       builder,
@@ -299,6 +332,7 @@ function placeSpeechContinuation(
       remaining,
       false,
       autoMoreContinued,
+      characterIndentIn,
     );
     return;
   }
@@ -318,6 +352,7 @@ function placeSpeechGroup(
   builder: PageBuilder,
   group: SpeechGroup,
   autoMoreContinued: boolean,
+  characterIndentIn: number,
   allowFreshBreak = true,
 ): void {
   const contentLines: AuthoredLine[] = [
@@ -352,7 +387,9 @@ function placeSpeechGroup(
       }
       builder.breakPage();
       if (autoMoreContinued) {
-        builder.push(continuedLine(group.characterBlockId, group.characterText));
+        builder.pushMany(
+          continuedLines(group.characterBlockId, group.characterText, characterIndentIn),
+        );
       }
       placeSpeechContinuation(
         builder,
@@ -361,6 +398,7 @@ function placeSpeechGroup(
         effectiveContent.slice(cut),
         true,
         autoMoreContinued,
+        characterIndentIn,
       );
       return;
     }
@@ -368,7 +406,7 @@ function placeSpeechGroup(
 
   if (allowFreshBreak) {
     builder.breakPage();
-    placeSpeechGroup(builder, group, autoMoreContinued, false);
+    placeSpeechGroup(builder, group, autoMoreContinued, characterIndentIn, false);
     return;
   }
 
@@ -379,16 +417,19 @@ function placeSpeechGroup(
 
 /**
  * `documentSettings` defaults to the specification's current fixed values (`autoMoreContinued:
- * true`), so every existing caller keeps producing identical output unchanged. Only
- * `autoMoreContinued` is read here; the rest of `DocumentSettings` belongs to grouping
- * (`buildGroups`) or to rendering, not to page breaking.
+ * true`, `characterIndentIn` at its specification default), so every existing caller keeps
+ * producing identical output unchanged. Only `autoMoreContinued` and `characterIndentIn` are read
+ * here -- the former gates whether `(MORE)`/`CONT'D` are emitted at all, the latter is needed to
+ * wrap the generated `CONT'D` heading at the same budget the DOM renders it at (see
+ * `continuedLines`); the rest of `DocumentSettings` belongs to grouping (`buildGroups`) or to
+ * rendering, not to page breaking.
  */
 export function layoutGroups(
   groups: readonly Group[],
   documentSettings: DocumentSettings = DEFAULT_DOCUMENT_SETTINGS,
 ): LayoutResult {
   const builder = new PageBuilder();
-  const { autoMoreContinued } = documentSettings;
+  const { autoMoreContinued, characterIndentIn } = documentSettings;
 
   for (let index = 0; index < groups.length; index += 1) {
     // Non-null: the `for` bound above already guarantees `index` is in range.
@@ -409,7 +450,7 @@ export function layoutGroups(
         break;
       }
       case 'speech': {
-        placeSpeechGroup(builder, group, autoMoreContinued);
+        placeSpeechGroup(builder, group, autoMoreContinued, characterIndentIn);
         break;
       }
     }

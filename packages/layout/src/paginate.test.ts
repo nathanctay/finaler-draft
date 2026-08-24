@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_DOCUMENT_SETTINGS, type ScreenplayBlock } from '@finaler-draft/screenplay';
 import { paginateScreenplay } from './paginate.js';
 import { UnsupportedBlockError } from './model.js';
+import { graphemeLength } from './wrap.js';
 import type { AuthoredLine, LayoutResult } from './model.js';
 import {
   actionBlock,
@@ -367,6 +368,125 @@ describe("paginateScreenplay: dialogue orphan avoidance and MORE/CONT'D splittin
     // and it is immediately followed by dialogue on the same page.
     const next = allLines[parenIndex + 1];
     expect(next).toMatchObject({ kind: 'authored', element: 'dialogue', blockId: 'd0' });
+  });
+});
+
+describe("paginateScreenplay: the generated CONT'D heading wraps like any other line", () => {
+  /**
+   * `documentSettingsSchema` (packages/screenplay/src/index.ts) caps `characterIndentIn` at
+   * `MAX_ADJUSTABLE_INDENT_IN - MIN_CHARACTER_CUE_ROOM_IN` = `(PAGE_WIDTH_IN - MARGIN_RIGHT_IN) -
+   * 1` = 6.5in -- the schema's own maximum, reasoned about as "room for at least ten characters"
+   * for an AUTHORED cue. Neither constant is exported from that module (they are schema-internal
+   * sanity floors), so the derivation is restated here rather than imported; a schema change that
+   * moves either value would need this comment updated too, which is the point -- it is not meant
+   * to silently track a moving target.
+   */
+  const MAX_LEGAL_CHARACTER_INDENT_IN = 6.5;
+
+  it("wraps the CONT'D heading onto two GeneratedLines when the appended text overflows a maximally-adjusted character indent, and still places every dialogue line", () => {
+    // Identical fixture to "splits a long speech with (MORE) and a CONT'D heading..." above,
+    // except characterIndentIn is pushed to the schema's own maximum. At that indent the wrap
+    // budget is (8.5 - 1.0 - 6.5) * 10 = 10 characters -- room for "ADA " (4) but not also
+    // "(CONT'D)" (8) on the same line, so the heading itself must wrap, exactly like an authored
+    // character cue this long would. Before the fix, `pageBreak.ts` pushed exactly one
+    // `GeneratedLine` regardless of whether it fit -- this is the case that line would not.
+    const blocks = [
+      actionBlock('a0', textForActionLineCount(50)),
+      characterBlock('c0', 'ADA'),
+      dialogueBlock('d0', textForDialogueLineCount(4)),
+    ];
+    const result = paginateScreenplay(blocks, {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      characterIndentIn: MAX_LEGAL_CHARACTER_INDENT_IN,
+    });
+
+    expect(result.pages).toHaveLength(2);
+    const page2 = result.pages[1]!;
+    const continuedLines = page2.lines.filter(
+      (l) => l.kind === 'generated' && l.reason === 'continued',
+    );
+
+    expect(continuedLines).toHaveLength(2);
+    expect(continuedLines.map((l) => (l as { text: string }).text)).toEqual(['ADA ', "(CONT'D)"]);
+    for (const line of continuedLines) {
+      expect(line).toMatchObject({ kind: 'generated', reason: 'continued', sourceBlockId: 'c0' });
+    }
+
+    // Both dialogue lines the split moved to page 2 are still placed, now after two heading rows
+    // instead of one -- the model's own room accounting absorbed the extra line rather than
+    // silently overrunning the page, which is exactly what the pre-fix, single-push model did: it
+    // counted one row for a heading that actually occupies two.
+    const dialogueOnPage2 = page2.lines.filter((l) => l.kind === 'authored' && l.blockId === 'd0');
+    expect(dialogueOnPage2).toHaveLength(2);
+    expect(page2.lineCount).toBe(page2.lines.length);
+    expect(page2.lines).toHaveLength(4); // 2 CONT'D rows + 2 dialogue rows
+  });
+
+  it('keeps the ordinary case at exactly one line: "ADA (CONT\'D)" fits the default 3.7in character indent\'s 38-character budget whole', () => {
+    // Regression guard for the common path -- the fix must not make an ordinary heading wrap
+    // when it never needed to.
+    const blocks = [
+      actionBlock('a0', textForActionLineCount(50)),
+      characterBlock('c0', 'ADA'),
+      dialogueBlock('d0', textForDialogueLineCount(4)),
+    ];
+    const result = paginateScreenplay(blocks);
+    const page2 = result.pages[1]!;
+    const continuedLines = page2.lines.filter(
+      (l) => l.kind === 'generated' && l.reason === 'continued',
+    );
+    expect(continuedLines).toHaveLength(1);
+    expect((continuedLines[0] as { text: string }).text).toBe("ADA (CONT'D)");
+  });
+
+  it("never emits a generated CONT'D line longer than its own indent's character-cue budget, across a matrix of legal indents and name lengths, and never drops a dialogue line while doing it", () => {
+    // Property check, not a single number: whatever characterIndentIn a document setting legally
+    // sets, and whatever character name the speech has, the model must never claim a single
+    // GeneratedLine holds more text than that line's own indent leaves room for -- that gap (a
+    // model line the DOM cannot fit on one row) is exactly the defect. `graphemeLength` is the
+    // same grid-cell count `wrap.ts` itself measures against, not `.length`, for the same reason
+    // `wrap.ts` uses it (see its own doc comment). Some combinations below make the AUTHORED
+    // character cue itself wrap (a long name at a deep indent) and the whole speech move to the
+    // next page instead of splitting -- a legitimate, unrelated pagination outcome (see
+    // `placeSpeechGroup`'s own comment) -- so this does not assert every combination produces a
+    // CONT'D at all, only that every one it does produce is honest about its own line count, and
+    // that no dialogue content is ever lost regardless of which path the engine took.
+    const indentsIn = [1.5, 3.7, 5.0, MAX_LEGAL_CHARACTER_INDENT_IN]; // MARGIN_LEFT_IN, default, mid, schema max
+    const names = ['A', 'ADA', 'BARTHOLOMEW', 'Vivamus (VO)'];
+
+    for (const characterIndentIn of indentsIn) {
+      for (const characterText of names) {
+        const blocks = [
+          actionBlock('a0', textForActionLineCount(50)),
+          characterBlock('c0', characterText),
+          dialogueBlock('d0', textForDialogueLineCount(4)),
+        ];
+        const result = paginateScreenplay(blocks, {
+          ...DEFAULT_DOCUMENT_SETTINGS,
+          characterIndentIn,
+        });
+        const budget = Math.round((8.5 - 1.0 - characterIndentIn) * 10);
+        const label = `indent ${characterIndentIn}, name "${characterText}"`;
+
+        const continuedLines = result.pages
+          .flatMap((p) => p.lines)
+          .filter((l) => l.kind === 'generated' && l.reason === 'continued') as {
+          text: string;
+        }[];
+        for (const line of continuedLines) {
+          expect(graphemeLength(line.text), `${label}, line "${line.text}"`).toBeLessThanOrEqual(
+            budget,
+          );
+        }
+
+        // No content lost: all 4 dialogue rows land somewhere, whether the speech split or moved
+        // whole.
+        const dialogueTotal = result.pages
+          .flatMap((p) => p.lines)
+          .filter((l) => l.kind === 'authored' && l.blockId === 'd0').length;
+        expect(dialogueTotal, label).toBe(4);
+      }
+    }
   });
 });
 
