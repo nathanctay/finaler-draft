@@ -119,10 +119,15 @@ describe('createAuth', () => {
     expect(result.trustedOrigins).toEqual(['http://localhost:3001']);
   });
 
-  it('configures verification to be sent on both sign-up and a sign-in attempt against an unverified account', () => {
+  it('sends verification on sign-up but never automatically on a rejected sign-in', () => {
+    // `sendOnSignIn` was `true` when this slice first landed, making "try signing in again" the
+    // way to get a fresh link. It also meant every further attempt sent another email, so a
+    // visitor who did not verify promptly accumulated them. The owner asked for an explicit
+    // affordance instead, and sign-in.tsx now offers one on both stuck states -- so the automatic
+    // send is off, and this assertion pins that rather than the behaviour it replaced.
     createAuth(environment, { mail });
     const options = betterAuth.mock.calls[0]![0];
-    expect(options.emailVerification).toMatchObject({ sendOnSignUp: true, sendOnSignIn: true });
+    expect(options.emailVerification).toMatchObject({ sendOnSignUp: true, sendOnSignIn: false });
   });
 
   describe('sendResetPassword', () => {

@@ -5,6 +5,47 @@ import { PASSWORD_MIN_LENGTH, PASSWORD_REQUIREMENTS_MESSAGE } from '@finaler-dra
 import { AuthApiError, GENERIC_AUTH_ERROR_MESSAGE, api } from '../api.js';
 import { guardSessionUser, sessionQueryOptions } from '../session.js';
 
+/**
+ * The explicit "send me another link" affordance. Rendered in both places a visitor can be stuck
+ * without a session: straight after signing up, and on a sign-in refused for an unverified
+ * address.
+ *
+ * Deliberately reports its own outcome rather than staying silent on success -- a button that
+ * appears to do nothing is indistinguishable from one that is broken, and this one is reached by
+ * people who are already unsure whether the first email was ever sent. The failure message stays
+ * generic because the underlying endpoint is unauthenticated and answers the same way regardless
+ * of whether the address is registered (Better Auth's own anti-enumeration behaviour, the same
+ * reason forgot-password.tsx renders one message unconditionally).
+ */
+function ResendVerification({
+  email,
+  resend,
+}: {
+  email: string;
+  resend: { isPending: boolean; isSuccess: boolean; isError: boolean; mutate: () => void };
+}) {
+  if (resend.isSuccess) {
+    return <p role="status">If {email} needs verifying, a new link is on its way.</p>;
+  }
+  return (
+    <>
+      <button
+        className="text-button"
+        disabled={resend.isPending}
+        onClick={() => resend.mutate()}
+        type="button"
+      >
+        {resend.isPending ? 'Sending…' : 'Resend verification email'}
+      </button>
+      {resend.isError && (
+        <p className="field-error" role="alert">
+          Could not send the email just now. Try again in a moment.
+        </p>
+      )}
+    </>
+  );
+}
+
 export const Route = createFileRoute('/sign-in')({
   beforeLoad: async ({ context }) => {
     const user = await guardSessionUser(context.queryClient);
@@ -100,6 +141,15 @@ function SignInPage() {
   // path instead.
   const [awaitingVerification, setAwaitingVerification] = useState(false);
 
+  // An explicit resend, rather than the automatic one a rejected sign-in used to trigger (see
+  // auth.ts's `sendOnSignIn` comment). A visitor whose link expired, or who never received the
+  // first one, needs a way to ask for another that does not depend on guessing that re-attempting
+  // sign-in would send one. Reachable from both places a visitor can be stuck: the post-sign-up
+  // panel, and a sign-in refused because the address is not verified.
+  const resendVerification = useMutation({
+    mutationFn: () => api.sendVerificationEmail(email),
+  });
+
   const authentication = useMutation({
     mutationFn: () =>
       mode === 'sign-in' ? api.signIn(email, password) : api.signUp(name, email, password),
@@ -151,9 +201,10 @@ function SignInPage() {
           <>
             <h1 id="entry-title">Check your email.</h1>
             <p role="status">
-              We sent a verification link to {email}. Follow it to finish setting up your account,
-              then sign in.
+              If {email} is not already registered, a verification link is on its way -- follow it
+              to finish setting up your account. If you already have an account, sign in instead.
             </p>
+            <ResendVerification email={email} resend={resendVerification} />
             <button className="text-button" onClick={switchMode} type="button">
               I already have an account
             </button>
@@ -272,6 +323,11 @@ function SignInPage() {
                   : GENERIC_AUTH_ERROR_MESSAGE}
               </p>
             )}
+            {authentication.isError &&
+              authentication.error instanceof AuthApiError &&
+              authentication.error.code === 'EMAIL_NOT_VERIFIED' && (
+                <ResendVerification email={email} resend={resendVerification} />
+              )}
             <button className="text-button" onClick={switchMode} type="button">
               {mode === 'sign-in' ? 'Create an account' : 'I already have an account'}
             </button>

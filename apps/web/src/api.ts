@@ -98,7 +98,7 @@ const authErrorMessages = {
   // and the password is correct, but the account has not verified its email. `sendOnSignIn`
   // (also auth.ts) means this same rejected attempt already triggered a fresh verification email,
   // so the message can honestly tell the visitor to look for one.
-  EMAIL_NOT_VERIFIED: 'Verify your email before signing in. We just sent you a new link.',
+  EMAIL_NOT_VERIFIED: 'Verify your email before signing in.',
 } as const;
 
 export type AuthValidationErrorCode = keyof typeof authErrorMessages;
@@ -181,6 +181,28 @@ async function session(): Promise<SessionUser | null> {
   return body?.user ?? null;
 }
 
+/**
+ * An absolute URL on the origin the visitor is actually looking at, for the pages emailed links
+ * land on.
+ *
+ * These were relative paths, and Better Auth resolves a relative `callbackURL`/`redirectTo`
+ * against `BETTER_AUTH_URL` -- the API's own origin. In production that is the same origin that
+ * serves the client, so a relative path happens to work. In development it is not: the API is on
+ * :3001 and Vite serves the app on :5173, so a verification link redirected the browser to
+ * `http://localhost:3001/verify-email`, where Fastify has no such route and answered 404. The
+ * emailed link was therefore unusable for anyone running the app locally -- found by the owner
+ * doing exactly that, and invisible to every test, because the browser suites run against the
+ * production build where both origins coincide.
+ *
+ * `window.location.origin` is the right source: it is by definition where the visitor's app is
+ * served from, in either environment. Better Auth validates these against its own trusted-origin
+ * list (`createAuth`'s `trustedOrigins`, which includes `CLIENT_ORIGIN`), so an absolute URL here
+ * is checked rather than blindly followed.
+ */
+function appUrl(path: string): string {
+  return new URL(path, window.location.origin).toString();
+}
+
 export const api = {
   session,
   // Typed the same way `signUp` below is (`{token}`, not `z.unknown()`) so `sign-in.tsx` can read
@@ -200,7 +222,7 @@ export const api = {
   // page that actually says the email was confirmed.
   signUp: (name: string, email: string, password: string) =>
     authenticationJson('/api/auth/sign-up/email', authTokenResponseSchema, {
-      body: JSON.stringify({ email, name, password, callbackURL: '/verify-email' }),
+      body: JSON.stringify({ callbackURL: appUrl('/verify-email'), email, name, password }),
       method: 'POST',
     }),
   signOut: () => json('/api/auth/sign-out', z.unknown(), { method: 'POST' }),
@@ -212,10 +234,21 @@ export const api = {
   // the page that reads it from there.
   requestPasswordReset: (email: string) =>
     authClient()
-      .requestPasswordReset({ email, redirectTo: '/reset-password' })
+      .requestPasswordReset({ email, redirectTo: appUrl('/reset-password') })
       .then(unwrapAuthClientResult),
   resetPassword: (newPassword: string, token: string) =>
     authClient().resetPassword({ newPassword, token }).then(unwrapAuthClientResult),
+  // Requires no session, by design: an unverified account cannot sign in, so the visitor asking
+  // for a fresh link has no session to authenticate with (confirmed against the installed
+  // `api/routes/email-verification.mjs`, whose body is just `{ email }`). Better Auth applies its
+  // own 3-per-60-seconds limit to this path specifically, which is what keeps an unauthenticated
+  // send endpoint from becoming a way to post mail to an arbitrary address.
+  //
+  // `callbackURL` matches sign-up's, so a link from here lands on the same confirmation page.
+  sendVerificationEmail: (email: string) =>
+    authClient()
+      .sendVerificationEmail({ callbackURL: appUrl('/verify-email'), email })
+      .then(unwrapAuthClientResult),
   projects: () => json('/api/projects', z.array(projectSchema)),
   createProject: (title: string) =>
     json('/api/projects', projectSchema.pick({ id: true, title: true }), {

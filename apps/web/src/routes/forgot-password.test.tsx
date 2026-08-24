@@ -41,9 +41,14 @@ describe('forgot-password page', () => {
     const [, init] = fetchMock.mock.calls.find(([path]) =>
       String(path).includes('/api/auth/request-password-reset'),
     )!;
+    // Absolute, on the origin the visitor is actually on -- not the relative path this asserted
+    // when the slice first landed. Better Auth resolves a relative `redirectTo` against
+    // `BETTER_AUTH_URL`, the API's own origin, which in development is a different port from the
+    // one serving the app: the emailed link then landed on the API and 404'd. Pinning the origin
+    // here, rather than just the path, is what would catch that regression returning.
     expect(JSON.parse(init?.body as string)).toEqual({
       email: 'writer@example.com',
-      redirectTo: '/reset-password',
+      redirectTo: `${window.location.origin}/reset-password`,
     });
   });
 

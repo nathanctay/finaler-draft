@@ -20,6 +20,43 @@ describe('GET /api/health', () => {
   });
 });
 
+describe('auth request forwarding', () => {
+  it('fills in a client IP from the connection when no proxy header is present, so rate limiting is per client', async () => {
+    // Better Auth resolves a client IP from headers only -- it receives a web `Request` and cannot
+    // see the socket. With none present its fallback is a single shared bucket for every client
+    // combined (installed `api/rate-limiter/index.mjs`, `NO_TRUSTED_IP_KEY`), which is worse than
+    // no limit at all: one abusive client exhausts it and locks everyone else out. The owner hit
+    // this locally, where nothing sends `x-real-ip`.
+    let seen: Headers | undefined;
+    const ipApp = await buildApp({
+      auth: {
+        baseUrl: 'http://127.0.0.1:3001',
+        getActorId: async () => null,
+        handler: async (request: Request) => {
+          seen = request.headers;
+          return new Response('{}', {
+            headers: { 'content-type': 'application/json' },
+            status: 200,
+          });
+        },
+        trustedOrigins: ['http://127.0.0.1:3001'],
+      },
+    });
+    await ipApp.inject({ method: 'GET', url: '/api/auth/ok' });
+    expect(seen?.get('x-real-ip')).toBeTruthy();
+
+    // A header that did arrive is passed through untouched: behind a real proxy its value is the
+    // client's address and must win over the connection, which is the proxy itself.
+    await ipApp.inject({
+      headers: { 'x-real-ip': '203.0.113.7' },
+      method: 'GET',
+      url: '/api/auth/ok',
+    });
+    expect(seen?.get('x-real-ip')).toBe('203.0.113.7');
+    await ipApp.close();
+  });
+});
+
 describe('GET /api/test/last-mail', () => {
   it('is not registered at all when no testMail option is supplied', async () => {
     // The default `app` built above has no `testMail` option -- this is the production shape,

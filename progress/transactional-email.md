@@ -380,3 +380,153 @@ Removing the `NODE_ENV` condition fails exactly that test by name. Restored and 
 
 This does not change the harness: the browser suites run without `NODE_ENV=production`, so the route
 is present for them exactly as before.
+
+### 2026-08-23 — an explicit resend, replacing the automatic one (lead, owner-requested)
+
+The owner asked whether an unverified account would keep receiving verification emails. Reading the
+installed `api/routes/sign-in.mjs` answers both halves of that:
+
+- The verification check sits **after** the password comparison, so a resend only ever fired on a
+  _correct_ password. It was never a way to post mail to an address you do not control.
+- But with `sendOnSignIn: true`, every rejected attempt sent another email. A visitor who did not
+  verify promptly, and kept trying to sign in, accumulated them.
+
+Worse, the recovery path was undiscoverable: nothing told a visitor whose link had expired that
+attempting sign-in again would quietly send a new one.
+
+**`sendOnSignIn` is now off, and there is a real button instead.** `api.sendVerificationEmail` calls
+Better Auth's `/send-verification-email`, which takes `{ email }` and requires **no session** --
+confirmed against the installed `api/routes/email-verification.mjs`, and necessary, since an
+unverified account cannot obtain a session to authenticate with. Better Auth applies its own
+3-per-60-seconds limit to that path specifically, which is what keeps an unauthenticated send
+endpoint from becoming a way to mail an arbitrary address.
+
+The button renders in both places a visitor can be stuck without a session: the post-sign-up "Check
+your email" panel, and a sign-in refused with `EMAIL_NOT_VERIFIED`.
+
+**One piece of now-false copy was caught by this**: `EMAIL_NOT_VERIFIED`'s message read "We just sent
+you a new link", which stopped being true the moment the automatic send was disabled. Corrected.
+
+**An outdated test was updated rather than the behaviour reverted.** `auth.test.ts` asserted
+`sendOnSignIn: true`, and failed correctly when this changed. That is the case where the test
+encodes a superseded plan, so it now pins the new intent with the reasoning attached -- as distinct
+from loosening a test to accommodate a weaker implementation, which this project does not do.
+
+**Mutation-tested:** replacing the resend's `mutationFn` with a no-op fails the new test on the
+assertion that a request actually left, carrying the right address.
+
+## Known limitation
+
+The new test does not assert the confirmation message the component renders on success. Better Auth's
+client performs its own response parsing, and a `fetch` stub thin enough for the rest of that file
+does not settle it into a success state -- asserting the message would have been asserting the stub
+rather than the component. What is covered is the part that cannot be faked: the request leaves,
+addressed to the right person. The success and failure copy is currently verified by reading, not by
+test.
+
+### 2026-08-24 — two defects found by running it (lead, owner-reported)
+
+The owner ran the flow locally against a real Resend key. The email arrived; nothing after that
+worked. Two separate defects, neither reachable by any test in this repository.
+
+**1. The emailed link 404s in development.** `callbackURL` and `redirectTo` were relative paths, and
+Better Auth resolves those against `BETTER_AUTH_URL` -- the API's own origin. In production the API
+also serves the client, so a relative path happens to land correctly. In development it does not:
+the API is on :3001 and Vite serves the app on :5173, so the verification link redirected to
+`http://localhost:3001/verify-email`, where Fastify has no such route and answered 404.
+
+Fixed with an `appUrl()` helper building an absolute URL on `window.location.origin` -- by
+definition where the visitor's app is served from, in either environment. Better Auth validates
+these against its own trusted-origin list, so an absolute URL is checked rather than blindly
+followed.
+
+**Why no test caught it:** the browser suites run against the production build, where the API and
+the client share one origin and a relative path resolves correctly. The bug exists only in the
+split-origin development setup, which nothing automated exercises. That is worth remembering as a
+category -- "works in the suite, broken in `pnpm dev`" is invisible here by construction.
+
+**2. Rate limiting could not identify a client, and silently shared one bucket.** The owner's logs
+carried Better Auth's own warning. Confirmed in the installed `api/rate-limiter/index.mjs`: when no
+IP resolves, every request collapses onto `NO_TRUSTED_IP_KEY`, a single shared bucket per path for
+all clients combined. **That is worse than no rate limit** -- one abusive client exhausts it and
+locks out every legitimate user.
+
+`auth.ts` points Better Auth at `x-real-ip`, which Railway's proxy sends. Nothing sends it on a
+direct connection, so the fallback applied in development, and would apply in any deployment where
+that header ever stopped arriving.
+
+Better Auth receives a web `Request` and cannot see the socket, but Fastify can. The auth route now
+fills `x-real-ip` from `request.ip` **only when the header is absent**; behind Railway the real
+value arrives and is passed through untouched.
+
+**Known limitation, pre-existing and unchanged by this:** a client reaching the API directly can set
+`x-real-ip` itself and rotate it to evade the limit. Closing that requires
+`advanced.ipAddress.trustedProxies`, so the header is believed only from a known proxy -- a
+deployment-topology decision rather than a code one, and worth taking before public launch.
+
+**Mutation-tested:** removing the fallback fails the new test by name; the test also asserts a
+header that did arrive is passed through unchanged, so the fix cannot regress into overwriting a
+proxy's value with the proxy's own address.
+
+### 2026-08-24 — duplicate sign-up, and two small fixes (lead, owner-reported)
+
+**Signing up with an address that already has an account does not stop you. That is deliberate, and
+it cannot be changed without giving up email verification.**
+
+Better Auth's sign-up route has two paths for a duplicate address (installed
+`api/routes/sign-up.mjs`): throw `USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL`, or return a _synthetic_
+success -- `{ token: null, user: <fabricated> }`, with the password still hashed to keep the timing
+indistinguishable. Which one runs is not a setting of its own:
+
+```
+shouldReturnGenericDuplicateResponse =
+  emailAndPassword.requireEmailVerification || emailAndPassword.autoSignIn === false
+```
+
+This slice sets `requireEmailVerification: true`, so the generic response is on, and there is no
+independent switch to turn it off.
+
+That is the right behaviour to keep. Rejecting the address would tell anyone who asks whether a
+given person has an account here -- a stranger can test an address and learn something about them
+that is not theirs to learn. The synthetic-user response, down to hashing a password it will never
+store, exists precisely so that answer is unavailable.
+
+What was genuinely wrong was the copy. "We sent a verification link to {email}" is a claim, and in
+the duplicate case it is false: nothing was sent, and the visitor waits for an email that will never
+arrive. It now reads "If {email} is not already registered, a verification link is on its way ... If
+you already have an account, sign in instead", which is true in both cases, tells someone who
+forgot they had an account what to do, and still reveals nothing.
+
+**Two small fixes alongside it:**
+
+- `.text-button` is now `display: block`. The entry screens render two in sequence -- "Resend
+  verification email" and "I already have an account" -- and as inline elements they sat on one line
+  and read as a single sentence.
+- The client-IP question is recorded in `plan.md`'s "Launch readiness" as a gate, with the specific
+  `curl` that settles it and an explicit warning not to guess the proxy range from the codebase.
+
+### 2026-08-24 — the backfill had not run locally, and the expired-link path is now tested (lead)
+
+**The owner's pre-verification account was refused sign-in.** Not a defect in the backfill: it had
+simply never been applied to his local database. Confirmed by querying it directly -- three
+migrations recorded, `0003_backfill_email_verified` absent, and `user` holding 26 rows with
+`email_verified = false` against 2 true.
+
+Migrations run automatically only on deploy (`railway.toml`'s `preDeployCommand`); locally
+`pnpm --filter @finaler-draft/database db:migrate` is a manual step. Worth stating because the
+symptom -- "an account that predates verification is locked out" -- looks exactly like the backfill
+being wrong, and it is not.
+
+**The expired-link question now has a test rather than an argument.** A visitor who signs up, does
+not verify, closes the tab, and returns after the hour is up has a dead link in their inbox and no
+post-sign-up panel to return to. The only thing they will naturally do is try to sign in, so that is
+where the way back has to be -- and since `sendOnSignIn` is off, nothing arrives unless they ask.
+
+`sign-in.tsx` renders the resend button beneath the `EMAIL_NOT_VERIFIED` error for exactly this
+reason, and there is now a test proving it: a refused sign-in shows both the diagnosis and the
+affordance. **Mutation-tested** -- forcing that branch to `false` fails the test by name, which is
+what stops a future tidy-up from quietly turning the message back into a dead end.
+
+Following the sibling error test's own pattern here was necessary rather than stylistic: this
+suite's route mock surfaces a mutation error on the next mount, so the test unmounts and renders
+again to observe it, and scopes to the first alert since the resend renders its own.

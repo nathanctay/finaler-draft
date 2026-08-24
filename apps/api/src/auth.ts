@@ -175,16 +175,18 @@ export function createAuth(environment: AuthEnvironment, dependencies: CreateAut
       // to trace that fallback through Better Auth's source to know a new account actually gets a
       // verification email, not just a requirement it can never satisfy.
       sendOnSignUp: true,
-      // A user who has let their original link expire (see `resetPasswordTokenExpiresIn`'s
-      // sibling default of one hour, which `sendVerificationEmail`'s own default `expiresIn`
-      // matches) has no in-app "resend" affordance in this slice -- deliberately not built, to
-      // keep the UI surface to what progress/transactional-email.md actually asked for. This is
-      // the recovery path instead: an unverified account's sign-in attempt is refused
-      // (`EMAIL_NOT_VERIFIED`, enforced by `requireEmailVerification` above) but, confirmed by
-      // reading the installed `api/routes/sign-in.mjs`, that same rejected attempt also triggers
-      // a fresh `sendVerificationEmail` call when this flag is set. Trying to sign in again is
-      // therefore a genuine, working way to get a new link.
-      sendOnSignIn: true,
+      // Deliberately off. A rejected sign-in used to resend automatically, which made "try
+      // signing in again" the recovery path -- but it also meant every further attempt sent
+      // another email, so a visitor who did not verify promptly would accumulate them. The
+      // owner asked for an explicit affordance instead, and there now is one: sign-in.tsx offers
+      // a "Resend verification email" button on both the post-sign-up panel and the rejected
+      // sign-in, calling `/send-verification-email` directly. One click, one email.
+      //
+      // Note this path only ever fired on a *correct* password -- confirmed by reading the
+      // installed `api/routes/sign-in.mjs`, where the verification check sits after the password
+      // comparison -- so it was never a way to post mail to an address you did not control.
+      // Turning it off is about not surprising the account's real owner, not about abuse.
+      sendOnSignIn: false,
     },
   });
 
