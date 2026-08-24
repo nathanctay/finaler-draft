@@ -15,7 +15,8 @@
   },
   "scripts": {
     "prepare": "git config core.hooksPath .githooks || true",
-    "dev": "pnpm --parallel --stream --filter @finaler-draft/api --filter @finaler-draft/web dev",
+    "build:packages": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/server-config build && pnpm --filter @finaler-draft/screenplay build && pnpm --filter @finaler-draft/database build && pnpm --filter @finaler-draft/layout build && pnpm --filter @finaler-draft/xml-escape build && pnpm --filter @finaler-draft/fdx build && pnpm --filter @finaler-draft/docx build && pnpm --filter @finaler-draft/pdf build",
+    "dev": "pnpm build:packages && pnpm --parallel --stream --filter @finaler-draft/api --filter @finaler-draft/web dev",
     "start": "pnpm --filter @finaler-draft/api start",
     "build": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/server-config build && pnpm --filter @finaler-draft/screenplay build && pnpm --filter @finaler-draft/database build && pnpm --filter @finaler-draft/layout build && pnpm --filter @finaler-draft/xml-escape build && pnpm --filter @finaler-draft/fdx build && pnpm --filter @finaler-draft/docx build && pnpm --filter @finaler-draft/pdf build && pnpm --filter @finaler-draft/web build && pnpm --filter @finaler-draft/api build",
     "typecheck": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/server-config build && pnpm --filter @finaler-draft/screenplay build && pnpm --filter @finaler-draft/database build && pnpm --filter @finaler-draft/layout build && pnpm --filter @finaler-draft/xml-escape build && pnpm --filter @finaler-draft/fdx build && pnpm --filter @finaler-draft/docx build && pnpm --filter @finaler-draft/pdf build && pnpm --filter @finaler-draft/web typecheck && pnpm --filter @finaler-draft/api typecheck",
