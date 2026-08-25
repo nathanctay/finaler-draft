@@ -14,11 +14,13 @@ import {
   createDefaultTitlePage,
   deriveCharacters,
   deriveScenes,
+  deriveVocabulary,
   parseScreenplay,
   safeParseScreenplay,
   screenplayBlockSchema,
   screenplaySchema,
   screenplayToPlainText,
+  suggest,
 } from './index.js';
 
 function uuidFor(index: number): string {
@@ -31,6 +33,10 @@ function actionBlock(index: number, text = 'x') {
 
 function characterBlock(index: number, text: string) {
   return { id: uuidFor(index), type: 'character' as const, text };
+}
+
+function sceneHeadingBlock(index: number, text: string) {
+  return { id: uuidFor(index), type: 'scene_heading' as const, text };
 }
 
 function dialogueBlock(index: number, text: string) {
@@ -1062,5 +1068,495 @@ describe('screenplayToPlainText', () => {
     });
 
     expect(text).toBe('writer@example.test\n');
+  });
+});
+
+describe('deriveVocabulary', () => {
+  it('seeds times with the conventional set, in declaration order, when nothing is authored', () => {
+    const vocabulary = deriveVocabulary([]);
+
+    expect(vocabulary.locations).toEqual([]);
+    expect(vocabulary.characters).toEqual([]);
+    expect(vocabulary.times).toEqual([
+      { value: 'DAY', count: 0 },
+      { value: 'NIGHT', count: 0 },
+      { value: 'CONTINUOUS', count: 0 },
+      { value: 'LATER', count: 0 },
+      { value: 'MORNING', count: 0 },
+      { value: 'EVENING', count: 0 },
+    ]);
+  });
+
+  // Proves the suggestion-side tie-break is conventional commonness (`CONVENTIONAL_PREFIX_ORDER`:
+  // INT., EXT., INT./EXT., I/E.), not the parsing-side longest-first matching order
+  // (`SCENE_HEADING_PREFIXES`: INT./EXT., I/E., INT., EXT.). A document with nothing authored
+  // yet has all four prefixes tied at count 0, so this is exactly the tie-break case, and it
+  // fails under either wrong order: matching order, or no seeding at all.
+  it('seeds all four prefixes, in conventional-commonness order, when nothing is authored', () => {
+    const vocabulary = deriveVocabulary([]);
+
+    expect(vocabulary.prefixes).toEqual([
+      { value: 'INT.', count: 0 },
+      { value: 'EXT.', count: 0 },
+      { value: 'INT./EXT.', count: 0 },
+      { value: 'I/E.', count: 0 },
+    ]);
+  });
+
+  it("counts a heading's matched prefix toward frequency", () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT. KITCHEN - DAY')]);
+
+    expect(vocabulary.prefixes.find((prefix) => prefix.value === 'INT.')).toEqual({
+      value: 'INT.',
+      count: 1,
+    });
+  });
+
+  // The core of the coordinator's correction: frequency must be able to override conventional
+  // commonness. `INT.` is the conventionally common prefix, but this document uses `INT./EXT.`
+  // three times and `INT.` only once, so `INT./EXT.` must lead. A suggestion order that ignored
+  // authored frequency (declaration order, or the conventional tie-break order applied
+  // unconditionally) would rank `INT.` first here; it does not.
+  it('ranks a heavily-authored INT./EXT. above a less-authored INT., overriding conventional order', () => {
+    const vocabulary = deriveVocabulary([
+      sceneHeadingBlock(1, 'INT./EXT. GARAGE - DAY'),
+      sceneHeadingBlock(2, 'INT./EXT. GARAGE - NIGHT'),
+      sceneHeadingBlock(3, 'INT./EXT. PORCH - DAY'),
+      sceneHeadingBlock(4, 'INT. KITCHEN - DAY'),
+    ]);
+
+    expect(vocabulary.prefixes.map((prefix) => prefix.value)).toEqual([
+      'INT./EXT.',
+      'INT.',
+      'EXT.',
+      'I/E.',
+    ]);
+    expect(vocabulary.prefixes[0]).toEqual({ value: 'INT./EXT.', count: 3 });
+  });
+
+  it('orders equally-frequent authored prefixes by most recently authored', () => {
+    const vocabulary = deriveVocabulary([
+      sceneHeadingBlock(1, 'EXT. YARD - DAY'),
+      sceneHeadingBlock(2, 'INT. KITCHEN - DAY'),
+    ]);
+
+    // Both authored once; INT. is authored later, so it leads despite EXT. conventionally
+    // ranking above INT./EXT. and I/E. -- but not above INT. once both are equally frequent and
+    // INT. is the more recent one.
+    expect(vocabulary.prefixes[0]).toEqual({ value: 'INT.', count: 1 });
+    expect(vocabulary.prefixes[1]).toEqual({ value: 'EXT.', count: 1 });
+  });
+
+  it('matches the longest applicable prefix so INT./EXT. is credited, not INT.', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT./EXT. HALLWAY - DAY')]);
+
+    expect(vocabulary.prefixes.find((prefix) => prefix.value === 'INT./EXT.')?.count).toBe(1);
+    expect(vocabulary.prefixes.find((prefix) => prefix.value === 'INT.')?.count).toBe(0);
+  });
+
+  it('credits no prefix for a heading with none recognised', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'SOMEWHERE OUT THERE - NIGHT')]);
+
+    expect(vocabulary.prefixes.every((prefix) => prefix.count === 0)).toBe(true);
+  });
+
+  it('parses a simple heading into one location and one time', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT. KITCHEN - DAY')]);
+
+    expect(vocabulary.locations).toEqual([{ value: 'KITCHEN', count: 1 }]);
+    expect(vocabulary.times[0]).toEqual({ value: 'DAY', count: 1 });
+  });
+
+  // The central hazard this scope's brief calls out: time is whatever follows the LAST ` - `,
+  // not the first. An implementation that split on the first separator would report location
+  // `KITCHEN` and time `BACK ROOM - DAY` -- this assertion fails immediately under that mutation.
+  it('splits a heading with two separators on the LAST one, not the first', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT. KITCHEN - BACK ROOM - DAY')]);
+
+    expect(vocabulary.locations).toEqual([{ value: 'KITCHEN - BACK ROOM', count: 1 }]);
+    expect(vocabulary.times[0]).toEqual({ value: 'DAY', count: 1 });
+  });
+
+  it('accepts a heading with no recognised prefix and still yields a location', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'SOMEWHERE OUT THERE - NIGHT')]);
+
+    expect(vocabulary.locations).toEqual([{ value: 'SOMEWHERE OUT THERE', count: 1 }]);
+    expect(vocabulary.times[0]).toEqual({ value: 'NIGHT', count: 1 });
+  });
+
+  it('matches the longest applicable prefix so INT./EXT. is not mistaken for INT.', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT./EXT. HALLWAY - DAY')]);
+
+    expect(vocabulary.locations).toEqual([{ value: 'HALLWAY', count: 1 }]);
+  });
+
+  it('yields a location with no time when there is no ` - ` separator at all', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT. KITCHEN')]);
+
+    expect(vocabulary.locations).toEqual([{ value: 'KITCHEN', count: 1 }]);
+    expect(vocabulary.times.every((time) => time.count === 0)).toBe(true);
+  });
+
+  it('does not treat a bare hyphen with no surrounding spaces as a separator', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT. KITCHEN-DAY')]);
+
+    expect(vocabulary.locations).toEqual([{ value: 'KITCHEN-DAY', count: 1 }]);
+    expect(vocabulary.times.every((time) => time.count === 0)).toBe(true);
+  });
+
+  it('still splits when extra whitespace surrounds the separator', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT. KITCHEN  -  DAY')]);
+
+    expect(vocabulary.locations).toEqual([{ value: 'KITCHEN', count: 1 }]);
+    expect(vocabulary.times[0]).toEqual({ value: 'DAY', count: 1 });
+  });
+
+  it('yields no location for an empty location segment but still yields the time', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT. - DAY')]);
+
+    expect(vocabulary.locations).toEqual([]);
+    expect(vocabulary.times[0]).toEqual({ value: 'DAY', count: 1 });
+  });
+
+  it('yields no time for a trailing, incomplete separator', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT. KITCHEN -')]);
+
+    expect(vocabulary.locations).toEqual([{ value: 'KITCHEN -', count: 1 }]);
+    expect(vocabulary.times.every((time) => time.count === 0)).toBe(true);
+  });
+
+  it('yields neither location nor time for a blank heading', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, '   ')]);
+
+    expect(vocabulary.locations).toEqual([]);
+    expect(vocabulary.times.every((time) => time.count === 0)).toBe(true);
+  });
+
+  it('yields neither location nor time for a heading that is only a recognised prefix', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT.')]);
+
+    expect(vocabulary.locations).toEqual([]);
+    expect(vocabulary.times.every((time) => time.count === 0)).toBe(true);
+  });
+
+  it('dedupes locations case-insensitively regardless of casing, with a combined count', () => {
+    const vocabulary = deriveVocabulary([
+      sceneHeadingBlock(1, 'INT. Kitchen - DAY'),
+      sceneHeadingBlock(2, 'EXT. KITCHEN - NIGHT'),
+    ]);
+
+    // Still one term, count 2 -- dedup and counting are unaffected by canonicalizing the display
+    // value to uppercase (see the 'canonicalizes an authored location/time to uppercase' tests
+    // below for the casing itself).
+    expect(vocabulary.locations).toEqual([{ value: 'KITCHEN', count: 2 }]);
+  });
+
+  // The user's ruling on this scope: screenplay convention is uppercase throughout a scene
+  // heading, and accepting is always an explicit Tab, never a silent rewrite -- so the vocabulary
+  // offers the conventional casing regardless of how the writer actually typed it. A location or
+  // time authored in lowercase (or any mixed case) is offered back canonically uppercased, the
+  // same as a character cue already is.
+  it('canonicalizes an authored location and time to uppercase, regardless of authored casing', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'int. kitchen - dusk')]);
+
+    expect(vocabulary.locations).toEqual([{ value: 'KITCHEN', count: 1 }]);
+    expect(vocabulary.times[0]).toEqual({ value: 'DUSK', count: 1 });
+  });
+
+  it('canonicalizes a lowercase authored time that duplicates an already-uppercase seed', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT. KITCHEN - day')]);
+
+    // Not a new, separately-cased entry -- folds into the existing 'DAY' seed, which was already
+    // uppercase, so this is really a regression guard: uppercasing authored terms must not
+    // somehow produce two entries where dedup used to produce one.
+    expect(vocabulary.times).toHaveLength(6);
+    expect(vocabulary.times[0]).toEqual({ value: 'DAY', count: 1 });
+  });
+
+  // The user's own words: "what we store canonically is whatever the writer typed." Uppercasing
+  // is confined to the derived vocabulary; the canonical blocks the writer authored must come
+  // back byte-identical, lowercase and all, proving `deriveVocabulary` never mutates its input
+  // (directly or by returning aliases into it) and nothing in this module has any path back to
+  // rewriting a document.
+  it('never rewrites the canonical blocks it reads: the authored lowercase heading is untouched', () => {
+    const blocks = [sceneHeadingBlock(1, 'int. kitchen - dusk')];
+    const snapshot = JSON.parse(JSON.stringify(blocks)) as typeof blocks;
+
+    deriveVocabulary(blocks);
+
+    expect(blocks).toEqual(snapshot);
+    expect(blocks[0]?.text).toBe('int. kitchen - dusk');
+  });
+
+  it('folds an authored time into its matching seed rather than duplicating it', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT. KITCHEN - day')]);
+
+    // Still six entries, not seven: 'day' folded into the 'DAY' seed instead of adding a
+    // separate, differently-cased entry.
+    expect(vocabulary.times).toHaveLength(6);
+    expect(vocabulary.times[0]).toEqual({ value: 'DAY', count: 1 });
+  });
+
+  it('adds a novel time not in the seeded set', () => {
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT. KITCHEN - DAWN')]);
+
+    expect(vocabulary.times).toHaveLength(7);
+    expect(vocabulary.times[0]).toEqual({ value: 'DAWN', count: 1 });
+  });
+
+  // Proves "most frequent first": KITCHEN is authored twice, LOBBY once and more recently. If
+  // ordering were recency-first (or count ascending), LOBBY would lead; it does not.
+  it('orders locations by frequency first, most authored winning over most recent', () => {
+    const vocabulary = deriveVocabulary([
+      sceneHeadingBlock(1, 'INT. KITCHEN - DAY'),
+      sceneHeadingBlock(2, 'INT. KITCHEN - NIGHT'),
+      sceneHeadingBlock(3, 'INT. LOBBY - DAY'),
+    ]);
+
+    expect(vocabulary.locations.map((location) => location.value)).toEqual(['KITCHEN', 'LOBBY']);
+  });
+
+  // Proves "ties broken by most recently authored": KITCHEN and LOBBY are each authored once,
+  // but LOBBY is authored later. If ties were broken by first-authored (or not at all), KITCHEN
+  // would lead.
+  it('orders equally-frequent locations by most recently authored', () => {
+    const vocabulary = deriveVocabulary([
+      sceneHeadingBlock(1, 'INT. KITCHEN - DAY'),
+      sceneHeadingBlock(2, 'INT. LOBBY - DAY'),
+    ]);
+
+    expect(vocabulary.locations.map((location) => location.value)).toEqual(['LOBBY', 'KITCHEN']);
+  });
+
+  it('reuses deriveCharacters for the character vocabulary, in canonical uppercase', () => {
+    const vocabulary = deriveVocabulary(screenplayFixture.blocks);
+
+    expect(vocabulary.characters).toEqual([
+      { value: 'ADA', count: 2 },
+      { value: 'MILES', count: 1 },
+    ]);
+  });
+
+  it('counts a character cued inside a dual_dialogue column toward frequency and recency', () => {
+    const vocabulary = deriveVocabulary([
+      sceneHeadingBlock(1, 'INT. KITCHEN - DAY'),
+      characterBlock(2, 'ADA'),
+      dialogueBlock(3, 'Hello.'),
+      {
+        id: uuidFor(4),
+        type: 'dual_dialogue' as const,
+        left: {
+          id: uuidFor(5),
+          blocks: [characterBlock(6, 'MILES'), dialogueBlock(7, 'Hi.')],
+        },
+        right: {
+          id: uuidFor(8),
+          blocks: [characterBlock(9, 'ADA'), dialogueBlock(10, 'Hey.')],
+        },
+      },
+    ]);
+
+    // ADA is cued twice (root, then the dual_dialogue right column) and MILES once, but MILES's
+    // one cue lands after ADA's root cue and before ADA's second cue -- so by frequency alone ADA
+    // leads regardless of where MILES's single cue falls in that ordering.
+    expect(vocabulary.characters).toEqual([
+      { value: 'ADA', count: 2 },
+      { value: 'MILES', count: 1 },
+    ]);
+  });
+});
+
+describe('suggest', () => {
+  // Deliberately in an order that matches neither `SCENE_HEADING_PREFIXES` (longest-first, for
+  // parsing) nor `CONVENTIONAL_PREFIX_ORDER` (the tie-break for an unauthored document) --
+  // `suggest` must pass through whatever order `vocabulary.prefixes` gives it, not silently
+  // re-derive an order from either fixed constant.
+  const vocabulary = {
+    prefixes: [
+      { value: 'EXT.', count: 3 },
+      { value: 'I/E.', count: 2 },
+      { value: 'INT./EXT.', count: 1 },
+      { value: 'INT.', count: 0 },
+    ],
+    locations: [
+      { value: 'KITCHEN', count: 3 },
+      { value: 'KITCHEN - BACK ROOM', count: 1 },
+      { value: 'LOBBY', count: 1 },
+    ],
+    times: [
+      { value: 'DAY', count: 4 },
+      { value: 'NIGHT', count: 2 },
+      { value: 'DAWN', count: 0 },
+    ],
+    characters: [
+      { value: 'MARA', count: 5 },
+      { value: 'MILES', count: 2 },
+    ],
+  };
+
+  it('suggests nothing for an element SmartType does not support', () => {
+    for (const elementType of [
+      'action',
+      'dialogue',
+      'parenthetical',
+      'transition',
+      'shot',
+    ] as const) {
+      expect(suggest(elementType, 'anything', vocabulary)).toEqual([]);
+    }
+  });
+
+  it('suggests every prefix, in vocabulary order, when nothing has been typed', () => {
+    // Order comes from `vocabulary.prefixes` (this fixture), not from `SCENE_HEADING_PREFIXES`'s
+    // matching order and not from `CONVENTIONAL_PREFIX_ORDER`'s tie-break order -- both would
+    // produce a different sequence than this fixture's, so either mistake fails this assertion.
+    expect(suggest('scene_heading', '', vocabulary)).toEqual([
+      { insertText: 'EXT.', remainder: 'EXT.', matchedLength: 0 },
+      { insertText: 'I/E.', remainder: 'I/E.', matchedLength: 0 },
+      { insertText: 'INT./EXT.', remainder: 'INT./EXT.', matchedLength: 0 },
+      { insertText: 'INT.', remainder: 'INT.', matchedLength: 0 },
+    ]);
+  });
+
+  it('filters prefixes case-insensitively by what has been typed so far, preserving vocabulary order', () => {
+    const candidates = suggest('scene_heading', 'i', vocabulary);
+
+    // 'EXT.' (first in vocabulary order) does not start with 'I' and is excluded; the remaining
+    // three keep their relative vocabulary order.
+    expect(candidates.map((candidate) => candidate.insertText)).toEqual([
+      'I/E.',
+      'INT./EXT.',
+      'INT.',
+    ]);
+    expect(candidates[0]).toEqual({
+      insertText: 'I/E.',
+      remainder: '/E.',
+      matchedLength: 1,
+    });
+  });
+
+  it('suggests locations, pre-sorted by frequency then recency, once a prefix and space are typed', () => {
+    const candidates = suggest('scene_heading', 'INT. ', vocabulary);
+
+    expect(candidates.map((candidate) => candidate.insertText)).toEqual([
+      'KITCHEN',
+      'KITCHEN - BACK ROOM',
+      'LOBBY',
+    ]);
+    // Matched length excludes the "INT. " the writer already has right -- accepting only
+    // replaces the (empty, here) partial location, never the prefix or its trailing space.
+    expect(candidates[0]?.matchedLength).toBe(0);
+  });
+
+  it('filters locations by what has been typed after the prefix, preserving vocabulary order', () => {
+    const candidates = suggest('scene_heading', 'INT. KIT', vocabulary);
+
+    // Both offered: 'KITCHEN - BACK ROOM' also starts with 'KIT', case-insensitively. Order is
+    // preserved from `vocabulary.locations` (frequency-then-recency order), not re-sorted here.
+    expect(candidates).toEqual([
+      { insertText: 'KITCHEN', remainder: 'CHEN', matchedLength: 3 },
+      { insertText: 'KITCHEN - BACK ROOM', remainder: 'CHEN - BACK ROOM', matchedLength: 3 },
+    ]);
+  });
+
+  it('filters locations to an exact match once the full location has been typed', () => {
+    const candidates = suggest('scene_heading', 'INT. LOBBY', vocabulary);
+
+    expect(candidates).toEqual([{ insertText: 'LOBBY', remainder: '', matchedLength: 5 }]);
+  });
+
+  it('does not fuzzy-match: a location missing its first letter is not offered', () => {
+    expect(suggest('scene_heading', 'INT. ITCHEN', vocabulary)).toEqual([]);
+  });
+
+  it('suggests times after the last separator, filtering out an already-typed prefix and location', () => {
+    const candidates = suggest('scene_heading', 'INT. KITCHEN - ', vocabulary);
+
+    expect(candidates.map((candidate) => candidate.insertText)).toEqual(['DAY', 'NIGHT', 'DAWN']);
+  });
+
+  it('uses the LAST separator to find the time zone when a location itself contains one', () => {
+    const candidates = suggest('scene_heading', 'INT. KITCHEN - BACK ROOM - D', vocabulary);
+
+    // 'DAWN' also starts with 'D'; both are offered, DAY first (it is more frequent).
+    expect(candidates).toEqual([
+      { insertText: 'DAY', remainder: 'AY', matchedLength: 1 },
+      { insertText: 'DAWN', remainder: 'AWN', matchedLength: 1 },
+    ]);
+  });
+
+  it('suggests characters, case-insensitively, in a character block', () => {
+    const candidates = suggest('character', 'ma', vocabulary);
+
+    expect(candidates).toEqual([{ insertText: 'MARA', remainder: 'RA', matchedLength: 2 }]);
+  });
+
+  it('offers a candidate that corrects case even when there is no remainder to preview', () => {
+    const candidates = suggest('character', 'mara', vocabulary);
+
+    expect(candidates).toEqual([{ insertText: 'MARA', remainder: '', matchedLength: 4 }]);
+
+    // Accepting replaces exactly `matchedLength` characters before the caret with `insertText`,
+    // which is what turns the writer's lowercase `mara` into the canonical `MARA`.
+    const candidate = candidates[0]!;
+    const textBeforeCaret = 'mara';
+    const accepted =
+      textBeforeCaret.slice(0, textBeforeCaret.length - candidate.matchedLength) +
+      candidate.insertText;
+    expect(accepted).toBe('MARA');
+  });
+
+  it('suggests nothing in a character block when nothing authored matches', () => {
+    expect(suggest('character', 'zzz', vocabulary)).toEqual([]);
+  });
+
+  it('does not throw on empty text, whitespace-only text, or unmatched text', () => {
+    expect(() => suggest('scene_heading', '', vocabulary)).not.toThrow();
+    expect(() => suggest('character', '   ', vocabulary)).not.toThrow();
+    expect(suggest('scene_heading', 'ZZZ', vocabulary)).toEqual([]);
+    expect(
+      suggest('character', '', { prefixes: [], locations: [], times: [], characters: [] }),
+    ).toEqual([]);
+  });
+
+  it('composes with deriveVocabulary end to end: accept reproduces the canonical heading', () => {
+    const vocab = deriveVocabulary([
+      sceneHeadingBlock(1, 'INT. KITCHEN - DAY'),
+      sceneHeadingBlock(2, 'INT. KITCHEN - NIGHT'),
+    ]);
+
+    const textBeforeCaret = 'INT. KIT';
+    const candidate = suggest('scene_heading', textBeforeCaret, vocab)[0]!;
+    const accepted =
+      textBeforeCaret.slice(0, textBeforeCaret.length - candidate.matchedLength) +
+      candidate.insertText;
+
+    expect(accepted).toBe('INT. KITCHEN');
+  });
+
+  it('composes with deriveVocabulary end to end: a document heavy in INT./EXT. suggests it first', () => {
+    const vocab = deriveVocabulary([
+      sceneHeadingBlock(1, 'INT./EXT. GARAGE - DAY'),
+      sceneHeadingBlock(2, 'INT./EXT. GARAGE - NIGHT'),
+      sceneHeadingBlock(3, 'INT./EXT. PORCH - DAY'),
+      sceneHeadingBlock(4, 'INT. KITCHEN - DAY'),
+    ]);
+
+    // Documentary-style scripts that are mostly INT./EXT. get INT./EXT. suggested first, not the
+    // conventionally more common INT. -- this document's own authored frequency wins.
+    const candidates = suggest('scene_heading', '', vocab);
+    expect(candidates[0]).toEqual({
+      insertText: 'INT./EXT.',
+      remainder: 'INT./EXT.',
+      matchedLength: 0,
+    });
+  });
+
+  it('composes with deriveVocabulary end to end: a lowercase-authored time is offered uppercase', () => {
+    const vocab = deriveVocabulary([sceneHeadingBlock(1, 'int. kitchen - dusk')]);
+
+    const candidates = suggest('scene_heading', 'INT. KITCHEN - du', vocab);
+
+    expect(candidates).toEqual([{ insertText: 'DUSK', remainder: 'SK', matchedLength: 2 }]);
   });
 });

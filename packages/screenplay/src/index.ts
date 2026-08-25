@@ -498,6 +498,477 @@ export function deriveCharacters(blocks: readonly ScreenplayBlock[]): DerivedCha
   });
 }
 
+/**
+ * SmartType-style contextual completion (plan.md's SmartType-style entry, and this scope's
+ * brief): "Scene-heading input suggests prefixes, then locations and times already authored;
+ * character input suggests previously authored characters." This section is the pure core both
+ * later stages (the editor's ghost overlay, and an optional accept-by-list layer) consume --
+ * "No DOM, no ProseMirror, no React -- this is the seam both later stages consume." Two pieces:
+ * `deriveVocabulary`, which reads the ordered canonical body once per document change and
+ * produces the terms SmartType can offer, and `suggest`, which is given caret-side text on every
+ * keystroke and filters those terms. Splitting the work this way keeps the expensive part (a
+ * document-wide scan) off the keystroke path.
+ */
+
+/**
+ * One term SmartType can offer, already in the form `suggest` will insert on accept -- uppercase
+ * throughout: for a character name (`DerivedCharacter.name` is already canonical uppercase; see
+ * its own doc comment), for a prefix (`SCENE_HEADING_PREFIXES`'s own canonical spelling), and,
+ * per the user's ruling on this scope, for a location or time too. Screenplay convention is
+ * uppercase throughout a scene heading, and accepting a suggestion is always an explicit action
+ * (Tab), never a silent rewrite -- so offering `DUSK` for an authored `dusk` is a nudge toward
+ * convention, not a correction imposed on the writer. This canonicalization is confined to what
+ * `deriveVocabulary` derives and what `suggest` offers: the canonical screenplay itself is never
+ * rewritten, and an authored `dusk` still reads back as `dusk` from the document -- see
+ * `recordAuthoredTerm`. `count` is how many times it was authored; ordering by count (and, on a
+ * tie, by how recently it was authored) happens once, in `deriveVocabulary`, not on every
+ * `suggest` call -- see `sortTerms`.
+ */
+export type SmartTypeTerm = {
+  readonly value: string;
+  readonly count: number;
+};
+
+/** The vocabulary `suggest` filters, derived once from the ordered canonical body. Each list is
+ * already sorted most-frequent-first, ties broken by most-recently-authored -- see `sortTerms`.
+ * `prefixes` covers all four of `SCENE_HEADING_PREFIXES`, always -- unlike `locations`/`times`,
+ * which omit anything never authored, a never-authored prefix still appears (at count 0) because
+ * `suggest` must always have all four to offer while the caret is in the prefix zone. */
+export type ScreenplayVocabulary = {
+  readonly prefixes: readonly SmartTypeTerm[];
+  readonly locations: readonly SmartTypeTerm[];
+  readonly times: readonly SmartTypeTerm[];
+  readonly characters: readonly SmartTypeTerm[];
+};
+
+/**
+ * The fixed scene-heading prefixes this scope's brief names, longest first. Order matters for
+ * matching (`matchScenePrefix`, below): `INT./EXT.` and `INT.` share the same first four
+ * characters, so testing `INT.` before `INT./EXT.` would consume only the shorter prefix and
+ * leave `/EXT.` as leftover text misparsed into the location. Checking longest-first is the only
+ * way one pass through this list gets the right answer for every entry, including the ones that
+ * do not overlap with anything (`I/E.`, `EXT.`).
+ *
+ * This is a MATCHING order only. It is deliberately not also the order `suggest` offers these in
+ * -- that would rank the comparatively rare `INT./EXT.` above the single most common thing a
+ * screenwriter types, `INT.`, for every writer, regardless of what they actually author. See
+ * `CONVENTIONAL_PREFIX_ORDER` for the suggestion-side ordering.
+ */
+const SCENE_HEADING_PREFIXES = ['INT./EXT.', 'I/E.', 'INT.', 'EXT.'] as const;
+
+/**
+ * The tie-break `deriveVocabulary` falls back to for prefixes that are equally (usually
+ * zero-)frequent, ranked by conventional real-world commonness rather than by anything about how
+ * matching works: `INT.` is by far the most common scene-heading prefix a screenwriter types,
+ * then `EXT.`, with the two combined forms `INT./EXT.` and `I/E.` both comparatively rare. This
+ * is intentionally a different order from `SCENE_HEADING_PREFIXES` (longest-first, for correct
+ * parsing) -- conflating the two would rank `INT./EXT.` and `I/E.` above `INT.` for every writer
+ * on a brand-new document, and even after some authoring, `INT.` still needs a real frequency
+ * lead over `INT./EXT.` before it can outrank it. Keeping the lists separate, with separate
+ * names, is what stops that conflation from creeping back in.
+ */
+const CONVENTIONAL_PREFIX_ORDER = ['INT.', 'EXT.', 'INT./EXT.', 'I/E.'] as const;
+
+/**
+ * The conventional times of day this scope's brief specifies: "Seed the times with the
+ * conventional set... The user chose this over authored-only, because a new document's first
+ * scene otherwise gets no help." Declaration order is also the tie-break order `deriveVocabulary`
+ * falls back to before anything has been authored (see `sortTerms`): every seed starts at count 0
+ * with no authored position, so frequency and recency cannot distinguish them, and a stable sort
+ * leaves them in exactly this order.
+ */
+const SEEDED_TIMES = ['DAY', 'NIGHT', 'CONTINUOUS', 'LATER', 'MORNING', 'EVENING'] as const;
+
+/**
+ * Case-insensitively matches `text`'s start against `SCENE_HEADING_PREFIXES`, returning the
+ * canonical spelling (never the writer's typed case) or `undefined` if none matches. Shared by
+ * `parseSceneHeading` (a committed, already-authored heading) and `locateSceneHeadingZone` (live
+ * `textBeforeCaret`) so parsing an authored document and locating the caret within one being
+ * typed can never disagree about where a prefix ends.
+ */
+function matchScenePrefix(text: string): string | undefined {
+  const upper = text.toUpperCase();
+  return SCENE_HEADING_PREFIXES.find((prefix) => upper.startsWith(prefix));
+}
+
+/**
+ * A term's authored frequency and where in document order it was last authored -- the raw
+ * material `sortTerms` reduces to the public, ordering-free `SmartTypeTerm`. `lastAuthoredIndex`
+ * is `undefined` for a seeded-but-never-authored time: there is no document position to report,
+ * and treating "never authored" as position `-1` (rather than, say, `0`) in `sortTerms` is what
+ * keeps an unauthored seed from ever outranking a term actually authored at the very first block.
+ */
+type MutableTerm = { value: string; count: number; lastAuthoredIndex: number | undefined };
+
+/**
+ * Sorts by count descending, ties broken by `lastAuthoredIndex` descending -- this scope's
+ * brief: "most frequent first, ties broken by most recently authored." `Array.prototype.sort` is
+ * specified as a stable sort (ECMA-262 since ES2019), which this relies on directly: two terms
+ * that tie on both count and last-authored position (only possible for two seeded, never-authored
+ * times, since every authored occurrence lands at a document position no other block shares) keep
+ * their `MutableTerm` insertion order, which for seeded times is `SEEDED_TIMES`'s declaration
+ * order. Runs once per `deriveVocabulary` call, not per keystroke, so `suggest` never re-sorts.
+ */
+function sortTerms(terms: readonly MutableTerm[]): SmartTypeTerm[] {
+  return [...terms]
+    .sort((a, b) => {
+      if (a.count !== b.count) {
+        return b.count - a.count;
+      }
+      return (b.lastAuthoredIndex ?? -1) - (a.lastAuthoredIndex ?? -1);
+    })
+    .map(({ value, count }) => ({ value, count }));
+}
+
+/**
+ * Records one authored occurrence of `rawValue` (a prefix, a location, or a time) at document
+ * position `blockIndex`, keyed case-insensitively so `Kitchen` and `KITCHEN` are the same term
+ * with a combined count -- casing plays no part in identity, only in display. The stored `value`
+ * is always the upper-cased key, never `rawValue` itself: per the user's ruling on this scope,
+ * every `SmartTypeTerm` this module produces is canonical uppercase (see `SmartTypeTerm`'s own
+ * doc comment), so an authored `dusk` and an authored `DUSK` are not just the same term (that
+ * part was already true) but now also display and insert identically, as `DUSK`. This function
+ * only ever writes into `index`, a `deriveVocabulary`-local `Map` -- it has no access to, and
+ * never touches, the canonical blocks a document's writer actually typed.
+ */
+function recordAuthoredTerm(
+  index: Map<string, MutableTerm>,
+  rawValue: string,
+  blockIndex: number,
+): void {
+  const key = rawValue.toUpperCase();
+  const existing = index.get(key);
+  if (existing) {
+    existing.count += 1;
+    existing.lastAuthoredIndex = blockIndex;
+    return;
+  }
+  index.set(key, { value: key, count: 1, lastAuthoredIndex: blockIndex });
+}
+
+/**
+ * Splits one authored scene-heading's text into its prefix, location, and time, per this scope's
+ * brief:
+ *
+ *  - The prefix is matched via `matchScenePrefix`; a heading with no recognised prefix still
+ *    yields a location -- "the rest is still a location" -- so an unmatched prefix simply leaves
+ *    the whole (trimmed) text as `rest` rather than discarding anything.
+ *  - Time is whatever follows the LAST ` - ` separator, not the first: `INT. KITCHEN - BACK ROOM
+ *    - DAY` has location `KITCHEN - BACK ROOM` and time `DAY`. `String.prototype.lastIndexOf`
+ *    finds that occurrence directly; this is the main hazard this scope's brief calls out; see
+ *    the "last separator, not first" test for the mutation this guards against.
+ *  - Only the exact three-character token ` - ` (space, hyphen, space) counts as a separator. A
+ *    bare hyphen with no surrounding spaces (`KITCHEN-DAY`) is not a separator and stays inside
+ *    the location whole; a hyphen with extra surrounding whitespace (`KITCHEN  -  DAY`) still
+ *    contains that exact token as a substring, so it still splits, and the per-segment `.trim()`
+ *    below absorbs the extra spaces adjacent to it.
+ *  - The whole heading is trimmed once up front (leading/trailing whitespace on a *committed*
+ *    heading carries no signal), and each of `location`/`time` is trimmed again after splitting,
+ *    to absorb whitespace immediately adjacent to the separator token. A segment that trims to
+ *    the empty string contributes nothing -- "a heading with no time still yields its location"
+ *    implies the reverse holds too: a blank segment is not a real value to remember.
+ *
+ * Also returns the matched `prefix` itself (undefined when none matched) so `deriveVocabulary`
+ * can record prefix frequency without calling `matchScenePrefix` a second time.
+ */
+function parseSceneHeading(text: string): {
+  prefix: string | undefined;
+  location: string | undefined;
+  time: string | undefined;
+} {
+  const trimmed = text.trim();
+  if (trimmed === '') {
+    return { prefix: undefined, location: undefined, time: undefined };
+  }
+
+  // `rest` is deliberately left untrimmed here: trimming it before searching for the separator
+  // would delete the leading space of a ` - ` token that sits immediately after the prefix (an
+  // empty location, e.g. `INT. - DAY`), and that space is what makes the token match at all. Only
+  // the final `location`/`time` values -- and the "is there anything here at all" check just
+  // below -- are trimmed.
+  const matchedPrefix = matchScenePrefix(trimmed);
+  const rest = matchedPrefix ? trimmed.slice(matchedPrefix.length) : trimmed;
+  if (rest.trim() === '') {
+    return { prefix: matchedPrefix, location: undefined, time: undefined };
+  }
+
+  const separatorIndex = rest.lastIndexOf(' - ');
+  if (separatorIndex === -1) {
+    return { prefix: matchedPrefix, location: rest.trim(), time: undefined };
+  }
+
+  const location = rest.slice(0, separatorIndex).trim();
+  const time = rest.slice(separatorIndex + 3).trim();
+  return {
+    prefix: matchedPrefix,
+    location: location === '' ? undefined : location,
+    time: time === '' ? undefined : time,
+  };
+}
+
+/**
+ * Assigns every block a unique, document-order position -- root blocks in order, and for
+ * `dual_dialogue`, its left column's blocks then its right column's blocks, matching the
+ * sequential reading order `screenplayToPlainText`'s own `dual_dialogue` case already uses ("both
+ * columns print in full, sequentially"). Used only to give `deriveCharacterVocabulary` a
+ * document position for each character's last cue -- a plain root-array index would miss cues
+ * inside a `dual_dialogue` column entirely, undercounting recency for any character who only
+ * speaks there.
+ */
+function buildBlockPositionIndex(blocks: readonly ScreenplayBlock[]): Map<string, number> {
+  const positions = new Map<string, number>();
+  let position = 0;
+  const record = (id: string): void => {
+    positions.set(id, position);
+    position += 1;
+  };
+
+  for (const block of blocks) {
+    record(block.id);
+    if (block.type === 'dual_dialogue') {
+      for (const columnBlock of block.left.blocks) {
+        record(columnBlock.id);
+      }
+      for (const columnBlock of block.right.blocks) {
+        record(columnBlock.id);
+      }
+    }
+  }
+
+  return positions;
+}
+
+/**
+ * Character terms for `ScreenplayVocabulary`, built on top of `deriveCharacters` rather than
+ * re-deriving character grouping -- this scope's brief: "character cues come from the existing
+ * `deriveCharacters`; do NOT duplicate that logic, reuse it." `count` is how many times the
+ * character was cued (`cueBlockIds.length`); `lastAuthoredIndex` is the document position (via
+ * `buildBlockPositionIndex`) of the last cue in `cueBlockIds`, which is already in document order
+ * because `deriveCharacters` appends to it in traversal order. `cueBlockIds` is never empty for
+ * an entry `deriveCharacters` returns (every entry is created only when a cue is opened, which
+ * immediately pushes to it), so there is always a last cue to look up.
+ */
+function deriveCharacterVocabulary(blocks: readonly ScreenplayBlock[]): SmartTypeTerm[] {
+  const positions = buildBlockPositionIndex(blocks);
+  const terms: MutableTerm[] = deriveCharacters(blocks).map((character) => {
+    const lastCueBlockId = character.cueBlockIds[character.cueBlockIds.length - 1];
+    return {
+      value: character.name,
+      count: character.cueBlockIds.length,
+      lastAuthoredIndex: lastCueBlockId === undefined ? undefined : positions.get(lastCueBlockId),
+    };
+  });
+  return sortTerms(terms);
+}
+
+/**
+ * Derives SmartType's vocabulary from the ordered canonical body without changing it -- the
+ * document-wide scan `suggest` is deliberately kept out of, so a caller runs this once per
+ * document change (not per keystroke) and passes the result to every `suggest` call. Locations
+ * and times come from authored `scene_heading` blocks only (`parseSceneHeading`); times are
+ * additionally seeded with `SEEDED_TIMES` before any block is visited, so `recordAuthoredTerm`
+ * folds an authored spelling into its matching seed instead of creating a duplicate (this scope's
+ * brief: "Authored times that duplicate a seed... must not appear twice"). Locations have no
+ * seed -- there is no universal default location the way there is a default time of day.
+ *
+ * Prefixes are seeded too, but for a different reason than times: all four of
+ * `SCENE_HEADING_PREFIXES` are seeded (via `CONVENTIONAL_PREFIX_ORDER`, at count 0) not because a
+ * writer might type something else that folds into one of them, but because `suggest` must always
+ * have all four available in the prefix zone, and a prefix this document has never used still
+ * needs to be there, ranked last, broken by conventional commonness rather than by anything about
+ * how `SCENE_HEADING_PREFIXES` matches. See `CONVENTIONAL_PREFIX_ORDER`'s own comment for why that
+ * ranking is a distinct list from `SCENE_HEADING_PREFIXES`, not a reuse of it.
+ *
+ * Characters are `deriveCharacterVocabulary`, reusing `deriveCharacters` entirely.
+ */
+export function deriveVocabulary(blocks: readonly ScreenplayBlock[]): ScreenplayVocabulary {
+  const prefixIndex = new Map<string, MutableTerm>(
+    CONVENTIONAL_PREFIX_ORDER.map((prefix) => [
+      prefix,
+      { value: prefix, count: 0, lastAuthoredIndex: undefined },
+    ]),
+  );
+  const locationIndex = new Map<string, MutableTerm>();
+  const timeIndex = new Map<string, MutableTerm>(
+    SEEDED_TIMES.map((seed) => [seed, { value: seed, count: 0, lastAuthoredIndex: undefined }]),
+  );
+
+  blocks.forEach((block, blockIndex) => {
+    if (block.type !== 'scene_heading') {
+      return;
+    }
+    const { prefix, location, time } = parseSceneHeading(block.text);
+    if (prefix !== undefined) {
+      recordAuthoredTerm(prefixIndex, prefix, blockIndex);
+    }
+    if (location !== undefined) {
+      recordAuthoredTerm(locationIndex, location, blockIndex);
+    }
+    if (time !== undefined) {
+      recordAuthoredTerm(timeIndex, time, blockIndex);
+    }
+  });
+
+  return {
+    prefixes: sortTerms([...prefixIndex.values()]),
+    locations: sortTerms([...locationIndex.values()]),
+    times: sortTerms([...timeIndex.values()]),
+    characters: deriveCharacterVocabulary(blocks),
+  };
+}
+
+/**
+ * One candidate `suggest` offers: enough to render a ghost (`remainder`) and enough to perform an
+ * explicit accept (`insertText` plus `matchedLength`) without the caller re-deriving the match.
+ *
+ *  - `insertText` is the full canonical value to insert -- uppercase throughout, for a
+ *    character, a prefix, a location, or a time alike (see `SmartTypeTerm`'s doc comment).
+ *    Never rewritten based on what the writer typed.
+ *  - `matchedLength` is how many UTF-16 code units, counting back from the caret, an accept
+ *    replaces with `insertText`. It is deliberately not always `textBeforeCaret.length`: for a
+ *    scene heading, it is the length of only the zone-local partial word (e.g. the partial
+ *    location after `INT. `, not the whole heading), so accepting never touches the prefix or
+ *    separator the writer already has right.
+ *  - `remainder` is `insertText` with its first `matchedLength` characters removed -- the ghost
+ *    text a caller renders after the caret. It can be the empty string (the writer's typed text
+ *    already equals the candidate case-insensitively, e.g. `mara` against `MARA`); the candidate
+ *    is still offered, because accepting it still corrects the case, which is real, visible work
+ *    even though there is no remainder to preview.
+ *
+ * Accepting a candidate is: `textBeforeCaret.slice(0, textBeforeCaret.length - matchedLength) +
+ * insertText`, followed by whatever text originally followed the caret, unchanged. `suggest`
+ * itself never performs this -- only an explicit accept does, per this scope's brief: "never
+ * replace text without an explicit accept action."
+ */
+export type SmartTypeCandidate = {
+  readonly insertText: string;
+  readonly remainder: string;
+  readonly matchedLength: number;
+};
+
+/**
+ * Filters `terms` to those whose `value` case-insensitively starts with `filterText`, building a
+ * `SmartTypeCandidate` for each match. The only matching rule in this module -- case-insensitive
+ * prefix matching, never fuzzy (this scope's brief: "Screenplay vocabulary is small and fuzzy
+ * matching surprises writers"). `terms` is expected to already be in display order (`sortTerms`'s
+ * output -- every list on `ScreenplayVocabulary`, prefixes included, is pre-sorted); filtering
+ * with `Array.prototype.filter` preserves that order, so this function never has to sort anything
+ * itself.
+ */
+function buildCandidates(
+  filterText: string,
+  terms: readonly SmartTypeTerm[],
+): SmartTypeCandidate[] {
+  const upperFilter = filterText.toUpperCase();
+  const candidates: SmartTypeCandidate[] = [];
+  for (const term of terms) {
+    if (!term.value.toUpperCase().startsWith(upperFilter)) {
+      continue;
+    }
+    candidates.push({
+      insertText: term.value,
+      remainder: term.value.slice(filterText.length),
+      matchedLength: filterText.length,
+    });
+  }
+  return candidates;
+}
+
+type SceneHeadingZone =
+  | { readonly zone: 'prefix'; readonly filterText: string }
+  | { readonly zone: 'location'; readonly filterText: string }
+  | { readonly zone: 'time'; readonly filterText: string };
+
+/**
+ * Determines which part of a scene heading being typed the caret sits in, from `textBeforeCaret`
+ * alone -- `suggest` never sees what follows the caret (see `SmartTypeCandidate`'s doc comment),
+ * so this is the only signal available, and it is enough:
+ *
+ *  - `prefix`, while `textBeforeCaret` contains no space at all. This also covers "a heading with
+ *    no recognised prefix" while it is still being typed: an unrecognised first token stays in
+ *    the prefix zone (offering no candidates, since nothing in `vocabulary.prefixes` matches it)
+ *    until a space commits it to being a location, exactly mirroring `parseSceneHeading`'s "the
+ *    rest is still a location" rule for the same text once authored.
+ *  - `time`, once a space exists and the text after the prefix (or, if none was recognised, the
+ *    whole heading) contains a ` - ` -- the LAST one, matching `parseSceneHeading` exactly.
+ *  - `location` otherwise: a space exists, but no ` - ` has been typed yet.
+ *
+ * Each zone's `filterText` strips only a leading run of whitespace immediately at the zone's own
+ * start (the one boundary space after a prefix, or after a ` - `) -- never a trailing trim,
+ * because the zone always ends at the caret; and never more than that one leading run, because
+ * everything past it is the partial word being completed.
+ */
+function locateSceneHeadingZone(textBeforeCaret: string): SceneHeadingZone {
+  if (!textBeforeCaret.includes(' ')) {
+    return { zone: 'prefix', filterText: textBeforeCaret };
+  }
+
+  const matchedPrefix = matchScenePrefix(textBeforeCaret);
+  const rest = matchedPrefix ? textBeforeCaret.slice(matchedPrefix.length) : textBeforeCaret;
+
+  const separatorIndex = rest.lastIndexOf(' - ');
+  if (separatorIndex === -1) {
+    return { zone: 'location', filterText: rest.replace(/^\s+/, '') };
+  }
+
+  return { zone: 'time', filterText: rest.slice(separatorIndex + 3).replace(/^\s+/, '') };
+}
+
+/**
+ * SmartType's pure suggestion core (this scope's brief; plan.md's SmartType-style entry): given
+ * the element being typed into, the text before the caret, and a pre-derived `ScreenplayVocabulary`
+ * (`deriveVocabulary`), returns ordered candidates a caller can render as a ghost and insert on
+ * explicit accept. No DOM, no ProseMirror, no React, and no mutation of anything -- this is the
+ * seam both the editor's ghost overlay and an optional accept-by-list layer consume, and its
+ * purity is what keeps those two independent of each other and of this module.
+ *
+ *  - In a `scene_heading`, `locateSceneHeadingZone` decides whether the caret is completing a
+ *    prefix, a location, or a time, and this dispatches to the matching candidate list:
+ *    `vocabulary.prefixes`, `vocabulary.locations`, or `vocabulary.times` -- all three ranked the
+ *    same way (`sortTerms`: most-authored first, ties by most-recently-authored, and for
+ *    prefixes, a never-authored tie breaks by `CONVENTIONAL_PREFIX_ORDER` rather than by
+ *    `SCENE_HEADING_PREFIXES`'s matching order; see that constant's own comment for why those
+ *    two orders must not be conflated).
+ *  - In a `character` block, candidates come from `vocabulary.characters`, filtered against the
+ *    whole of `textBeforeCaret` (stripped of any leading whitespace) -- a character cue has no
+ *    internal zones the way a scene heading does.
+ *  - In every other element, this returns `[]` unconditionally: "In any other element, suggest
+ *    nothing."
+ *
+ * Never throws. Odd input -- empty text, whitespace-only text, a caret sitting mid-word (this
+ * function only ever sees text already truncated at the caret, so "mid-word" is not a distinct
+ * case to detect, only ordinary input that happens to produce a short `filterText`), or text that
+ * matches no vocabulary entry -- all flow through the same case-insensitive-prefix filtering in
+ * `buildCandidates` and settle out as `[]` when nothing matches, without any special-cased branch
+ * for "this input is odd." The one input that is not empty by default is genuinely empty
+ * `textBeforeCaret` in a `scene_heading`: that is the prefix zone with an empty `filterText`,
+ * which matches every entry in `vocabulary.prefixes` -- deliberately not `[]`, because "at the
+ * start, suggest prefixes" is exactly the case of a freshly created, still-empty scene heading.
+ */
+export function suggest(
+  elementType: ScreenplayElementKind,
+  textBeforeCaret: string,
+  vocabulary: ScreenplayVocabulary,
+): readonly SmartTypeCandidate[] {
+  if (elementType === 'scene_heading') {
+    const zone = locateSceneHeadingZone(textBeforeCaret);
+    switch (zone.zone) {
+      case 'prefix':
+        return buildCandidates(zone.filterText, vocabulary.prefixes);
+      case 'location':
+        return buildCandidates(zone.filterText, vocabulary.locations);
+      case 'time':
+        return buildCandidates(zone.filterText, vocabulary.times);
+    }
+  }
+
+  if (elementType === 'character') {
+    return buildCandidates(textBeforeCaret.replace(/^\s+/, ''), vocabulary.characters);
+  }
+
+  return [];
+}
+
 function collectBlockIds(block: ScreenplayBlock): string[] {
   if (block.type !== 'dual_dialogue') {
     return [block.id];
