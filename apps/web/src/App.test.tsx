@@ -1540,7 +1540,10 @@ describe('FDX download', () => {
     await user.click(screen.getByRole('button', { name: 'File menu' }));
     await user.click(screen.getByRole('menuitem', { name: 'Download FDX…' }));
 
-    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    // `fdxDownload.js` is loaded with a dynamic `import()` (App.tsx's `runExport`), not bundled
+    // statically, so the object-URL/anchor/click sequence lands on a later microtask than
+    // `user.click` itself resolves -- `waitFor` is required, same as DOCX and PDF below.
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
     const blobArgument = createObjectURL.mock.calls[0]?.[0] as Blob;
     expect(blobArgument.type).toBe('application/xml');
     const anchorCall = appendSpy.mock.calls.find(([node]) => (node as HTMLElement).tagName === 'A');
@@ -1551,6 +1554,45 @@ describe('FDX download', () => {
     vi.unstubAllGlobals();
     clickSpy.mockRestore();
     appendSpy.mockRestore();
+  });
+
+  it('tells the writer when the FDX export rejects, instead of an unhandled rejection', async () => {
+    // `fdxDownload.js` used to be a static import bundled into App.tsx, so it could not fail to
+    // load and never had a failure path at all: a click just ran it. Now that it is loaded with a
+    // dynamic `import()` (App.tsx's `runExport`), everything downstream of that `import()` --
+    // including a stale hashed chunk 404 after a deploy, or the exporter itself throwing -- is one
+    // rejected promise `runExport`'s `.catch` handles uniformly. This mocks the exporter itself
+    // throwing (reliable under Vitest's module runner, unlike simulating the `import()` call
+    // itself failing) to prove the rejection reaches the same toast PDF already used, rather than
+    // becoming a silent unhandled promise rejection -- the regression `runExport` closes for FDX.
+    vi.doMock('./fdxDownload.js', () => ({
+      triggerFdxDownload: () => {
+        throw new Error('Simulated chunk load failure.');
+      },
+    }));
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const user = userEvent.setup();
+    render(
+      <App
+        initial={persistedScreenplay(
+          '9c7c5f7b-c2f0-47a0-a639-dfd0c5702b8b',
+          'Downloadable Draft',
+          'INT. STAGE - DAY',
+        )}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Download FDX…' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/Export failed/);
+    expect(alert).toHaveTextContent(/Simulated chunk load failure/);
+    expect(consoleError).toHaveBeenCalledWith('FDX export failed:', expect.any(Error));
+
+    consoleError.mockRestore();
+    vi.doUnmock('./fdxDownload.js');
   });
 });
 
@@ -1578,7 +1620,10 @@ describe('DOCX download', () => {
     await user.click(screen.getByRole('button', { name: 'File menu' }));
     await user.click(screen.getByRole('menuitem', { name: 'Download DOCX…' }));
 
-    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    // `docxDownload.js` is loaded with a dynamic `import()` (App.tsx's `runExport`), not bundled
+    // statically, so the object-URL/anchor/click sequence lands on a later microtask than
+    // `user.click` itself resolves -- `waitFor` is required, same as FDX and PDF.
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
     const blobArgument = createObjectURL.mock.calls[0]?.[0] as Blob;
     expect(blobArgument.type).toBe(
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -1591,6 +1636,40 @@ describe('DOCX download', () => {
     vi.unstubAllGlobals();
     clickSpy.mockRestore();
     appendSpy.mockRestore();
+  });
+
+  it('tells the writer when the DOCX export rejects, instead of an unhandled rejection', async () => {
+    // Same regression as the FDX case above: `docxDownload.js` used to be a static import with no
+    // way to fail to load; now that it is loaded with a dynamic `import()`, this proves a rejection
+    // downstream of that call reaches the toast instead of becoming a silent unhandled rejection.
+    vi.doMock('./docxDownload.js', () => ({
+      triggerDocxDownload: () => {
+        throw new Error('Simulated chunk load failure.');
+      },
+    }));
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const user = userEvent.setup();
+    render(
+      <App
+        initial={persistedScreenplay(
+          '9c7c5f7b-c2f0-47a0-a639-dfd0c5702b8c',
+          'Downloadable Draft',
+          'INT. STAGE - DAY',
+        )}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Download DOCX…' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/Export failed/);
+    expect(alert).toHaveTextContent(/Simulated chunk load failure/);
+    expect(consoleError).toHaveBeenCalledWith('DOCX export failed:', expect.any(Error));
+
+    consoleError.mockRestore();
+    vi.doUnmock('./docxDownload.js');
   });
 });
 
@@ -1618,11 +1697,11 @@ describe('PDF download', () => {
     await user.click(screen.getByRole('button', { name: 'File menu' }));
     await user.click(screen.getByRole('menuitem', { name: 'Download PDF…' }));
 
-    // `triggerPdfDownload` is `async` (`screenplayToPdf` is -- see `@finaler-draft/pdf`'s
-    // `index.ts`), and the menu's `onSelect` handler does not await it (a synthetic click event
-    // has no way to await an async handler), so the object-URL/anchor/click sequence lands on a
-    // later microtask than `user.click` itself resolves -- `waitFor` is required here, unlike the
-    // synchronous FDX/DOCX equivalents above.
+    // `pdfDownload.js` is loaded with a dynamic `import()` (App.tsx's `runExport`), and
+    // `triggerPdfDownload` is itself `async` on top of that (`screenplayToPdf` is -- see
+    // `@finaler-draft/pdf`'s `index.ts`) -- either alone would put the object-URL/anchor/click
+    // sequence on a later microtask than `user.click` itself resolves, so `waitFor` is required
+    // here, same as FDX and DOCX above.
     await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
     const blobArgument = createObjectURL.mock.calls[0]?.[0] as Blob;
     expect(blobArgument.type).toBe('application/pdf');
@@ -1634,6 +1713,43 @@ describe('PDF download', () => {
     vi.unstubAllGlobals();
     clickSpy.mockRestore();
     appendSpy.mockRestore();
+  });
+
+  it('tells the writer when triggerPdfDownload itself throws, distinct from a screenplayToPdf rejection', async () => {
+    // "tells the writer when a PDF export fails" above exercises a real `screenplayToPdf`
+    // rejection reached through a real dynamic `import()`. This mocks `pdfDownload.js`'s export to
+    // throw synchronously instead, standing in for the other failure mode dynamic `import()`
+    // introduces on top of that (a stale hashed chunk 404, or a network failure while offline) --
+    // both are just a rejected promise to `runExport`'s `.catch`, so this proves the same code path
+    // handles a failure at any point in the chain, not only inside `screenplayToPdf` itself.
+    vi.doMock('./pdfDownload.js', () => ({
+      triggerPdfDownload: () => {
+        throw new Error('Simulated chunk load failure.');
+      },
+    }));
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const user = userEvent.setup();
+    render(
+      <App
+        initial={persistedScreenplay(
+          '9c7c5f7b-c2f0-47a0-a639-dfd0c5702b8d',
+          'Downloadable Draft',
+          'INT. STAGE - DAY',
+        )}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Download PDF…' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/Export failed/);
+    expect(alert).toHaveTextContent(/Simulated chunk load failure/);
+    expect(consoleError).toHaveBeenCalledWith('PDF export failed:', expect.any(Error));
+
+    consoleError.mockRestore();
+    vi.doUnmock('./pdfDownload.js');
   });
 });
 

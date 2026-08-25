@@ -48,9 +48,6 @@ import {
 import { DocumentSettingsDialog } from './documentSettingsDialog.js';
 import { OverflowMenu } from './components/OverflowMenu.js';
 import { Toast } from './components/Toast.js';
-import { triggerDocxDownload } from './docxDownload.js';
-import { triggerFdxDownload } from './fdxDownload.js';
-import { triggerPdfDownload } from './pdfDownload.js';
 
 type Panel = 'navigator' | 'inspector';
 
@@ -728,6 +725,25 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     ? undefined
     : `Can't export: ${projection.issues[0] ?? 'Invalid screenplay data.'}`;
 
+  // Shared by all three export menu items' `onSelect` below. Each exporter (and the `pdf-lib`/
+  // `fflate` packages it pulls in) is loaded with a dynamic `import()` rather than statically --
+  // see `docxDownload.ts`, `fdxDownload.ts`, `pdfDownload.ts` -- so nobody pays for any exporter
+  // until they actually export. That makes every one of these three calls async, including FDX
+  // and DOCX, which previously ran synchronously with no failure path at all. Routing all three
+  // through this one helper means a chunk that fails to load (offline, or a stale hashed chunk
+  // 404 after a deploy) surfaces exactly the same way a rejected `screenplayToPdf` already did --
+  // in the toast below -- rather than becoming an unhandled promise rejection for FDX/DOCX or
+  // silently varying by format.
+  const runExport = (label: 'DOCX' | 'FDX' | 'PDF', run: () => Promise<void>) => {
+    setExportError(undefined);
+    run().catch((error: unknown) => {
+      console.error(`${label} export failed:`, error);
+      setExportError(
+        error instanceof Error ? error.message : `${label} export failed for an unknown reason.`,
+      );
+    });
+  };
+
   return (
     <main className={dark ? 'application dark' : 'application'}>
       <header className="titlebar">
@@ -783,7 +799,11 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                 label: 'Download FDX…',
                 onSelect: () => {
                   if (projection.valid) {
-                    triggerFdxDownload(projection.screenplay);
+                    const { screenplay } = projection;
+                    runExport('FDX', async () => {
+                      const { triggerFdxDownload } = await import('./fdxDownload.js');
+                      triggerFdxDownload(screenplay);
+                    });
                   }
                 },
               },
@@ -796,7 +816,11 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                 label: 'Download DOCX…',
                 onSelect: () => {
                   if (projection.valid) {
-                    triggerDocxDownload(projection.screenplay);
+                    const { screenplay } = projection;
+                    runExport('DOCX', async () => {
+                      const { triggerDocxDownload } = await import('./docxDownload.js');
+                      triggerDocxDownload(screenplay);
+                    });
                   }
                 },
               },
@@ -804,29 +828,23 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                 // Same disabled-not-a-no-op reasoning as "Download FDX…" above -- this is in fact
                 // the owner's exact reported symptom: "Download PDF did nothing when clicked" was
                 // this same `if (projection.valid)` guard with no disabled state and no reason,
-                // on a document a paste had made invalid (progress/paste-sanitization.md). Unlike
-                // FDX/DOCX, `triggerPdfDownload` is `async` (`screenplayToPdf` is -- see
+                // on a document a paste had made invalid (progress/paste-sanitization.md).
+                // `triggerPdfDownload` is `async` (`screenplayToPdf` is -- see
                 // `@finaler-draft/pdf`'s `index.ts`), so a rejection (most likely
                 // `@finaler-draft/pdf`'s WinAnsiEncoding limitation -- a character PDF's
                 // un-embedded standard Courier cannot render) must still be caught here or it
                 // becomes an unhandled promise rejection; that failure mode is unrelated to and
                 // unfixed by `disabled`, which only ever concerns an invalid local projection.
-                // No user-facing error surface exists yet for an export failure past that point;
-                // logged so it is at least visible during development, and flagged as a known
-                // limitation in progress/pdf-export.md rather than silently inventing one.
+                // `runExport` surfaces it in the toast below, same as FDX and DOCX.
                 disabled: !projection.valid,
                 disabledReason: exportDisabledReason,
                 label: 'Download PDF…',
                 onSelect: () => {
                   if (projection.valid) {
-                    setExportError(undefined);
-                    triggerPdfDownload(projection.screenplay).catch((error: unknown) => {
-                      console.error('PDF export failed:', error);
-                      setExportError(
-                        error instanceof Error
-                          ? error.message
-                          : 'PDF export failed for an unknown reason.',
-                      );
+                    const { screenplay } = projection;
+                    runExport('PDF', async () => {
+                      const { triggerPdfDownload } = await import('./pdfDownload.js');
+                      await triggerPdfDownload(screenplay);
                     });
                   }
                 },
