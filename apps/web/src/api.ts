@@ -2,6 +2,9 @@ import { screenplaySchema, type Screenplay } from '@finaler-draft/screenplay';
 import { PASSWORD_REQUIREMENTS_MESSAGE } from '@finaler-draft/config';
 import { z } from 'zod';
 import { authClient } from './authClient.js';
+import { ApiError, json, request, session, type SessionUser } from './apiSession.js';
+
+export { ApiError };
 
 const projectSchema = z.object({
   id: z.string().uuid(),
@@ -22,12 +25,6 @@ const screenplayResponseSchema = z.object({
   title: z.string(),
   version: z.number().int().positive(),
 });
-const sessionUserSchema = z.object({
-  email: z.string(),
-  id: z.string(),
-  name: z.string(),
-});
-const sessionResponseSchema = z.object({ user: sessionUserSchema }).nullable();
 // Better Auth's `/sign-up/email` and `/sign-in/email` both return `{token, user}` (installed
 // `api/routes/sign-up.mjs`/`sign-in.mjs`). Only `signUp` below reads `token`: now that
 // `requireEmailVerification` (auth.ts) is on, a fresh sign-up no longer creates a session --
@@ -55,24 +52,6 @@ const deletedResponseSchema = z.object({
   projects: z.array(deletedProjectSchema),
   screenplays: z.array(deletedScreenplaySchema),
 });
-
-async function request(path: string, init?: RequestInit): Promise<Response> {
-  const headers = init?.body
-    ? { 'content-type': 'application/json', ...(init.headers ?? {}) }
-    : init?.headers;
-  const response = await fetch(path, {
-    credentials: 'include',
-    ...init,
-    ...(headers ? { headers } : {}),
-  });
-  return response;
-}
-
-async function json<T>(path: string, schema: z.ZodType<T>, init?: RequestInit): Promise<T> {
-  const response = await request(path, init);
-  if (!response.ok) throw new ApiError(response.status);
-  return schema.parse(await response.json());
-}
 
 // Rendered anywhere an authentication mutation fails for a reason that isn't one of
 // `authErrorMessages`' specific codes -- a network failure, a 5xx, or a code this map doesn't
@@ -131,12 +110,6 @@ function isAuthValidationErrorCode(value: string): value is AuthValidationErrorC
   return Object.hasOwn(authErrorMessages, value);
 }
 
-export class ApiError extends Error {
-  constructor(readonly status: number) {
-    super(`Request failed (${status})`);
-  }
-}
-
 export class AuthApiError extends ApiError {
   readonly safeMessage: string;
 
@@ -167,18 +140,6 @@ function unwrapAuthClientResult<T>(result: {
   throw code && isAuthValidationErrorCode(code)
     ? new AuthApiError(result.error.status, code)
     : new ApiError(result.error.status);
-}
-
-/**
- * `GET /api/auth/get-session` returns HTTP 200 with a body of literally `null` when
- * signed out, not an error. Resolve that to `null` rather than throwing; still reject
- * a non-OK status and a body that is neither `null` nor a valid session.
- */
-async function session(): Promise<SessionUser | null> {
-  const response = await request('/api/auth/get-session');
-  if (!response.ok) throw new ApiError(response.status);
-  const body = sessionResponseSchema.parse(await response.json());
-  return body?.user ?? null;
 }
 
 /**
@@ -299,7 +260,7 @@ export const api = {
 
 export type Project = z.infer<typeof projectSchema>;
 export type ScreenplaySummary = z.infer<typeof screenplaySummarySchema>;
-export type SessionUser = z.infer<typeof sessionUserSchema>;
+export type { SessionUser };
 export type DeletedProject = z.infer<typeof deletedProjectSchema>;
 export type DeletedScreenplay = z.infer<typeof deletedScreenplaySchema>;
 export type PersistedScreenplay = {

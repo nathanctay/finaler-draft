@@ -1,6 +1,7 @@
 import {
   BLANK_LINES_BEFORE,
   BODY_WIDTH_IN,
+  DEFAULT_DOCUMENT_SETTINGS,
   ELEMENT_INDENTS,
   LINE_HEIGHT_RATIO,
   MARGIN_LEFT_IN,
@@ -12,9 +13,9 @@ import {
   PAGE_WIDTH_IN,
   TYPEFACE,
   TYPE_SIZE_PT,
+  type DocumentSettings,
   type ScreenplayElementKind,
 } from '@finaler-draft/screenplay/pageFormat';
-import { DEFAULT_DOCUMENT_SETTINGS, type DocumentSettings } from '@finaler-draft/screenplay';
 
 const inches = (value: number): string => `${value}in`;
 
