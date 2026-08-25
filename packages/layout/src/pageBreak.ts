@@ -270,6 +270,29 @@ function continuedLines(
 }
 
 /**
+ * Whether `lines` contains at least one row of real spoken content, as opposed to rows that
+ * render as blank space. `wrapBlockText` always produces at least one `AuthoredLine` per block,
+ * even an empty one, "so a block is addressable... regardless of whether it currently holds any
+ * characters" -- an empty dialogue block is therefore an ordinary `authored` line with `text:
+ * ''`, still occupying its row, just with nothing printed on it.
+ *
+ * Trimming, rather than an exact `=== ''` check, is deliberate: a writer can leave a dialogue
+ * block holding only spaces, and nothing stops that from reaching this engine.
+ * `screenplayTextSchema` (`packages/screenplay/src/index.ts`) is a bare length-capped
+ * `z.string()` with no whitespace rule. Plan.md's "A line cannot begin with a space" (the
+ * "Element indents" section, among the not-yet-shipped Final Draft 13 editor rules) would reject
+ * this at authoring time once it ships, but it is documented there as future editor behavior, not
+ * schema validation, and this engine cannot assume every document it is asked to paginate was
+ * authored through an editor that enforces it. A whitespace-only block wraps to a line whose
+ * `text` is that whitespace, not `''` (`wrapBlockText` only drops whitespace that causes a wrap;
+ * whitespace that fits on an otherwise-empty line is kept verbatim) -- so `text.trim() === ''` is
+ * what actually catches it, while `text === ''` alone would not.
+ */
+function hasSpokenContent(lines: readonly AuthoredLine[]): boolean {
+  return lines.some((line) => line.text.trim() !== '');
+}
+
+/**
  * Places the remainder of a speech after a dialogue split, splitting again if it still doesn't
  * fit. `autoMoreContinued` gates whether the generated `(MORE)`/`CONT'D` marker lines themselves
  * are emitted (plan.md: "A document setting to suppress automatic `(MORE)` and `CONT'D`
@@ -279,6 +302,23 @@ function continuedLines(
  * land where can therefore differ by up to one line's worth of content between the two settings,
  * but the page's own total room usage does not: see paginate.test.ts's page-break-position
  * property test for the guarantee this keeps.
+ *
+ * A second, independent gate sits alongside `autoMoreContinued`: even with the setting on, a
+ * given split's markers are emitted only when BOTH the page-foot side and the continuation-head
+ * side of that split have real spoken content (`hasSpokenContent`). plan.md never specified what
+ * happens when a speech is split at a point where one side is entirely empty dialogue blocks --
+ * an empty block is still a member of the speech it sits in, and the split logic below correctly
+ * treats it as such -- but a lone `(MORE)` under a cue that hasn't spoken yet, or a `CONT'D`
+ * heading over a page that goes on to say nothing, both misrepresent the split as one this
+ * document setting exists to announce. This gate does not move the split itself: `maxContentRoom`
+ * still reserves a line for `(MORE)` whenever `autoMoreContinued` is on, regardless of whether
+ * this particular split turns out to need it. Making the reservation itself content-aware would
+ * require knowing which side of the split is empty before the split has been found -- the room
+ * available for the "before" side depends on the reservation, and the reservation would depend on
+ * the very split that room search produces. Reserving unconditionally on the setting, as before,
+ * sidesteps that circularity at the cost of an occasional unused row of headroom on the outgoing
+ * page when the markers end up suppressed; see paginate.test.ts for a fixture that checks exactly
+ * that row is unused rather than silently absorbed by something else.
  */
 function placeSpeechContinuation(
   builder: PageBuilder,
@@ -301,11 +341,20 @@ function placeSpeechContinuation(
   const cut = maxBefore >= 1 ? findDialogueSplitIndex(remaining, maxBefore) : undefined;
   if (cut !== undefined) {
     builder.pushMany(remaining.slice(0, cut));
-    if (autoMoreContinued) {
+
+    // See `hasSpokenContent`'s doc comment above `placeSpeechContinuation`: markers require real
+    // content on both sides of THIS split, independently of any split found elsewhere in the
+    // speech's continuation chain.
+    const emitMarkers =
+      autoMoreContinued &&
+      hasSpokenContent(remaining.slice(0, cut)) &&
+      hasSpokenContent(remaining.slice(cut));
+
+    if (emitMarkers) {
       builder.push(moreLine(characterBlockId));
     }
     builder.breakPage();
-    if (autoMoreContinued) {
+    if (emitMarkers) {
       builder.pushMany(continuedLines(characterBlockId, characterText, characterIndentIn));
     }
     placeSpeechContinuation(
@@ -322,7 +371,17 @@ function placeSpeechContinuation(
 
   if (allowFreshBreak) {
     builder.breakPage();
-    if (autoMoreContinued) {
+    // No split happens on this path -- `remaining` moves to the fresh page whole, so only the
+    // "after" side (all of `remaining`) exists to check; there is no "before" side of this
+    // particular move to be empty. Reaching this branch at all already requires `remaining` not
+    // to fit even a fresh page's own room, which -- at this file's current constants -- makes an
+    // entirely-empty `remaining` here a case no fixture in paginate.test.ts can construct through
+    // `paginateScreenplay`'s public surface (an all-empty `remaining` short enough to trigger
+    // this branch would first have to fail the "fits in room" check just above, and a fresh
+    // page's room is never small enough for that). The gate is kept anyway, for the same reason
+    // the cut branch above has one: this function must not announce a continuation of nothing,
+    // regardless of which of its branches produces the break.
+    if (autoMoreContinued && hasSpokenContent(remaining)) {
       builder.pushMany(continuedLines(characterBlockId, characterText, characterIndentIn));
     }
     placeSpeechContinuation(
@@ -346,7 +405,10 @@ function placeSpeechContinuation(
  * Places a speech (character cue + contiguous parentheticals/dialogue). Tries the whole speech
  * first; if it doesn't fit, looks for a valid dialogue split; if none exists (or the speech has
  * no character cue to attribute a `(MORE)`/`CONT'D` pair to — see `buildGroups`'s orphan-speech
- * handling), the whole speech moves to the next page.
+ * handling), the whole speech moves to the next page. A found split still places every line of
+ * the speech on one page or the other regardless of content; whether that split additionally
+ * gets a `(MORE)`/`CONT'D` pair is decided separately, by `hasSpokenContent` — see its doc
+ * comment above `placeSpeechContinuation`.
  */
 function placeSpeechGroup(
   builder: PageBuilder,
@@ -382,11 +444,23 @@ function placeSpeechGroup(
         }
       }
       builder.pushMany(effectiveContent.slice(0, cut));
-      if (autoMoreContinued) {
+
+      // `group.characterLines.length` is the fixed offset into `effectiveContent` where the
+      // speech's own dialogue/parenthetical content starts, after the character cue's lines --
+      // see `hasSpokenContent`'s doc comment above `placeSpeechContinuation` for why the cue
+      // itself must be excluded from the "before" check: a cue followed only by an empty
+      // dialogue block has real text (the character's name) but has not spoken, and that is
+      // exactly the foot-of-page case this gate exists to catch.
+      const emitMarkers =
+        autoMoreContinued &&
+        hasSpokenContent(effectiveContent.slice(group.characterLines.length, cut)) &&
+        hasSpokenContent(effectiveContent.slice(cut));
+
+      if (emitMarkers) {
         builder.push(moreLine(group.characterBlockId));
       }
       builder.breakPage();
-      if (autoMoreContinued) {
+      if (emitMarkers) {
         builder.pushMany(
           continuedLines(group.characterBlockId, group.characterText, characterIndentIn),
         );

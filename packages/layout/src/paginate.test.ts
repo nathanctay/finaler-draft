@@ -371,6 +371,273 @@ describe("paginateScreenplay: dialogue orphan avoidance and MORE/CONT'D splittin
   });
 });
 
+/**
+ * plan.md never specified what happens when a speech is split at a point where one side is
+ * entirely empty dialogue blocks -- an empty dialogue block is still a member of the speech it
+ * sits in (nothing in `buildGroups`'s grouping rule excludes it), and a split there is not a bug
+ * in the split logic itself. It surfaced from a real editing sequence: pressing Enter at the
+ * start of the continued dialogue on page 2 splits the block, leaving an empty dialogue block at
+ * the top of the page -- and the pre-fix engine produced a `CHARACTER (CONT'D)` heading over
+ * blank space, a continuation heading for content that never arrives.
+ *
+ * Every fixture below is hand-derived, not just asserted against whatever the engine currently
+ * does: the comments show the exact room/maxBefore arithmetic that puts the cut where each test
+ * needs it, the same way the existing MORE/CONT'D describe block above does.
+ */
+describe("paginateScreenplay: (MORE)/CONT'D require real content on both sides of the split", () => {
+  it("reproduces the reported bug: splitting a speech so only an empty dialogue block follows suppresses (MORE) and CONT'D, while the empty block still occupies its own line", () => {
+    // action(50) leaves room 5. The speech is blank(1) + cue(1) + d0(2 real lines) + d1(empty) +
+    // d2(empty) = 6 content lines, one more than room, so a split is required. With
+    // autoMoreContinued on, maxBefore = (room - 1 blank) - 1 (MORE) = 3, which lands the cut
+    // exactly between d0's two lines and d1: dialogueBefore = 2 (d0's own lines, satisfying the
+    // 2-line minimum), dialogueAfter = 2 (d1, d2). The "after" side of that cut -- d1 and d2 --
+    // is therefore the entire rest of the speech, and both are empty.
+    const blocks = [
+      actionBlock('a0', textForActionLineCount(50)),
+      characterBlock('c0', 'ADA'),
+      dialogueBlock('d0', textForDialogueLineCount(2)),
+      dialogueBlock('d1', ''),
+      dialogueBlock('d2', ''),
+    ];
+    const result = paginateScreenplay(blocks);
+
+    expect(result.pages).toHaveLength(2);
+    const page1 = result.pages[0]!;
+    const page2 = result.pages[1]!;
+
+    // No (MORE), no CONT'D: the continuation has nothing to say.
+    expect(page1.lines.some((l) => l.kind === 'generated')).toBe(false);
+    expect(page2.lines.some((l) => l.kind === 'generated')).toBe(false);
+
+    // The split still happened exactly where the room arithmetic says it must: d0's two real
+    // lines end page 1, with no (MORE) line after them.
+    expect(page1.lines.at(-1)).toMatchObject({ kind: 'authored', blockId: 'd0' });
+    expect(page1.lineCount).toBe(54); // action(50) + blank(1) + cue(1) + d0(2), no (MORE)
+
+    // The empty blocks still occupy page 2, one row each, with no CONT'D heading above them --
+    // this is the geometry claim: an unrendered heading must not also unrender the content rows
+    // it would have introduced.
+    expect(page2.lines).toHaveLength(2);
+    expect(page2.lines[0]).toMatchObject({
+      kind: 'authored',
+      element: 'dialogue',
+      blockId: 'd1',
+      text: '',
+    });
+    expect(page2.lines[1]).toMatchObject({
+      kind: 'authored',
+      element: 'dialogue',
+      blockId: 'd2',
+      text: '',
+    });
+  });
+
+  it("still emits (MORE) and CONT'D for the ordinary case where both sides of the split have real dialogue -- the same fixture as above with the empty blocks replaced", () => {
+    // Control for the previous test: identical block shape and identical room arithmetic (the
+    // per-block line counts are the same, so the cut lands at the same index), but d1/d2 now
+    // carry one real line each instead of being empty. This is what proves the previous test's
+    // missing heading is caused by emptiness specifically, not by some other property of a
+    // same-shaped two-block tail.
+    const blocks = [
+      actionBlock('a0', textForActionLineCount(50)),
+      characterBlock('c0', 'ADA'),
+      dialogueBlock('d0', textForDialogueLineCount(2)),
+      dialogueBlock('d1', textForDialogueLineCount(1)),
+      dialogueBlock('d2', textForDialogueLineCount(1)),
+    ];
+    const result = paginateScreenplay(blocks);
+
+    expect(result.pages).toHaveLength(2);
+    const page1 = result.pages[0]!;
+    const page2 = result.pages[1]!;
+
+    expect(page1.lines.at(-1)).toMatchObject({
+      kind: 'generated',
+      reason: 'more',
+      sourceBlockId: 'c0',
+    });
+    expect(page1.lineCount).toBe(55); // one more than the empty-tail case: the (MORE) row is used
+
+    expect(page2.lines[0]).toMatchObject({
+      kind: 'generated',
+      reason: 'continued',
+      sourceBlockId: 'c0',
+    });
+    expect(page2.lines[1]).toMatchObject({ kind: 'authored', blockId: 'd1' });
+    expect(page2.lines[2]).toMatchObject({ kind: 'authored', blockId: 'd2' });
+
+    // The geometry claim, stated as a direct comparison rather than two separate hand-derived
+    // numbers: suppressing the heading costs exactly the heading's own row count and nothing
+    // else. Page 1's content up to the break is identical either way (same blocks, same order);
+    // only the trailing (MORE) row differs.
+    const emptyTailResult = paginateScreenplay([
+      actionBlock('a0', textForActionLineCount(50)),
+      characterBlock('c0', 'ADA'),
+      dialogueBlock('d0', textForDialogueLineCount(2)),
+      dialogueBlock('d1', ''),
+      dialogueBlock('d2', ''),
+    ]);
+    const emptyTailPage1 = emptyTailResult.pages[0]!;
+    expect(emptyTailPage1.lines).toEqual(page1.lines.slice(0, -1)); // everything but the (MORE) row
+    expect(emptyTailPage1.lineCount).toBe(page1.lineCount - 1);
+  });
+
+  it("suppresses (MORE) and CONT'D symmetrically when the empty content is BEFORE the break instead of after: a cue followed by empty dialogue at the foot of a page", () => {
+    // action(50) leaves room 5. Content is blank(1) + cue(1) + d0(empty) + d1(empty) + d2(3 real
+    // lines) = 7, forcing a split. maxBefore = (5 - 1 blank) - 1 (MORE) = 3, which lands the cut
+    // right after d1: dialogueBefore = 2 (d0, d1 -- both empty, but the split rule only counts
+    // dialogue-element lines, not their content), dialogueAfter = 3 (all of d2). The "before" side
+    // of that cut is therefore the cue plus two empty dialogue blocks: a cue that has not spoken.
+    const blocks = [
+      actionBlock('a0', textForActionLineCount(50)),
+      characterBlock('c0', 'ADA'),
+      dialogueBlock('d0', ''),
+      dialogueBlock('d1', ''),
+      dialogueBlock('d2', textForDialogueLineCount(3)),
+    ];
+    const result = paginateScreenplay(blocks);
+
+    expect(result.pages).toHaveLength(2);
+    const page1 = result.pages[0]!;
+    const page2 = result.pages[1]!;
+
+    expect(page1.lines.some((l) => l.kind === 'generated')).toBe(false);
+    expect(page2.lines.some((l) => l.kind === 'generated')).toBe(false);
+
+    // Both empty blocks still occupy page 1, immediately after the cue, no (MORE) after them.
+    expect(page1.lineCount).toBe(54); // action(50) + blank(1) + cue(1) + d0 + d1, no (MORE)
+    expect(page1.lines.at(-2)).toMatchObject({ kind: 'authored', blockId: 'd0', text: '' });
+    expect(page1.lines.at(-1)).toMatchObject({ kind: 'authored', blockId: 'd1', text: '' });
+
+    // All three real dialogue lines land on page 2, with no CONT'D heading above them.
+    expect(page2.lines).toHaveLength(3);
+    expect(page2.lines.every((l) => l.kind === 'authored' && l.blockId === 'd2')).toBe(true);
+  });
+
+  it('treats a whitespace-only dialogue block the same as a truly empty one, because nothing in the schema rejects a block holding only spaces', () => {
+    // Same shape and room arithmetic as the first test in this block (d1/d2 trailing empty), but
+    // d1/d2 hold only spaces instead of the empty string. `screenplayTextSchema`
+    // (packages/screenplay/src/index.ts) is a bare `z.string().max(...)` -- it does not reject
+    // leading or whitespace-only text, so this is schema-legal input this engine can actually
+    // receive. Plan.md's "a line cannot begin with a space" is listed among not-yet-shipped
+    // Final Draft 13 editor rules, not schema validation, so it is not a guarantee this engine
+    // can lean on. A whitespace-only block wraps to a line whose `text` is that whitespace, not
+    // `''` (`wrapBlockText` only drops whitespace that causes a wrap, not whitespace that fits on
+    // an otherwise-empty line) -- an exact `text === ''` check would miss this case entirely.
+    const blocks = [
+      actionBlock('a0', textForActionLineCount(50)),
+      characterBlock('c0', 'ADA'),
+      dialogueBlock('d0', textForDialogueLineCount(2)),
+      dialogueBlock('d1', '   '),
+      dialogueBlock('d2', ' '),
+    ];
+    const result = paginateScreenplay(blocks);
+
+    expect(result.pages).toHaveLength(2);
+    const page1 = result.pages[0]!;
+    const page2 = result.pages[1]!;
+
+    expect(page1.lines.some((l) => l.kind === 'generated')).toBe(false);
+    expect(page2.lines.some((l) => l.kind === 'generated')).toBe(false);
+    expect(page1.lineCount).toBe(54);
+
+    // The whitespace itself is still preserved verbatim in the model -- this fix changes only
+    // whether a heading is generated, never what the authored text actually is.
+    expect(page2.lines).toHaveLength(2);
+    expect(page2.lines[0]).toMatchObject({ kind: 'authored', blockId: 'd1', text: '   ' });
+    expect(page2.lines[1]).toMatchObject({ kind: 'authored', blockId: 'd2', text: ' ' });
+  });
+
+  it("never generates (MORE)/CONT'D with the document setting off, regardless of which side of the split is empty, and still fills the outgoing page to capacity", () => {
+    // Same fixture as the reported-bug test above (d1/d2 empty, trailing the break), but with
+    // autoMoreContinued off. With the reservation gone (maxContentRoom does not subtract a line
+    // when the setting is off), maxBefore = room - 1 (blank) = 4, one more than the on-setting
+    // case, so the cut lands one line later: dialogueBefore = 3 (d0's two lines plus d1),
+    // dialogueAfter = 1 (d2 alone). This exercises the pre-existing setting-based gate and the
+    // new content-based gate together: whichever cut the setting produces, no marker appears, and
+    // every dialogue/empty-dialogue line -- 4 in total -- is still placed exactly once.
+    const blocks = [
+      actionBlock('a0', textForActionLineCount(50)),
+      characterBlock('c0', 'ADA'),
+      dialogueBlock('d0', textForDialogueLineCount(2)),
+      dialogueBlock('d1', ''),
+      dialogueBlock('d2', ''),
+    ];
+    const result = paginateScreenplay(blocks, {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      autoMoreContinued: false,
+    });
+
+    expect(result.pages).toHaveLength(2);
+    const generated = result.pages.flatMap((p) => p.lines).filter((l) => l.kind === 'generated');
+    expect(generated).toHaveLength(0);
+
+    const page1 = result.pages[0]!;
+    // Fills to capacity: no reservation at all when the setting is off, regardless of content.
+    expect(page1.lineCount).toBe(55);
+
+    const dialogueAndEmptyLines = result.pages
+      .flatMap((p) => p.lines)
+      .filter((l) => l.kind === 'authored' && ['d0', 'd1', 'd2'].includes(l.blockId));
+    expect(dialogueAndEmptyLines).toHaveLength(4); // d0's 2 real lines + d1 + d2
+  });
+
+  it("also suppresses the SECOND (MORE)/CONT'D pair of a multi-split monologue, when it is that later split -- not the first one -- whose continuation side is empty", () => {
+    // `placeSpeechGroup`'s own split and `placeSpeechContinuation`'s recursive one are two
+    // separate call sites in pageBreak.ts, each with their own emitMarkers computation -- this
+    // exercises the second one specifically, with the first split left ordinary (real content on
+    // both sides) so a regression in the second site's gate can't hide behind the first site's.
+    //
+    // action(50) leaves room 5 for the first split, same as the other fixtures in this block:
+    // maxBefore = 3, landing the first cut after exactly 2 of d0's lines (dialogueBefore = 2,
+    // the minimum). d0 is 55 lines long, so 53 remain, fed to placeSpeechContinuation along with
+    // the 2 trailing empty blocks -- 55 lines total. Page 2 opens with a 1-line CONT'D heading
+    // (the first split's, which does show -- both its sides are real), leaving room 54; 55 lines
+    // still doesn't fit, so a second split is required. `placeSpeechContinuation` has no leading
+    // blank to budget for, so maxBefore = 54 - 1 (MORE reservation) = 53 exactly the count of
+    // remaining real d0 lines: the cut lands right after the last one, leaving only the two empty
+    // blocks as this split's "after" side.
+    const blocks = [
+      actionBlock('a0', textForActionLineCount(50)),
+      characterBlock('c0', 'ADA'),
+      dialogueBlock('d0', textForDialogueLineCount(55)),
+      dialogueBlock('d1', ''),
+      dialogueBlock('d2', ''),
+    ];
+    const result = paginateScreenplay(blocks);
+
+    expect(result.pages).toHaveLength(3);
+    const [page1, page2, page3] = result.pages as [
+      LayoutResult['pages'][number],
+      LayoutResult['pages'][number],
+      LayoutResult['pages'][number],
+    ];
+
+    // First split: ordinary, both sides real -- (MORE) on page 1, CONT'D opening page 2.
+    expect(page1.lines.filter((l) => l.kind === 'generated').map((l) => l.reason)).toEqual([
+      'more',
+    ]);
+    expect(page2.lines[0]).toMatchObject({ kind: 'generated', reason: 'continued' });
+
+    // Second split: page 2's own continuation content (53 real d0 lines) ends the page with no
+    // trailing (MORE), and page 3 opens directly with the empty blocks -- no second CONT'D.
+    expect(page2.lines.at(-1)).toMatchObject({ kind: 'authored', blockId: 'd0' });
+    expect(page2.lines.filter((l) => l.kind === 'generated')).toHaveLength(1); // only the opening CONT'D
+    expect(page2.lineCount).toBe(54); // CONT'D(1) + 53 real d0 lines, no (MORE)
+    expect(page3.lines.some((l) => l.kind === 'generated')).toBe(false);
+    expect(page3.lines).toHaveLength(2);
+    expect(page3.lines[0]).toMatchObject({ kind: 'authored', blockId: 'd1', text: '' });
+    expect(page3.lines[1]).toMatchObject({ kind: 'authored', blockId: 'd2', text: '' });
+
+    // Every d0 line is accounted for across pages 1 and 2 (2 + 53 = 55), and the empty blocks
+    // still occupy their own rows on page 3 rather than being dropped.
+    const d0Count = result.pages
+      .flatMap((p) => p.lines)
+      .filter((l) => l.kind === 'authored' && l.blockId === 'd0').length;
+    expect(d0Count).toBe(55);
+  });
+});
+
 describe("paginateScreenplay: the generated CONT'D heading wraps like any other line", () => {
   /**
    * `documentSettingsSchema` (packages/screenplay/src/index.ts) caps `characterIndentIn` at
