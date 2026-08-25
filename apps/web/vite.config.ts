@@ -16,6 +16,12 @@ export default defineConfig({
     react(),
   ],
   server: { proxy: { '/api': 'http://localhost:3001' } },
+  build: {
+    // Consumed by scripts/check-bundle-budget.mjs to map each built chunk back to the source
+    // file that produced it -- filenames are content-hashed, so classifying "entry" vs. "lazy
+    // editor chunk" by name is not reliable; the manifest is.
+    manifest: true,
+  },
   test: {
     environment: 'jsdom',
     fileParallelism: false,

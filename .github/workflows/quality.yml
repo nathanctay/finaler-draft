@@ -41,6 +41,10 @@ jobs:
       - run: pnpm test:coverage
       - run: pnpm exec playwright install --with-deps chromium chromium-headless-shell
       - run: pnpm build
+      # plan.md documents a gzip bundle budget for the entry chunk, the lazy editor chunk, and
+      # the CSS, and says it is "enforced in CI as a build step that fails on regression" -- this
+      # is that step. It must run after `pnpm build` has produced apps/web/dist.
+      - run: pnpm check:bundle-budget
       - run: pnpm test:system
       # The database-backed browser suite (delete/restore end-to-end, real autosave/conflict
       # handling, real sign-up) previously only ran manually by whoever happened to invoke

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   BLANK_LINES_BEFORE,
   BODY_WIDTH_CHARACTERS,
+  DEFAULT_DOCUMENT_SETTINGS,
   ELEMENT_INDENTS,
   MARGIN_LEFT_IN,
   NOMINAL_CHARACTERS_PER_INCH,
@@ -9,6 +10,13 @@ import {
   MARGIN_RIGHT_IN,
   type ScreenplayElementKind,
 } from './pageFormat.js';
+
+// Re-exported unchanged: `DEFAULT_DOCUMENT_SETTINGS` is defined in `pageFormat.ts` (which carries
+// no zod dependency) so that a schema-free import chain -- `apps/web`'s pre-authentication CSS
+// bootstrap via the `./pageFormat` subpath -- can reach it without pulling in zod and
+// `screenplaySchema`. Consumers that already depend on zod, including `apps/api`, keep importing
+// it from here; there is exactly one definition, never a copy.
+export { DEFAULT_DOCUMENT_SETTINGS };
 
 export const SCREENPLAY_SCHEMA_VERSION = 1 as const;
 export const MAX_SCREENPLAY_TITLE_LENGTH = 250;
@@ -64,19 +72,6 @@ const MAX_ADJUSTABLE_INDENT_IN = PAGE_WIDTH_IN - MARGIN_RIGHT_IN;
 const MIN_CHARACTER_CUE_ROOM_IN = 1; // room for at least ten characters before the right margin
 const MIN_PARENTHETICAL_ROOM_IN = 0.3; // room for at least three characters
 
-function requiredElementIndentValue(
-  element: keyof typeof ELEMENT_INDENTS,
-  field: 'leftIn' | 'widthIn',
-): number {
-  const value = ELEMENT_INDENTS[element][field];
-  if (value === undefined) {
-    throw new Error(
-      `ELEMENT_INDENTS.${element}.${field} is unset; the document-settings default derivation is stale.`,
-    );
-  }
-  return value;
-}
-
 const documentSettingsSchema = z
   .object({
     characterIndentIn: z
@@ -111,22 +106,6 @@ const documentSettingsSchema = z
   );
 
 export type DocumentSettings = z.infer<typeof documentSettingsSchema>;
-
-/**
- * The specification's current fixed values, unchanged from `pageFormat.ts`'s `ELEMENT_INDENTS`
- * and the `(MORE)`/`CONT'D` and scene-number defaults plan.md states directly ("disabled by
- * default" for scene numbers; "defaulting to on" for automatic `(MORE)`/`CONT'D`). Every new
- * screenplay gets these, so existing pagination behavior is unchanged until a writer -- or,
- * before the document-settings dialog exists, a direct API caller -- sets something different.
- */
-export const DEFAULT_DOCUMENT_SETTINGS: DocumentSettings = {
-  characterIndentIn: requiredElementIndentValue('character', 'leftIn'),
-  parentheticalIndentIn: requiredElementIndentValue('parenthetical', 'leftIn'),
-  parentheticalWidthIn: requiredElementIndentValue('parenthetical', 'widthIn'),
-  pageNumberStyle: 'arabic',
-  sceneNumbersEnabled: false,
-  autoMoreContinued: true,
-};
 
 const sceneHeadingSchema = z
   .object({

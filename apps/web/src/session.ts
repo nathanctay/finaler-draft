@@ -1,5 +1,5 @@
 import { queryOptions, type QueryClient } from '@tanstack/react-query';
-import { api, type SessionUser } from './api.js';
+import { session, type SessionUser } from './apiSession.js';
 
 /**
  * The single shared `['session']` cache entry. Route guards (`beforeLoad`, via
@@ -9,9 +9,16 @@ import { api, type SessionUser } from './api.js';
  * `staleTime` is intentionally finite, not `Infinity`: a stale "signed in" answer would
  * let the UI keep offering actions the API then rejects once the session has actually
  * expired or been signed out elsewhere.
+ *
+ * Imports `session` from `./apiSession.js` directly, not `api.session` from `./api.js`.
+ * `guardSessionUser` below runs inside every route's `beforeLoad`, which the router evaluates
+ * before any component renders -- a point automatic code splitting cannot defer past. Reaching
+ * into `api.ts` here, even just for this one function, would evaluate that module's entire top
+ * level on every route change, including the `@finaler-draft/screenplay` schema tree that
+ * `screenplayResponseSchema` builds on. `apiSession.ts` has no such dependency.
  */
 export const sessionQueryOptions = queryOptions({
-  queryFn: api.session,
+  queryFn: session,
   queryKey: ['session'] as const,
   staleTime: 30_000,
 });

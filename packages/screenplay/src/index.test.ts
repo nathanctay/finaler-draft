@@ -818,6 +818,24 @@ describe('screenplaySchema', () => {
       expect(parsed.documentSettings).toEqual(DEFAULT_DOCUMENT_SETTINGS);
     });
 
+    // DEFAULT_DOCUMENT_SETTINGS is defined in pageFormat.ts, independently of
+    // documentSettingsSchema, so nothing at the type level forces its numeric fields to fall
+    // within the schema's min/max bounds or satisfy its cross-field refine. Passing it here as an
+    // *explicit* documentSettings value -- rather than relying on the schema's own `.default()`,
+    // which the test above exercises -- runs it through every one of those runtime checks
+    // directly, so the two definitions can never silently drift apart.
+    it("DEFAULT_DOCUMENT_SETTINGS satisfies the schema's own bounds and refinements", () => {
+      const result = safeParseScreenplay({
+        ...minimalScreenplayFixture,
+        documentSettings: DEFAULT_DOCUMENT_SETTINGS,
+      });
+
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.documentSettings).toEqual(DEFAULT_DOCUMENT_SETTINGS);
+      }
+    });
+
     it('accepts an explicit, fully custom, in-bounds set of settings', () => {
       const custom = {
         characterIndentIn: 3.5,

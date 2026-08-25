@@ -17,6 +17,14 @@
  * by measurement.
  */
 
+// Type-only: erased at build time, so this costs nothing at runtime and creates no runtime
+// dependency on `index.ts` -- see `DEFAULT_DOCUMENT_SETTINGS`, below, for why that direction
+// matters. Re-exported so a schema-free consumer (`apps/web/src/pageGeometryCss.ts`) can name the
+// type of the value it imports from this same subpath without reaching into the zod-dependent
+// main entry just for a type that is erased at build time anyway.
+import type { DocumentSettings } from './index.js';
+export type { DocumentSettings };
+
 /** US Letter page width, inches. Fixed; the page never reflows to the viewport. */
 export const PAGE_WIDTH_IN = 8.5;
 
@@ -174,4 +182,49 @@ export const ELEMENT_INDENTS: Readonly<Record<ScreenplayElementKind, ElementInde
   parenthetical: { leftIn: 3.1, widthIn: 2.0, characters: 20, align: 'left' },
   transition: { rightIn: 1.0, align: 'right' },
   shot: { leftIn: 1.5, rightIn: 1.0, widthIn: 6.0, characters: 60, align: 'left' },
+};
+
+/**
+ * One element's horizontal indent, read directly off `ELEMENT_INDENTS`. Throws if the
+ * specification omits that field for that element, which would mean this derivation (currently
+ * only `DEFAULT_DOCUMENT_SETTINGS`, below) is stale relative to `ELEMENT_INDENTS` itself.
+ */
+function requiredElementIndentValue(
+  element: keyof typeof ELEMENT_INDENTS,
+  field: 'leftIn' | 'widthIn',
+): number {
+  const value = ELEMENT_INDENTS[element][field];
+  if (value === undefined) {
+    throw new Error(
+      `ELEMENT_INDENTS.${element}.${field} is unset; the document-settings default derivation is stale.`,
+    );
+  }
+  return value;
+}
+
+/**
+ * The specification's current fixed document-settings values, unchanged from this module's
+ * `ELEMENT_INDENTS` and the `(MORE)`/`CONT'D` and scene-number defaults plan.md states directly
+ * ("disabled by default" for scene numbers; "defaulting to on" for automatic `(MORE)`/`CONT'D`).
+ * Every new screenplay gets these, so existing pagination behavior is unchanged until a writer --
+ * or, before the document-settings dialog exists, a direct API caller -- sets something different.
+ *
+ * Deliberately defined here rather than in `index.ts`: this module carries no zod dependency, so
+ * anything that only needs this default value -- `apps/web`'s pre-authentication CSS bootstrap in
+ * particular -- can import it via the `./pageFormat` subpath without pulling zod, and with it
+ * `screenplaySchema` and the rest of the canonical schema tree, into that code path.
+ * `@finaler-draft/screenplay`'s main entry re-exports this value unchanged for consumers that
+ * already depend on zod, such as `documentSettingsSchema`'s own default.
+ *
+ * `DocumentSettings` is imported as a type only (see the import above): that import is erased at
+ * build time, so it costs nothing at runtime and creates no runtime dependency on `index.ts` --
+ * only `index.ts` depends on this module at runtime, never the reverse.
+ */
+export const DEFAULT_DOCUMENT_SETTINGS: DocumentSettings = {
+  characterIndentIn: requiredElementIndentValue('character', 'leftIn'),
+  parentheticalIndentIn: requiredElementIndentValue('parenthetical', 'leftIn'),
+  parentheticalWidthIn: requiredElementIndentValue('parenthetical', 'widthIn'),
+  pageNumberStyle: 'arabic',
+  sceneNumbersEnabled: false,
+  autoMoreContinued: true,
 };

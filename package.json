@@ -27,7 +27,8 @@
     "test:system": "pnpm build && playwright test",
     "test:system:persistence": "node scripts/test-system-persistence.mjs",
     "test:integration": "pnpm --filter @finaler-draft/api test:integration",
-    "test:coverage": "pnpm -r test:coverage"
+    "test:coverage": "pnpm -r test:coverage",
+    "check:bundle-budget": "pnpm build:packages && pnpm --filter @finaler-draft/web build && node scripts/check-bundle-budget.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.34.0",
