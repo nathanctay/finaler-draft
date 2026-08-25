@@ -37,6 +37,7 @@ import {
   updatePaginationDocumentSettings,
 } from './paginationExtension.js';
 import { PAGE_GAP_IN, pageStackMinHeightIn } from './pagination.js';
+import { SmartTypeGhostExtension } from './smartTypeGhost.js';
 import { ApiError, api, type PersistedScreenplay } from './api.js';
 import { applyPageGeometryCssVariables } from './pageGeometryCss.js';
 import { TitlePageView } from './titlePageEditor.js';
@@ -446,6 +447,11 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     extensions: [
       ...screenplayExtensions,
       PaginationExtension.configure({ documentSettings: initial.screenplay.documentSettings }),
+      // SmartType's inline ghost completion (smartTypeGhost.ts). A layer over the screenplay
+      // editor rather than part of what a block is, exactly like pagination above -- and
+      // self-contained, so stage 3's optional accept-by-list layer attaches here beside it rather
+      // than inside it, and either can be removed without touching the other.
+      SmartTypeGhostExtension,
     ],
     onCreate: ({ editor: editorInstance }) => {
       syncEditorState(editorInstance);

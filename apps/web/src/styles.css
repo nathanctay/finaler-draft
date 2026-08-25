@@ -864,6 +864,44 @@ select:focus-visible,
 }
 
 /*
+ * SmartType's inline ghost completion (apps/web/src/smartTypeGhost.ts): the remainder of the best
+ * candidate, drawn after the caret while the writer types a scene heading or a character cue.
+ *
+ * `position: absolute` with no `top`/`left` of its own is the whole technique, and it is not a
+ * stylistic choice. An absolutely positioned box with auto offsets paints at its static position
+ * -- exactly where it would have gone in the line -- while being out of flow, so it adds no
+ * advance width to the line box it appears in. That is what keeps it off the character grid: the
+ * grid is normative here (plan.md's vertical spacing and `pagination.ts`'s whole technique), and
+ * inline ghost text would otherwise change where the line wraps, shifting every line after it and
+ * decoupling the DOM from the paginated model -- the exact defect class fixed in PRs #16 and #19.
+ * `page-rendering-persistence.spec.ts` measures block tops and page geometry with and without a
+ * ghost showing and requires them to be identical, so this rule is not trusted, it is proven.
+ *
+ * `white-space: pre` keeps the remainder on one line, overriding the `pre-wrap` it would otherwise
+ * inherit from the block. That matters for a completion offered near the right edge of the line: an
+ * out-of-flow box with auto offsets takes a shrink-to-fit width, and CSS 2.1 10.3.7 resolves that
+ * against the room left between the box's static position and the containing block's edge -- so a
+ * two-word suggestion with only a few characters of room could break at its own space into a narrow
+ * column. Measured honestly: Chrome does not appear to reduce the available width that way, so the
+ * ghost stays on one line there with or without this declaration, and the single-rectangle
+ * assertion in `page-rendering-persistence.spec.ts` passes either way. This is kept for the engines
+ * that do follow that rule, and that assertion is what would catch it there. Overflowing the line's
+ * right edge is the correct outcome in every engine: it is drawn text, it moves nothing, and
+ * `.page`'s own right margin absorbs it.
+ *
+ * `pointer-events: none` and `user-select: none` keep it un-clickable and un-selectable to match
+ * what it is -- a preview of text that does not exist yet. The document never contains it (it is a
+ * widget decoration, never content), so nothing here is what keeps it out of a save or an export.
+ */
+.script-body [data-screenplay-block] .smarttype-ghost {
+  position: absolute;
+  color: var(--text-04);
+  white-space: pre;
+  pointer-events: none;
+  user-select: none;
+}
+
+/*
  * Every indent below is specified from the physical page edge (see
  * `@finaler-draft/screenplay/pageFormat`), not from the script-body content box. The content
  * box's own left/right edges already sit `--fd-page-margin-left` / `--fd-page-margin-right` in
