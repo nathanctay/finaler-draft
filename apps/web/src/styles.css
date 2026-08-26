@@ -1444,25 +1444,6 @@ select:focus-visible,
   color: var(--border-13);
 }
 
-.sign-out-button {
-  background: transparent;
-  border: 1px solid var(--border-10);
-  border-radius: 1px;
-  color: var(--text-17);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 7px 12px;
-}
-
-.sign-out-button:hover {
-  background: var(--surface-05);
-}
-
-.sign-out-button:disabled {
-  color: var(--text-06);
-  cursor: default;
-}
-
 .sign-out-error {
   color: var(--feedback-error);
   font-size: 12px;
@@ -1961,6 +1942,7 @@ select:focus-visible,
     opacity: 0;
     transform: translateY(6px);
   }
+
   to {
     opacity: 1;
     transform: none;
