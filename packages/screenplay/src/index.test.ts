@@ -1080,10 +1080,16 @@ describe('deriveVocabulary', () => {
     expect(vocabulary.times).toEqual([
       { value: 'DAY', count: 0 },
       { value: 'NIGHT', count: 0 },
+      { value: 'AFTERNOON', count: 0 },
       { value: 'CONTINUOUS', count: 0 },
       { value: 'LATER', count: 0 },
+      { value: 'MOMENTS LATER', count: 0 },
       { value: 'MORNING', count: 0 },
       { value: 'EVENING', count: 0 },
+      { value: 'DAWN', count: 0 },
+      { value: 'DUSK', count: 0 },
+      { value: 'SAME', count: 0 },
+      { value: 'SAME TIME', count: 0 },
     ]);
   });
 
