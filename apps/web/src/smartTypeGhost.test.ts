@@ -155,6 +155,41 @@ describe('the ghost', () => {
     mount.remove();
   });
 
+  /*
+   * The asymmetry is deliberate and is about what a suggestion is worth, not about the mechanism.
+   * A scene heading has four candidates in fixed conventional order with `INT.` leading, so a ghost
+   * on an empty one is a near-certain guess the writer takes with a single `Tab`. A character cue
+   * has as many candidates as the screenplay has characters and no evidence yet to choose between
+   * them -- ranking picks whoever spoke most, which is a coin flip against whoever this speech
+   * actually belongs to -- so every new cue would open with a name to visually reject.
+   *
+   * The test above passes either way, because it types `MA` before asserting. Nothing covered the
+   * empty cue, which is why suppressing it broke no test.
+   */
+  it('ghosts nothing on an empty character cue, while an empty scene heading still offers its prefix', () => {
+    const { editor, mount } = buildEditor([...AUTHORED, { element: 'character', text: '' }]);
+
+    setSelection(editor, 4, 0);
+
+    expect(ghostOf(editor)).toBeUndefined();
+    expect(renderedGhost(mount)).toBeUndefined();
+
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('still ghosts a prefix on an empty scene heading, where the guess is worth making', () => {
+    const { editor, mount } = buildEditor([...AUTHORED, { element: 'scene_heading', text: '' }]);
+
+    setSelection(editor, 4, 0);
+
+    expect(ghostOf(editor)).toMatchObject({ insertText: 'INT.', matchedLength: 0, text: 'INT.' });
+    expect(renderedGhost(mount)).toBe('INT.');
+
+    editor.destroy();
+    mount.remove();
+  });
+
   it('offers the conventional prefixes the moment a scene heading is created empty', () => {
     const { editor, mount } = buildEditor([...AUTHORED, { element: 'scene_heading', text: '' }]);
 

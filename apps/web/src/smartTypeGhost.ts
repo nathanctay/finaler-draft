@@ -165,6 +165,23 @@ export function resolveSmartTypeGhost(
     return undefined;
   }
 
+  /*
+   * An empty `character` block offers nothing, while an empty `scene_heading` still offers its
+   * prefixes. The asymmetry is in what the suggestion is worth, not in the mechanism.
+   *
+   * A scene heading has four candidates in fixed conventional order and `INT.` leads, so a ghost on
+   * an empty one is a near-certain guess the writer can take with `Tab` in a single keystroke. A
+   * character cue has as many candidates as the screenplay has characters and no evidence yet to
+   * choose between them: ranking picks whoever spoke most, which is a coin flip against whoever
+   * this speech belongs to. Every new cue would open with a name to visually reject.
+   *
+   * `suggest` itself is unchanged and still answers the same question for both -- this is a
+   * decision about when a ghost is worth drawing, which belongs here rather than in the ranking.
+   */
+  if (block.attrs.element === 'character' && block.textContent === '') {
+    return undefined;
+  }
+
   const candidate = suggest(block.attrs.element, block.textContent, vocabulary).find(
     (offered) => offered.remainder !== '',
   );
