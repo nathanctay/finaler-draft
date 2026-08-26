@@ -27,7 +27,9 @@
  *  2. In `App.tsx`: the `SmartTypeList, SmartTypeListExtension` import, the `SmartTypeListExtension`
  *     entry in the editor's `extensions` array, and the `<SmartTypeList editor={editor} />` element
  *     at the end of the render -- each with its own comment.
- *  3. In `styles.css`: the trailing `.smarttype-list` / `.smarttype-list-option` block.
+ *  3. In `styles.css`: the `.smarttype-list` / `.smarttype-list-option` block. Leave
+ *     `floatingPanel.ts` alone -- the panel placement moved there when the element menu
+ *     needed the same arithmetic, and that layer is not part of this one.
  *  4. In `page-rendering-persistence.spec.ts`: the list section of the ghost geometry test, between
  *     the canonical-screenplay read-back and `// Escape dismisses it`, and the two references to
  *     the list in that test's name and doc comment. **This step is not optional and nothing in the
@@ -56,7 +58,7 @@
  * `Enter` accepts the selected candidate while the list is open, and is untouched everywhere else
  * -- including at a caret where the ghost alone is showing, which stays `Tab`-only. See the
  * `Enter` binding in `SmartTypeListExtension` for why that line is drawn there and why it leaves
- * `splitScreenplayBlock` and the element menu's future second-`Enter` alone.
+ * `splitScreenplayBlock` and the element menu's second-`Enter` (`elementMenu.tsx`) alone.
  *
  * The list cannot move the manuscript. It renders at the application root, outside `.page`
  * entirely, as a `position: fixed` box in viewport coordinates -- so it is not merely out of flow
@@ -69,6 +71,7 @@ import { Extension, type Editor } from '@tiptap/core';
 import { Plugin, PluginKey, type EditorState } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
 import { suggest } from '@finaler-draft/screenplay';
+import { placeAtCaret } from './floatingPanel.js';
 import { isScreenplayElementType } from './screenplayEditor.js';
 import {
   acceptSmartTypeGhost,
@@ -95,11 +98,6 @@ const smartTypeListPluginKey = new PluginKey<SmartTypeListState>('smartTypeList'
 
 const LISTBOX_ID = 'smarttype-list';
 const OPTION_ID_PREFIX = 'smarttype-option';
-
-/** Distance from the caret to the panel, and the smallest gap kept between the panel and the
- * viewport edge. Both in CSS pixels, matching `.overflow-menu-list`'s own 4px offset. */
-const CARET_GAP_PX = 4;
-const VIEWPORT_MARGIN_PX = 8;
 
 type SmartTypeListView = {
   readonly candidates: readonly SmartTypeGhost[];
@@ -262,11 +260,14 @@ export const SmartTypeListExtension = Extension.create({
        * highlighted row, and in that state accepting the highlighted row is what every dropdown in
        * every application does. Requiring `Tab` there would be the surprise.
        *
-       * This is also what keeps the element menu's future second-`Enter`-on-an-empty-block clear of
-       * it. An empty scene heading does show a ghost -- `suggest` offers all four prefixes at an
-       * empty caret -- so a ghost-level `Enter` would have collided with that directly. A list-level
-       * one cannot: reaching this state costs a deliberate `ArrowDown`, and a writer pressing
-       * `Enter` `Enter` on a fresh empty block never passes through it.
+       * This is also what keeps the element menu's second-`Enter`-on-an-empty-block
+       * (`elementMenu.tsx`, now shipped) clear of it. An empty scene heading does show a ghost --
+       * `suggest` offers all four prefixes at an empty caret -- so a ghost-level `Enter` would have
+       * collided with that directly. A list-level one cannot: reaching this state costs a
+       * deliberate `ArrowDown`, and a writer pressing `Enter` `Enter` on a fresh empty block never
+       * passes through it. The menu takes `Enter` at priority 120, below this binding's 150, so an
+       * open list still wins it -- and opening the menu dismisses the ghost, which is what keeps
+       * this list from being open at the same time as the menu at all.
        *
        * The binding lives here rather than in `smartTypeGhost.ts` deliberately. Deleting this layer
        * has to take `Enter` back with it; a binding left behind in the ghost would quietly hold onto
@@ -318,49 +319,6 @@ export const SmartTypeListExtension = Extension.create({
   // reordering those two lines would silently move `Escape` back to the ghost.
   priority: 150,
 });
-
-/**
- * Places the panel at the caret, in viewport coordinates, and keeps it on screen.
- *
- * Two placements are possible and the choice between them is the only judgement here: below the
- * caret when the panel fits there, above it when it does not. Below is preferred even when the
- * room is tight, because a panel above the caret covers the line the writer is typing; it flips
- * only when staying below would put candidates off-screen. When neither side has room -- a very
- * short window -- the panel is clamped into the viewport and scrolls internally (`max-height` in
- * styles.css), which keeps every candidate reachable by `ArrowDown` even where none of them can be
- * on screen at once.
- *
- * A page seam is deliberately not a case. The panel is fixed-position chrome floating over the
- * canvas, not something laid out on paper: near the bottom of a page it simply paints across the
- * seam and onto the next sheet, the same way it paints over the margin anywhere else. Nudging it
- * clear of a seam would move it away from the caret it belongs to, and clipping it to the page
- * would hide candidates -- both worse than an overlay that overlaps a page edge, which is what an
- * overlay is for.
- *
- * Written to the element's own style rather than through React state so that the measurement and
- * the placement happen in one layout pass, with no frame where the panel is painted somewhere
- * else first.
- */
-function placeAtCaret(panel: HTMLElement, caret: DOMRect): void {
-  const { height, width } = panel.getBoundingClientRect();
-  const { innerHeight, innerWidth } = window;
-
-  const below = caret.bottom + CARET_GAP_PX;
-  const above = caret.top - CARET_GAP_PX - height;
-  const fitsBelow = below + height <= innerHeight - VIEWPORT_MARGIN_PX;
-  const preferred = fitsBelow || above < VIEWPORT_MARGIN_PX ? below : above;
-
-  const top = Math.max(
-    VIEWPORT_MARGIN_PX,
-    Math.min(preferred, innerHeight - VIEWPORT_MARGIN_PX - height),
-  );
-  const left = Math.max(
-    VIEWPORT_MARGIN_PX,
-    Math.min(caret.left, innerWidth - VIEWPORT_MARGIN_PX - width),
-  );
-  panel.style.top = `${top}px`;
-  panel.style.left = `${left}px`;
-}
 
 /**
  * What the panel is placed against: the ghost's own box. It sits exactly at the caret already --

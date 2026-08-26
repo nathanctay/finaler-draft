@@ -61,6 +61,22 @@ export function isScreenplayElementType(value: unknown): value is ScreenplayElem
   return screenplayElementTypes.includes(value as ScreenplayElementType);
 }
 
+/**
+ * An element's name as a writer reads it: `scene_heading` becomes `Scene Heading`. Derived from
+ * the canonical identifier rather than kept as a second table beside `screenplayElementTypes`, so
+ * a new element type cannot arrive with no label or with one that disagrees with its identifier.
+ *
+ * It lives here, beside the vocabulary it names, because more than one surface shows it: the
+ * toolbar's element `<select>` and the Inspector (`App.tsx`) and the element menu
+ * (`elementMenu.tsx`).
+ */
+export function displayElement(element: ScreenplayElementType): string {
+  return element
+    .split('_')
+    .map((word) => `${word[0]?.toUpperCase()}${word.slice(1)}`)
+    .join(' ');
+}
+
 function createStableId(): string {
   return crypto.randomUUID();
 }

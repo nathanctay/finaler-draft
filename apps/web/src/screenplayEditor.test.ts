@@ -574,6 +574,53 @@ describe('paste sanitisation', () => {
     mount.remove();
   });
 
+  /**
+   * The split case, which no other test in this file reaches: every paste above lands at a block
+   * boundary (`selectBeforeFirstBlock`, or the end of the document), where ProseMirror inserts
+   * siblings and nothing is divided. A caret at offset 0 *inside* a block with text in it divides
+   * that block instead, and `replace` gives both halves the original node's attrs -- its `id`
+   * among them. Neither half came from the clipboard, so `regeneratePastedIds` cannot see it; the
+   * duplicate is made by the paste, not carried in by it.
+   *
+   * This is the literal failure the whole paste scope exists to close ("Stable id ... must be
+   * globally unique within a screenplay", and saving stops), reached by an ordinary action: caret
+   * at the start of a line, paste two lines copied from the manuscript.
+   */
+  it('regenerates the id of a block split in two by a paste dropped inside it', () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'action', id: originalId, text: 'INT. HOUSE - DAY' },
+      { element: 'action', id: secondId, text: 'MARA enters the room.' },
+    ]);
+    // Offset 0 of the first block's own text -- inside the block, not at the boundary before it.
+    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 1)));
+
+    pasteHTML(
+      editor,
+      [
+        `<div data-screenplay-block data-screenplay-element="action" data-block-id="${originalId}" data-pm-slice="0 0 []">INT. HOUSE - DAY</div>`,
+        `<div data-screenplay-block data-screenplay-element="action" data-block-id="${secondId}">MARA enters the room.</div>`,
+      ].join(''),
+    );
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    const ids = projection.screenplay.blocks.map((block) => block.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // The writer's text is untouched by the sweep -- only identity is reissued.
+    expect(
+      projection.screenplay.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual([
+      '',
+      'INT. HOUSE - DAY',
+      'MARA enters the room.',
+      'INT. HOUSE - DAY',
+      'MARA enters the room.',
+    ]);
+    editor.destroy();
+    mount.remove();
+  });
+
   it('splits pasted multi-line plain text into separate action blocks, each with its own valid id', () => {
     const { editor, mount } = buildPasteEditor([{ element: 'action', id: originalId, text: '' }]);
     selectBeforeFirstBlock(editor);

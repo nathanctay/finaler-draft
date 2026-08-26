@@ -2022,3 +2022,77 @@ select:focus-visible,
 .smarttype-list-option[aria-selected='true'] {
   background: var(--surface-05);
 }
+
+/*
+ * The element menu (apps/web/src/elementMenu.tsx): the panel a second Enter opens at an empty
+ * block.
+ *
+ * `position: fixed` is what keeps it out of the manuscript, exactly as for `.smarttype-list`
+ * above: it is rendered at the application root, so it is not in `.page`'s box tree, and there is
+ * no line it could wrap and no page break it could move. `page-rendering-persistence.spec.ts`
+ * measures the whole page with this menu open against a baseline taken from the same document
+ * moments earlier, rather than taking this paragraph's word for it.
+ *
+ * A separate block rather than a second selector on `.smarttype-list`, deliberately: that layer is
+ * built to be deleted in one pass (see its own header, which names this stylesheet block by
+ * class), and a shared rule would make deleting it break this menu. The vocabulary is identical on
+ * purpose -- the same `--border-03` hairline, 4px radius, `--surface-01`, single restrained
+ * shadow, and flat `--surface-05` selected row that `.dialog`, `.toast` and `.smarttype-list`
+ * already agree on -- so the duplication is four declarations that must not drift, not a second
+ * design.
+ *
+ * Interface type, not manuscript type (plan.md: "Manuscript and interface are separate type
+ * systems"). These are the names of screenplay elements, but the panel is chrome; setting it in
+ * Courier would read as text already on the page.
+ *
+ * `z-index: 8` matches `.smarttype-list`: above the panels (2) and `.overflow-menu-list` (5),
+ * below `.dialog-overlay` (10) and `.toast` (20). The two can never be open at once (elementMenu
+ * .tsx's header), so they are not stacked against each other. Nothing animates, so there is no
+ * motion for `prefers-reduced-motion` to reduce: a panel opened with a keystroke should be under
+ * the writer's eye on the next frame, not arriving.
+ *
+ * `top`/`left` are placeholders. `placeAtCaret` (floatingPanel.ts) writes both before the first
+ * paint; they are here so the panel has a defined position in the frame it is created in rather
+ * than falling back to its static one.
+ */
+.element-menu {
+  position: fixed;
+  z-index: 8;
+  top: 0;
+  left: 0;
+  max-width: min(320px, calc(100vw - 16px));
+  min-width: 172px;
+  max-height: 216px;
+  overflow-y: auto;
+  margin: 0;
+  border: 1px solid var(--border-03);
+  border-radius: 4px;
+  background: var(--surface-01);
+  padding: 4px 0;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 25%);
+  list-style: none;
+  font-size: 12px;
+}
+
+.element-menu-option {
+  display: flex;
+  gap: 20px;
+  justify-content: space-between;
+  padding: 6px 14px;
+  color: var(--text-17);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.element-menu-option[aria-selected='true'] {
+  background: var(--surface-05);
+}
+
+/* The shortcut letter, set apart the way a menu sets an accelerator apart: right-aligned and
+ * quieter than the name it belongs to, so the column reads as one list of elements rather than
+ * fourteen words. `--text-04` is the grey `.smarttype-ghost` already uses for text that is on
+ * offer rather than authored. It is real text, not a decoration -- a screen reader reads it as
+ * part of the row's name, and the live region names it again. */
+.element-menu-key {
+  color: var(--text-04);
+}
