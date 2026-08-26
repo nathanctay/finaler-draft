@@ -671,10 +671,33 @@ describe('local semantic screenplay editor', () => {
       expect(maraRow).toHaveTextContent('V.O.');
       expect(maraRow).not.toHaveTextContent('VO)');
 
-      // JOE has no extension, so nothing after "lines" should render for it -- no stray
+      // JOE has no extension, so nothing after the count should render for it -- no stray
       // separator or empty extension list.
       const joeRow = within(panel).getByRole('button', { name: /^JOE/ });
       expect(joeRow).not.toHaveTextContent('·');
+    });
+
+    // The count is how many times the character speaks -- `cueBlockIds`, the cues alone -- and it
+    // carries no noun, because neither available noun is true: "lines" is wrong for a count of
+    // cues, and `blockIds` (the full speech attribution, counting parentheticals and every
+    // dialogue paragraph besides) is not what a writer wants to know about a character. Untested
+    // until now: the label read "2 lines" and nothing asserted it either way, so the change that
+    // removed the noun broke no test.
+    it("shows a character's cue count as a bare number, with no unit and no speech-block inflation", async () => {
+      const user = userEvent.setup();
+      render(<App initial={twoCharacterPersisted} />);
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+      await user.click(screen.getByRole('tab', { name: 'Characters' }));
+      const panel = screen.getByRole('tabpanel');
+
+      // MARA is cued twice (`MARA` and `MARA (VO)`), each followed by dialogue. The count is 2 --
+      // the cues -- not 4, which is what counting the attributed speech blocks would give.
+      const maraRow = within(panel).getByRole('button', { name: /^MARA/ });
+      expect(maraRow).toHaveTextContent('2 · V.O.');
+      expect(maraRow).not.toHaveTextContent('lines');
+
+      const joeRow = within(panel).getByRole('button', { name: /^JOE/ });
+      expect(joeRow).not.toHaveTextContent('lines');
     });
 
     // The product decision under test end-to-end: a writer who never types uppercase still gets

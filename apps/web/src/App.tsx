@@ -1053,10 +1053,17 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                       onClick={() => selectCharacter(character)}
                     >
                       <span>{character.name}</span>
+                      {/*
+                        The bare count is how many times this character speaks -- `cueBlockIds`,
+                        the cues alone, not `blockIds`, which is the whole speech attribution and
+                        would count parentheticals and every dialogue paragraph besides. It carries
+                        no label because neither noun is true: "lines" is wrong for a count of cues,
+                        and a count of blocks is not what a writer wants to know about a character.
+                      */}
                       <small>
                         {character.extensions.length > 0
-                          ? `${character.cueBlockIds.length} lines · ${character.extensions.join(', ')}`
-                          : `${character.cueBlockIds.length} lines`}
+                          ? `${character.cueBlockIds.length} · ${character.extensions.join(', ')}`
+                          : `${character.cueBlockIds.length}`}
                       </small>
                     </button>
                   </li>
