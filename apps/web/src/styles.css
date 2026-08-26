@@ -209,7 +209,7 @@ select:focus-visible,
   padding: 0 8px;
 }
 
-.menubar > span:not(.menubar-spacer),
+.menubar>span:not(.menubar-spacer),
 .menubar button {
   height: 30px;
   padding: 0 10px;
@@ -398,7 +398,7 @@ select:focus-visible,
    this file's own top) does not itself guarantee identical to a `<span>`'s inherited size. Font
    inheritance and the pointer cursor are already covered by that same global reset, so neither
    is restated here. */
-.panel-tabs > button {
+.panel-tabs>button {
   padding: 7px 8px;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -508,13 +508,11 @@ select:focus-visible,
   min-height: var(--fd-page-stack-min-height, var(--fd-page-height));
   padding: var(--fd-page-margin-top) var(--fd-page-margin-right) 0 var(--fd-page-margin-left);
   background-color: white;
-  background-image: repeating-linear-gradient(
-    to bottom,
-    white 0,
-    white var(--fd-page-height),
-    var(--surface-11) var(--fd-page-height),
-    var(--surface-11) calc(var(--fd-page-height) + var(--fd-page-gap))
-  );
+  background-image: repeating-linear-gradient(to bottom,
+      white 0,
+      white var(--fd-page-height),
+      var(--surface-11) var(--fd-page-height),
+      var(--surface-11) calc(var(--fd-page-height) + var(--fd-page-gap)));
   background-repeat: repeat-y;
   background-size: 100% calc(var(--fd-page-height) + var(--fd-page-gap));
   box-shadow: 0 1px 5px var(--shadow-02);
@@ -561,7 +559,7 @@ select:focus-visible,
   align-items: center;
 }
 
-.pages > * + * {
+.pages>*+* {
   margin-top: var(--fd-page-gap, 0.5in);
 }
 
@@ -587,8 +585,7 @@ select:focus-visible,
   flex-shrink: 0;
   width: var(--fd-page-width);
   height: var(--fd-page-height);
-  padding: var(--fd-page-margin-top) var(--fd-page-margin-right) var(--fd-page-margin-top)
-    var(--fd-page-margin-left);
+  padding: var(--fd-page-margin-top) var(--fd-page-margin-right) var(--fd-page-margin-top) var(--fd-page-margin-left);
   background-color: white;
   box-shadow: 0 1px 5px var(--shadow-02);
   font-family: var(--fd-typeface);
@@ -1031,9 +1028,7 @@ select:focus-visible,
  * which one it is in.
  */
 .script-body [data-screenplay-block] .page-break-widget {
-  margin-left: calc(
-    var(--fd-page-margin-left) - var(--fd-block-indent, var(--fd-page-margin-left))
-  );
+  margin-left: calc(var(--fd-page-margin-left) - var(--fd-block-indent, var(--fd-page-margin-left)));
 }
 
 .script-body .page-break-cue-line {
@@ -1444,25 +1439,6 @@ select:focus-visible,
   color: var(--border-13);
 }
 
-.sign-out-button {
-  background: transparent;
-  border: 1px solid var(--border-10);
-  border-radius: 1px;
-  color: var(--text-17);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 7px 12px;
-}
-
-.sign-out-button:hover {
-  background: var(--surface-05);
-}
-
-.sign-out-button:disabled {
-  color: var(--text-06);
-  cursor: default;
-}
-
 .sign-out-error {
   color: var(--feedback-error);
   font-size: 12px;
@@ -1825,8 +1801,8 @@ select:focus-visible,
     width: 100%;
   }
 
-  .brand > span:last-child,
-  .menubar > span:nth-child(n + 4),
+  .brand>span:last-child,
+  .menubar>span:nth-child(n + 4),
   .menubar button:nth-child(n + 4) {
     display: none;
   }
@@ -1961,6 +1937,7 @@ select:focus-visible,
     opacity: 0;
     transform: translateY(6px);
   }
+
   to {
     opacity: 1;
     transform: none;
