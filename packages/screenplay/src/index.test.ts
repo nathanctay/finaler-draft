@@ -39,6 +39,18 @@ function sceneHeadingBlock(index: number, text: string) {
   return { id: uuidFor(index), type: 'scene_heading' as const, text };
 }
 
+/**
+ * How many times `deriveVocabulary` seeds before anything is authored, read from the seeding
+ * itself rather than written down again. Tests that are not *about* the seed list should not
+ * fail when a time is added to it -- only the test that deliberately pins the whole list, in
+ * declaration order, should. Adding DAWN and DUSK to the seeds broke three unrelated
+ * assertions that had hardcoded the count, and voided a fourth that used DAWN to stand for a
+ * time the seeds did not contain.
+ */
+function seededTimeCount(): number {
+  return deriveVocabulary([]).times.length;
+}
+
 function dialogueBlock(index: number, text: string) {
   return { id: uuidFor(index), type: 'dialogue' as const, text };
 }
@@ -1275,7 +1287,7 @@ describe('deriveVocabulary', () => {
     // Not a new, separately-cased entry -- folds into the existing 'DAY' seed, which was already
     // uppercase, so this is really a regression guard: uppercasing authored terms must not
     // somehow produce two entries where dedup used to produce one.
-    expect(vocabulary.times).toHaveLength(6);
+    expect(vocabulary.times).toHaveLength(seededTimeCount());
     expect(vocabulary.times[0]).toEqual({ value: 'DAY', count: 1 });
   });
 
@@ -1299,15 +1311,15 @@ describe('deriveVocabulary', () => {
 
     // Still six entries, not seven: 'day' folded into the 'DAY' seed instead of adding a
     // separate, differently-cased entry.
-    expect(vocabulary.times).toHaveLength(6);
+    expect(vocabulary.times).toHaveLength(seededTimeCount());
     expect(vocabulary.times[0]).toEqual({ value: 'DAY', count: 1 });
   });
 
   it('adds a novel time not in the seeded set', () => {
-    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT. KITCHEN - DAWN')]);
+    const vocabulary = deriveVocabulary([sceneHeadingBlock(1, 'INT. KITCHEN - MIDNIGHT')]);
 
-    expect(vocabulary.times).toHaveLength(7);
-    expect(vocabulary.times[0]).toEqual({ value: 'DAWN', count: 1 });
+    expect(vocabulary.times).toHaveLength(seededTimeCount() + 1);
+    expect(vocabulary.times[0]).toEqual({ value: 'MIDNIGHT', count: 1 });
   });
 
   // Proves "most frequent first": KITCHEN is authored twice, LOBBY once and more recently. If
