@@ -339,7 +339,7 @@ function splitCharacterCue(rawText: string): { name: string; extensions: string[
   let remaining = rawText.trim();
   const extensions: string[] = [];
 
-  for (; ;) {
+  for (;;) {
     const match = /^(.*)\((.*)\)\s*$/.exec(remaining);
     if (!match) {
       break;
@@ -577,7 +577,20 @@ const CONVENTIONAL_PREFIX_ORDER = ['INT.', 'EXT.', 'INT./EXT.', 'I/E.'] as const
  * with no authored position, so frequency and recency cannot distinguish them, and a stable sort
  * leaves them in exactly this order.
  */
-const SEEDED_TIMES = ['DAY', 'NIGHT', 'AFTERNOON', 'CONTINUOUS', 'LATER', 'MOMENTS LATER', 'MORNING', 'EVENING', 'DAWN', 'DUSK', 'SAME', 'SAME TIME'];
+const SEEDED_TIMES = [
+  'DAY',
+  'NIGHT',
+  'AFTERNOON',
+  'CONTINUOUS',
+  'LATER',
+  'MOMENTS LATER',
+  'MORNING',
+  'EVENING',
+  'DAWN',
+  'DUSK',
+  'SAME',
+  'SAME TIME',
+];
 
 /**
  * Case-insensitively matches `text`'s start against `SCENE_HEADING_PREFIXES`, returning the
@@ -1245,8 +1258,8 @@ function plainTextBlockLines(block: ScreenplayBlock): string[] {
     case 'scene_heading':
       return [
         plainTextIndent('scene_heading') +
-        block.text +
-        (block.sceneNumber ? ` (scene ${block.sceneNumber})` : ''),
+          block.text +
+          (block.sceneNumber ? ` (scene ${block.sceneNumber})` : ''),
       ];
     default:
       return [plainTextIndent(block.type) + block.text];
