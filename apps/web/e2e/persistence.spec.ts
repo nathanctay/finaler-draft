@@ -148,7 +148,11 @@ test('a writer can create, autosave, and reload a private screenplay', async ({ 
   const canvas = page.getByRole('textbox', { name: 'Screenplay editing canvas' });
   await expect(canvas).toBeVisible();
   await canvas.click();
-  await page.keyboard.press('Enter');
+  // Typed straight into the block a brand-new screenplay already has: App.tsx seeds the document
+  // with one empty `action` block (`editorContent`'s fallback for an empty canonical screenplay)
+  // so there is always somewhere to put the caret. An Enter first would not add a block a writer
+  // wants -- it would open the element menu (elementMenu.tsx), because Enter at an empty block
+  // offers the element types rather than stacking a second empty one.
   const savedUpdate = page.waitForResponse(
     (response) =>
       response.request().method() === 'PUT' &&
@@ -215,7 +219,7 @@ test('pasting foreign HTML keeps the screenplay valid and saving, instead of fai
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
 
   await canvas.click();
-  await page.keyboard.press('Enter');
+  // Straight into the seeded empty block, for the reason the first test in this file spells out.
   await page.keyboard.type('INT. HOUSE - DAY');
   await page.keyboard.press('Enter');
 
@@ -260,7 +264,8 @@ test('pasting content copied from this editor back into the same document regene
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
 
   await canvas.click();
-  await page.keyboard.press('Enter');
+  // Straight into the seeded empty block, for the reason the first test in this file spells out --
+  // which is also what makes this exactly the three-block copy the assertions below describe.
   await page.keyboard.type('INT. HOUSE - DAY');
   await page.keyboard.press('Enter');
   await page.keyboard.type('MARA enters the room.');

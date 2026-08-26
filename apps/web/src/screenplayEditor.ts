@@ -1,6 +1,6 @@
 import { Extension, Node, type Editor } from '@tiptap/core';
 import { History } from '@tiptap/extension-history';
-import { Plugin, TextSelection } from '@tiptap/pm/state';
+import { Plugin, TextSelection, type Transaction } from '@tiptap/pm/state';
 import { Fragment, Slice, type Node as ProseMirrorNode } from '@tiptap/pm/model';
 import {
   SCREENPLAY_SCHEMA_VERSION,
@@ -655,10 +655,72 @@ function regeneratePastedIds(fragment: Fragment): Fragment {
  * in this editor (a freshly split block, `Enter` on an empty document): not malformed, just
  * empty.
  */
+/**
+ * The second half of the same guarantee, and it cannot be done in `transformPasted`.
+ *
+ * `regeneratePastedIds` above makes every id *arriving in the slice* new. That is not the only way
+ * a paste can produce two blocks with one id: dropping a block-shaped slice at a position *inside*
+ * an existing block splits it, and ProseMirror's `replace` gives both halves that block's attrs --
+ * including its `id`. Neither half came from the clipboard, so nothing in the slice could have been
+ * rewritten to prevent it. The result is the exact failure `progress/paste-sanitization.md` exists
+ * to close: `screenplayIdSchema`'s uniqueness rule rejects the document, the status bar reads
+ * "Not saving · Stable id ... must be globally unique within a screenplay", and the writer's edits
+ * stop reaching the server.
+ *
+ * Reachable by an ordinary action -- put the caret at the start of a line and paste two or more
+ * lines copied from the manuscript -- and unrelated to what is on the clipboard, so it survived
+ * both the slice-level fix and its tests, which all paste at a block boundary (`position` 0) where
+ * no split happens. It surfaced when the element menu stopped `Enter` from leaving a stray empty
+ * block at the top of a new screenplay, which is what had been absorbing the paste in the one test
+ * that came near it.
+ *
+ * The scan is a whole-document pass, so it is gated on the transaction that can actually cause the
+ * problem rather than run on every keystroke -- the same discipline `paginationExtension.ts` and
+ * `smartTypeGhost.ts` apply to their own document-wide passes. `prosemirror-view` marks both the
+ * paste and drop paths with a `uiEvent` meta, and no other edit in this editor copies a block's
+ * attrs onto a second node: `splitScreenplayBlock` mints a fresh id for the half it creates, and
+ * `convertActiveScreenplayBlock` changes one node in place.
+ *
+ * The first block carrying a given id keeps it and every later one is reissued, which is document
+ * order and nothing more -- there is no sense in which one half of a split is more the original
+ * block than the other, and inventing a rule (prefer the half with text, prefer the longer one)
+ * would be a preference dressed up as a principle.
+ */
+function regenerateDuplicateBlockIds(doc: ProseMirrorNode, transaction: Transaction): boolean {
+  const seen = new Set<string>();
+  let changed = false;
+  doc.forEach((node, offset) => {
+    if (node.type.name !== 'screenplayBlock') {
+      return;
+    }
+    const { id } = node.attrs;
+    if (typeof id === 'string' && !seen.has(id)) {
+      seen.add(id);
+      return;
+    }
+    // `setNodeMarkup` never changes a node's size, so every offset this loop still has to visit
+    // stays valid as it goes.
+    transaction.setNodeMarkup(offset, undefined, { ...node.attrs, id: createStableId() });
+    changed = true;
+  });
+  return changed;
+}
+
 const ScreenplayPasteSanitizer = Extension.create({
   addProseMirrorPlugins() {
     return [
       new Plugin({
+        appendTransaction(transactions, _oldState, newState) {
+          const pasted = transactions.some((transaction) => {
+            const uiEvent = transaction.getMeta('uiEvent');
+            return transaction.docChanged && (uiEvent === 'paste' || uiEvent === 'drop');
+          });
+          if (!pasted) {
+            return null;
+          }
+          const transaction = newState.tr;
+          return regenerateDuplicateBlockIds(newState.doc, transaction) ? transaction : null;
+        },
         props: {
           transformPasted: (slice) =>
             new Slice(regeneratePastedIds(slice.content), slice.openStart, slice.openEnd),
