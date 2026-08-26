@@ -35,8 +35,15 @@
  *
  * Deliberately not here: `Enter` is untouched (it belongs to `splitScreenplayBlock`, and the
  * element menu will claim a second-Enter behaviour later), and there is no list, popup, or
- * ranking UI -- stage 3's optional accept-by-list layer consumes the same `suggest` output
- * independently, from `App.tsx`, and can be removed again without unpicking anything here.
+ * ranking UI -- stage 3's optional accept-by-list layer (`smartTypeList.tsx`) consumes the same
+ * `suggest` output independently, from `App.tsx`, and can be removed again without unpicking
+ * anything here.
+ *
+ * The one seam that layer needs is `overrideSmartTypeGhost`: a caller may say which completion is
+ * on offer, so that a writer who picks the third-ranked candidate from a list sees that candidate
+ * ghosted and gets that candidate from `Tab`. It is an offer, not a dependency -- this module
+ * never asks who called it, holds no list state, and with no caller at all resolves every ghost
+ * for itself exactly as it did before the seam existed. See that function for the full reasoning.
  */
 import { Extension } from '@tiptap/core';
 import { closeHistory } from '@tiptap/pm/history';
@@ -65,16 +72,22 @@ export type SmartTypeGhost = {
  * and lasts until the writer types again. `ghost` is `undefined` whenever there is nothing to
  * offer, which is the overwhelmingly common case -- most keystrokes are not in a scene heading or
  * a character cue at all.
+ *
+ * `override` is the one field this module does not decide for itself: a completion handed in from
+ * outside, which stands in for the resolved one until the caret or the document moves. See
+ * `overrideSmartTypeGhost`.
  */
 export type SmartTypeGhostState = {
   readonly decorations: DecorationSet;
   readonly dismissed: boolean;
   readonly ghost: SmartTypeGhost | undefined;
+  readonly override: SmartTypeGhost | undefined;
   readonly vocabulary: ScreenplayVocabulary;
 };
 
 type SmartTypeGhostMeta =
   | { readonly kind: 'dismiss' }
+  | { readonly kind: 'override'; readonly ghost: SmartTypeGhost | undefined }
   | { readonly kind: 'vocabulary'; readonly vocabulary: ScreenplayVocabulary };
 
 export const smartTypeGhostPluginKey = new PluginKey<SmartTypeGhostState>('smartTypeGhost');
@@ -260,6 +273,34 @@ export function dismissSmartTypeGhost(view: EditorView): boolean {
   return true;
 }
 
+/**
+ * Puts `ghost` on offer in place of the one this module would resolve for itself, or clears that
+ * standing instruction when passed `undefined`. The only concession this module makes to anything
+ * built on top of it, and deliberately the smallest one that works: an offer, not a policy. This
+ * module still decides everything else -- where a ghost may appear at all, how it is drawn, what
+ * accepting it does to the document -- and it neither knows nor asks what supplied the override or
+ * why. Nothing here calls it; with no caller, `override` is permanently `undefined` and every path
+ * below is the resolved ghost's, unchanged.
+ *
+ * It exists because of what `acceptSmartTypeGhost` is: the single writer to the document on this
+ * path. An accept-by-list layer that let a writer choose a completion other than the top-ranked one
+ * has exactly two ways to honour that choice -- insert the text itself, which makes a second
+ * mutating path and defeats the point of having one, or say which completion is on offer and let
+ * this module do the inserting. This is the second. It follows that the ghost the writer sees and
+ * the text `Tab` inserts cannot come apart: they are the same value, read from one field.
+ *
+ * The override is cleared by the first transaction that changes the document or moves the caret,
+ * which is what keeps it from outliving the position it was resolved for. A caller must therefore
+ * re-assert it, never assume it -- and a caller that goes away mid-edit leaves nothing behind.
+ *
+ * Like `dismissSmartTypeGhost`, the dispatched transaction carries no steps: no document change,
+ * nothing undoable, no save.
+ */
+export function overrideSmartTypeGhost(view: EditorView, ghost: SmartTypeGhost | undefined): void {
+  const meta: SmartTypeGhostMeta = { kind: 'override', ghost };
+  view.dispatch(view.state.tr.setMeta(smartTypeGhostPluginKey, meta));
+}
+
 function initialState(state: EditorState): SmartTypeGhostState {
   const vocabulary = deriveVocabularyForDoc(state.doc, SEED_VOCABULARY);
   const ghost = resolveSmartTypeGhost(state, vocabulary);
@@ -267,6 +308,7 @@ function initialState(state: EditorState): SmartTypeGhostState {
     decorations: ghost ? ghostDecorations(state.doc, ghost) : DecorationSet.empty,
     dismissed: false,
     ghost,
+    override: undefined,
     vocabulary,
   };
 }
@@ -308,6 +350,17 @@ export const SmartTypeGhostExtension = Extension.create({
             // rid of it.
             const dismissed =
               meta?.kind === 'dismiss' ? true : tr.docChanged ? false : previous.dismissed;
+            // An override describes one completion at one caret position, so it survives exactly
+            // as long as that position does: any transaction that edits the document or moves the
+            // caret drops it, and the resolved ghost takes over again on the same transaction.
+            // Without that, a stale override would keep drawing -- and `acceptSmartTypeGhost`
+            // would keep inserting -- a completion for text the writer had already moved past.
+            const override =
+              meta?.kind === 'override'
+                ? meta.ghost
+                : tr.docChanged || tr.selectionSet
+                  ? undefined
+                  : previous.override;
 
             // Most transactions -- pagination's own frame-coalesced decoration dispatch above
             // all, one per frame while typing -- change neither the document, the selection, nor
@@ -318,16 +371,20 @@ export const SmartTypeGhostExtension = Extension.create({
               !tr.docChanged &&
               !tr.selectionSet &&
               vocabulary === previous.vocabulary &&
-              dismissed === previous.dismissed
+              dismissed === previous.dismissed &&
+              override === previous.override
             ) {
               return previous;
             }
 
-            const ghost = dismissed ? undefined : resolveSmartTypeGhost(newState, vocabulary);
+            const ghost = dismissed
+              ? undefined
+              : (override ?? resolveSmartTypeGhost(newState, vocabulary));
             return {
               decorations: ghost ? ghostDecorations(newState.doc, ghost) : DecorationSet.empty,
               dismissed,
               ghost,
+              override,
               vocabulary,
             };
           },

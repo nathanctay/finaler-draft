@@ -6,7 +6,11 @@ import {
   screenplayExtensions,
   type ScreenplayElementType,
 } from './screenplayEditor.js';
-import { SmartTypeGhostExtension, smartTypeGhostPluginKey } from './smartTypeGhost.js';
+import {
+  SmartTypeGhostExtension,
+  overrideSmartTypeGhost,
+  smartTypeGhostPluginKey,
+} from './smartTypeGhost.js';
 
 /**
  * These tests drive the real editor -- real schema, real keymap, real decorations rendered into a
@@ -532,6 +536,87 @@ describe('the vocabulary', () => {
 
     expect(mount.querySelector('.smarttype-ghost')).toBeNull();
 
+    mount.remove();
+  });
+});
+
+/**
+ * The one seam this module offers anything built on top of it. Everything below is the ghost's own
+ * behaviour under an override, tested here rather than in `smartTypeList.test.tsx` because it is
+ * this module's contract: a caller may say which completion is on offer, and this module decides
+ * for how long that stays true.
+ */
+describe('an overridden ghost', () => {
+  it('draws what it was given, and inserts it on Tab', () => {
+    const { editor, mount } = buildEditor([...AUTHORED, { element: 'scene_heading', text: '' }]);
+
+    setSelection(editor, 4, 0);
+    type(editor, 'INT. AP');
+    expect(renderedGhost(mount)).toBe('ARTMENT');
+
+    overrideSmartTypeGhost(editor.view, {
+      insertText: 'APOTHECARY',
+      matchedLength: 2,
+      pos: editor.state.selection.from,
+      text: 'OTHECARY',
+    });
+
+    expect(renderedGhost(mount)).toBe('OTHECARY');
+    expect(pressKey(editor, 'Tab')).toBe(true);
+    expect(canonicalTexts(editor)[4]).toBe('INT. APOTHECARY');
+
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * An override describes one completion at one position. Both of the ways that position can stop
+   * being current -- the writer types, the writer moves the caret -- drop it, so a caller that
+   * stops re-asserting it leaves nothing stale behind for `Tab` to insert.
+   */
+  it('lasts only until the document or the caret moves', () => {
+    const { editor, mount } = buildEditor([...AUTHORED, { element: 'scene_heading', text: '' }]);
+
+    setSelection(editor, 4, 0);
+    type(editor, 'INT. AP');
+    const override = {
+      insertText: 'APOTHECARY',
+      matchedLength: 2,
+      pos: editor.state.selection.from,
+      text: 'OTHECARY',
+    };
+
+    overrideSmartTypeGhost(editor.view, override);
+    type(editor, 'A');
+    expect(renderedGhost(mount)).toBe('RTMENT');
+
+    overrideSmartTypeGhost(editor.view, { ...override, pos: editor.state.selection.from });
+    setSelection(editor, 4, 0);
+    setSelection(editor, 4, 'INT. APA'.length);
+    expect(renderedGhost(mount)).toBe('RTMENT');
+
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('is given back on request, leaving this module resolving its own again', () => {
+    const { editor, mount } = buildEditor([...AUTHORED, { element: 'scene_heading', text: '' }]);
+
+    setSelection(editor, 4, 0);
+    type(editor, 'INT. AP');
+    overrideSmartTypeGhost(editor.view, {
+      insertText: 'APOTHECARY',
+      matchedLength: 2,
+      pos: editor.state.selection.from,
+      text: 'OTHECARY',
+    });
+    expect(renderedGhost(mount)).toBe('OTHECARY');
+
+    overrideSmartTypeGhost(editor.view, undefined);
+
+    expect(renderedGhost(mount)).toBe('ARTMENT');
+
+    editor.destroy();
     mount.remove();
   });
 });

@@ -648,8 +648,14 @@ test.describe('page rendering: real editor, real DOM', () => {
    * The canonical screenplay is read back through the real API *while the ghost is on screen*,
    * which is the other half of the constraint: the ghost is a decoration, so what a save, a
    * reload, and every export see must be the writer's own 55 characters and nothing more.
+   *
+   * SmartType's optional candidate list (stage 3, `smartTypeList.tsx`) is then opened over the
+   * same caret and measured against the same baseline. It is a `position: fixed` panel rendered
+   * outside `.page` entirely, which ought to make it incapable of moving anything -- but that is
+   * a claim about a stylesheet, and this file exists because claims about stylesheets have been
+   * wrong here twice. It is measured, not assumed.
    */
-  test('an inline ghost completion moves no line, no page, and nothing in the canonical screenplay', async ({
+  test('a ghost completion, and the list opened over it, move no line, no page, and nothing in the canonical screenplay', async ({
     page,
   }) => {
     test.setTimeout(60_000);
@@ -800,6 +806,75 @@ test.describe('page rendering: real editor, real DOM', () => {
       HEADING,
     );
     expect(await ghost.evaluate((element) => element.textContent)).toBe(GHOST);
+
+    /**
+     * The optional candidate list (apps/web/src/smartTypeList.tsx), opened over the same caret.
+     *
+     * Its claim to being out of the manuscript is stronger than the ghost's -- it is a
+     * `position: fixed` panel rendered at the application root, so it is not in `.page`'s box tree
+     * at all -- but "it floats" is an argument, not a measurement, and floating boxes still take
+     * part in layout in the ways that matter here if anything about that is wrong: a panel that
+     * ended up in the flow of `.script-body`, or one that widened `.editor-region`'s scrollable
+     * area, would move lines exactly the way an in-flow ghost does. So the list is held to the
+     * identical standard: the whole page, measured with the list open, against the baseline
+     * measured with nothing showing at all.
+     *
+     * The panel is checked to be genuinely painted first. An equality against a baseline is most
+     * easily satisfied by a list that is not there, so its box is required to be real and to sit
+     * where a list belongs -- under the completion it offers alternatives to.
+     *
+     * REMOVING THE LIST: everything from here to the `// Escape dismisses it` comment below goes
+     * with it, along with the two mentions of the list in this test's name and doc comment. That
+     * layer is otherwise a self-contained delete (see `smartTypeList.tsx`'s own header for the full
+     * checklist); this test is the one place outside it that breaks if it is missed, and it breaks
+     * on a listbox that will never appear rather than on anything that names the layer.
+     */
+    await page.keyboard.press('ArrowDown');
+    const listbox = page.getByRole('listbox', { name: 'SmartType completions' });
+    await expect(listbox).toBeVisible();
+    // Two candidates, and their order is the vocabulary's: `LATE NIGHT` was authored in the scene
+    // above, `LATER` is one of `deriveVocabulary`'s seeded times and has never been authored.
+    await expect(listbox.getByRole('option')).toHaveText(['LATE NIGHT', 'LATER']);
+
+    const listBox = await listbox.boundingBox();
+    const ghostBox = await ghost.boundingBox();
+    if (!listBox || !ghostBox) {
+      throw new Error('The list or the ghost is not being painted.');
+    }
+    expect(listBox.width).toBeGreaterThan(0);
+    expect(listBox.height).toBeGreaterThan(0);
+    expect(listBox.y).toBeGreaterThanOrEqual(ghostBox.y + ghostBox.height);
+    expect(Math.abs(listBox.x - ghostBox.x)).toBeLessThan(2);
+
+    // The constraint, for the list this time.
+    expect(await measure()).toEqual(withoutGhost);
+
+    // The manuscript (`canvas`, from `createAndOpenScreenplay` above) is still a textbox --
+    // `combobox` has no `aria-multiline` -- paired with the popup for as long as the popup exists,
+    // and publishing the selected option rather than moving focus into the list, which would cost
+    // the writer their caret.
+    await expect(canvas).toHaveAttribute('aria-expanded', 'true');
+    await expect(canvas).toHaveAttribute('aria-controls', 'smarttype-list');
+    await expect(canvas).toHaveAttribute('aria-activedescendant', 'smarttype-option-0');
+
+    // Moving the selection moves the ghost with it, so the two never disagree about what Tab would
+    // insert -- and a longer ghost, drawn further past the right edge of a line that is already
+    // one character short of full, still moves nothing.
+    await page.keyboard.press('ArrowDown');
+    await expect(canvas).toHaveAttribute('aria-activedescendant', 'smarttype-option-1');
+    await expect(listbox.getByRole('option').nth(1)).toHaveAttribute('aria-selected', 'true');
+    expect(await ghost.evaluate((element) => element.textContent)).toBe('R');
+    expect(await measure()).toEqual(withoutGhost);
+
+    // Escape closes the list and leaves the ghost standing, back on its own top-ranked candidate.
+    // The second Escape, below, is the one that dismisses the ghost.
+    await page.keyboard.press('ArrowUp');
+    await page.keyboard.press('Escape');
+    await expect(listbox).toHaveCount(0);
+    await expect(canvas).not.toHaveAttribute('aria-expanded', 'true');
+    await expect(ghost).toBeAttached();
+    expect(await ghost.evaluate((element) => element.textContent)).toBe(GHOST);
+    expect(await measure()).toEqual(withoutGhost);
 
     // Escape dismisses it, and dismissing it moves nothing either.
     await page.keyboard.press('Escape');

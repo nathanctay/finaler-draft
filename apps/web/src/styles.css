@@ -1977,3 +1977,66 @@ select:focus-visible,
     animation: none;
   }
 }
+
+/*
+ * SmartType's optional candidate list (apps/web/src/smartTypeList.tsx). Removing that layer means
+ * deleting its file, its three lines in `App.tsx`, and this block; nothing above depends on it.
+ *
+ * `position: fixed` is what keeps it out of the manuscript. The ghost has to be an out-of-flow box
+ * inside a text block and pays for that with the careful `.smarttype-ghost` rule above; this panel
+ * is rendered at the application root instead, so it is not in `.page`'s box tree at all and there
+ * is no line it could wrap and no page break it could move. `page-rendering-persistence.spec.ts`
+ * measures the whole page with the list open against the same baseline it measures the ghost
+ * against, rather than taking that for granted.
+ *
+ * The vocabulary is `.dialog`'s and `.toast`'s, exactly: the same `--border-03` hairline, the same
+ * 4px radius, the same `--surface-01`, the same single restrained shadow. Those two are the
+ * product's only other floating panels and neither carries a `.dark` variant, so this does not
+ * invent one -- three floating panels that agree, rather than two that agree and one that does
+ * not. plan.md's design rules forbid "excessive floating shadows" and "generic component-library
+ * styling"; the selected row is a flat `--surface-05` fill, the same one `.overflow-menu-list`
+ * already uses for its own hover and focus state, with no pill, ring or gradient.
+ *
+ * Interface type, not manuscript type (plan.md: "Manuscript and interface are separate type
+ * systems"). The candidates are screenplay vocabulary but the panel is chrome, and setting it in
+ * Courier would read as text already on the page -- which is the one thing it is not.
+ *
+ * `z-index: 8` puts it above the panels (2) and `.overflow-menu-list` (5), which it can overlap
+ * near the edges of the canvas, and below `.dialog-overlay` (10) and `.toast` (20), which are
+ * modal or urgent and should never be covered by a completion popup. Nothing animates, so there is
+ * no motion for `prefers-reduced-motion` to reduce: a panel a writer opened with a keystroke
+ * should be under their eye on the next frame, not arriving.
+ *
+ * `top`/`left` are placeholders. `placeAtCaret` writes both before the first paint; they are here
+ * so the panel has a defined position in the frame it is created in rather than falling back to
+ * its static one.
+ */
+.smarttype-list {
+  position: fixed;
+  z-index: 8;
+  top: 0;
+  left: 0;
+  max-width: min(320px, calc(100vw - 16px));
+  min-width: 148px;
+  max-height: 216px;
+  overflow-y: auto;
+  margin: 0;
+  border: 1px solid var(--border-03);
+  border-radius: 4px;
+  background: var(--surface-01);
+  padding: 4px 0;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 25%);
+  list-style: none;
+  font-size: 12px;
+}
+
+.smarttype-list-option {
+  padding: 6px 14px;
+  color: var(--text-17);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.smarttype-list-option[aria-selected='true'] {
+  background: var(--surface-05);
+}

@@ -38,6 +38,7 @@ import {
 } from './paginationExtension.js';
 import { PAGE_GAP_IN, pageStackMinHeightIn } from './pagination.js';
 import { SmartTypeGhostExtension } from './smartTypeGhost.js';
+import { SmartTypeList, SmartTypeListExtension } from './smartTypeList.js';
 import { ApiError, api, type PersistedScreenplay } from './api.js';
 import { applyPageGeometryCssVariables } from './pageGeometryCss.js';
 import { TitlePageView } from './titlePageEditor.js';
@@ -452,6 +453,11 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
       // self-contained, so stage 3's optional accept-by-list layer attaches here beside it rather
       // than inside it, and either can be removed without touching the other.
       SmartTypeGhostExtension,
+      // SmartType's optional candidate list (smartTypeList.tsx), the layer the writer is still
+      // deciding whether to keep. It is deliberately removable: this line, the `<SmartTypeList>`
+      // below, the import above, its own file and its own block in styles.css are the whole of it,
+      // and the ghost above neither reads its state nor knows it exists.
+      SmartTypeListExtension,
     ],
     onCreate: ({ editor: editorInstance }) => {
       syncEditorState(editorInstance);
@@ -1223,6 +1229,11 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
           title="Export failed"
         />
       )}
+      {/* SmartType's candidate list (smartTypeList.tsx). Mounted here, at the application root and
+          outside `.page`, for the reason the toast above is: it is fixed-position chrome placed in
+          viewport coordinates. Rendering it inside the manuscript would put a floating panel in
+          the box tree of a page whose every line position is normative. */}
+      <SmartTypeList editor={editor} />
     </main>
   );
 }
