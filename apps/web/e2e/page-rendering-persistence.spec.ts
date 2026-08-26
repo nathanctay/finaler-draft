@@ -628,4 +628,289 @@ test.describe('page rendering: real editor, real DOM', () => {
       TOLERANCE_IN,
     );
   });
+
+  /**
+   * SmartType's inline ghost completion (apps/web/src/smartTypeGhost.ts) draws real text inside a
+   * real text block while the writer types. Text rendered inline in a text block changes where
+   * that line wraps, which shifts every line after it and decouples the DOM from the paginated
+   * model -- the defect class fixed twice already (PRs #16 and #19, and the scene-number widget
+   * test above exists for the same reason). A ghost is a fresh way to reintroduce it, so this
+   * measures rather than reasons: the same document, painted three times -- with no ghost, with a
+   * ghost showing, and after Escape dismisses it -- must produce byte-identical geometry.
+   *
+   * The fixture is built so that an in-flow ghost could not possibly go unnoticed. The heading is
+   * 55 of its 60 characters, and the completion on offer is six more -- so if the ghost took part
+   * in flow, the heading would wrap to a second line, every block below it would drop by one
+   * 16 px row, and the page break would move with them. What is compared is therefore not just
+   * block tops but the client rectangle of every rendered line of text in the document: same
+   * count, same position, same width, exactly.
+   *
+   * The canonical screenplay is read back through the real API *while the ghost is on screen*,
+   * which is the other half of the constraint: the ghost is a decoration, so what a save, a
+   * reload, and every export see must be the writer's own 55 characters and nothing more.
+   *
+   * SmartType's optional candidate list (stage 3, `smartTypeList.tsx`) is then opened over the
+   * same caret and measured against the same baseline. It is a `position: fixed` panel rendered
+   * outside `.page` entirely, which ought to make it incapable of moving anything -- but that is
+   * a claim about a stylesheet, and this file exists because claims about stylesheets have been
+   * wrong here twice. It is measured, not assumed.
+   */
+  test('a ghost completion, and the list opened over it, move no line, no page, and nothing in the canonical screenplay', async ({
+    page,
+  }) => {
+    test.setTimeout(60_000);
+    const { canvas } = await createAndOpenScreenplay(page);
+    await requireCourierPrime(page);
+    await canvas.click();
+
+    // An earlier scene authors the time of day `LATE NIGHT`, which is what the heading under test
+    // completes against. Two properties of this exact pair are what the fixture is for, and
+    // neither is incidental:
+    //
+    //  - 55 typed characters plus a six-character completion is 61, one past the 60 the scene
+    //    heading's line holds (scene headings share action's budget), so an in-flow ghost would
+    //    wrap the heading, add a line, and push every block and page break below it down a row;
+    //  - the completion begins with a space, so a ghost that resolved its width against the room
+    //    left on the line -- rather than staying on one line -- would break into a narrow column
+    //    at that space. That failure moves nothing, so only the ghost's own rectangle count can
+    //    see it, which is why it is asserted separately below.
+    const EARLIER_SCENE = 'EXT. PIER - LATE NIGHT';
+    const HEADING = 'INT. THE OLD HARBOUR ROAD BOARDING HOUSE KITCHEN - LATE';
+    const GHOST = ' NIGHT';
+    expect(HEADING.length + GHOST.length).toBeGreaterThan(ACTION_BUDGET);
+    expect(HEADING.length).toBeLessThanOrEqual(ACTION_BUDGET);
+
+    await page.getByLabel('Active screenplay element').selectOption({ label: 'Scene Heading' });
+    await page.keyboard.insertText(EARLIER_SCENE);
+    await page.keyboard.press('Enter');
+    await page.getByLabel('Active screenplay element').selectOption({ label: 'Scene Heading' });
+    await page.keyboard.insertText(HEADING);
+    // Two full-width action blocks after the heading: enough to break the page, so a heading that
+    // grew by one line would move a page frame as well as the blocks under it.
+    for (const filler of [linesOfLength(ACTION_BUDGET, 40), linesOfLength(ACTION_BUDGET, 40)]) {
+      await page.keyboard.press('Enter');
+      await page.keyboard.insertText(filler);
+    }
+
+    const saved = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'PUT' &&
+        response.url().includes('/api/screenplays/') &&
+        response.status() === 200,
+    );
+    await saved;
+    await page.waitForTimeout(400);
+
+    /**
+     * Everything the page paints, measured from `.page`'s own top so the editor's scroll position
+     * cancels out: every block's box, every rendered line of text (one client rectangle per line,
+     * taken over the block's own text node, which the ghost is never part of), every page break's
+     * spacer, the page's height, and the scroll width of the region around it -- an absolutely
+     * positioned ghost that overflowed its line would show up there and nowhere else.
+     */
+    const measure = () =>
+      page.evaluate(() => {
+        const pageEl = document.querySelector('.page');
+        const region = document.querySelector('.editor-region');
+        if (!pageEl || !region) {
+          throw new Error('Missing .page or .editor-region element.');
+        }
+        const pageRect = pageEl.getBoundingClientRect();
+        const blocks = Array.from(document.querySelectorAll('[data-screenplay-block]')).map(
+          (block) => {
+            const rect = block.getBoundingClientRect();
+            const textNode = block.firstChild;
+            const lines: number[][] = [];
+            if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+              const range = document.createRange();
+              range.setStart(textNode, 0);
+              range.setEnd(textNode, textNode.textContent?.length ?? 0);
+              for (const lineRect of Array.from(range.getClientRects())) {
+                lines.push([
+                  lineRect.left - pageRect.left,
+                  lineRect.top - pageRect.top,
+                  lineRect.width,
+                  lineRect.height,
+                ]);
+              }
+            }
+            return {
+              id: block.getAttribute('data-block-id'),
+              top: rect.top - pageRect.top,
+              height: rect.height,
+              lines,
+            };
+          },
+        );
+        return {
+          blocks,
+          spacerBottoms: Array.from(document.querySelectorAll('.page-break-spacer')).map(
+            (spacer) => spacer.getBoundingClientRect().bottom - pageRect.top,
+          ),
+          pageHeight: pageRect.height,
+          scrollWidth: region.scrollWidth,
+        };
+      });
+
+    const withoutGhost = await measure();
+    expect(await page.locator('.smarttype-ghost').count()).toBe(0);
+    expect(withoutGhost.spacerBottoms.length).toBeGreaterThanOrEqual(1);
+    // The heading really is one line, so a second one would be unmistakable.
+    expect(withoutGhost.blocks[1]?.lines.length).toBe(1);
+
+    // Put the caret at the end of the heading, which is the only place this completion is offered
+    // (the ghost never appears mid-text). Done through the selection API for the reason the test
+    // above documents: a click does not reliably move the caret off the end of the document.
+    await page.evaluate(() => {
+      const heading = document.querySelectorAll('[data-screenplay-block]')[1];
+      const textNode = heading?.firstChild;
+      if (!textNode) {
+        throw new Error('The scene heading has no text to place a caret in.');
+      }
+      const range = document.createRange();
+      range.setStart(textNode, textNode.textContent?.length ?? 0);
+      range.collapse(true);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    });
+
+    // Precondition: the ghost is genuinely on screen, showing the exact remainder -- read as raw
+    // `textContent` rather than through `toHaveText`, which normalises away the leading space this
+    // completion begins with. Without this the equality below would pass most convincingly when
+    // the feature did nothing at all.
+    const ghost = page.locator('.smarttype-ghost');
+    await expect(ghost).toBeAttached();
+    expect(await ghost.evaluate((element) => element.textContent)).toBe(GHOST);
+    // ...on exactly one line. See the fixture's own comment: a ghost that wrapped at its leading
+    // space would still move nothing, so this is the only assertion that can see it.
+    expect(await ghost.evaluate((element) => element.getClientRects().length)).toBe(1);
+    const withGhost = await measure();
+
+    // The constraint: a ghost showing changes nothing about the painted page.
+    expect(withGhost).toEqual(withoutGhost);
+
+    // ...and nothing about the canonical screenplay either -- read back through the real API,
+    // with the ghost still on screen.
+    const screenplayId = /\/screenplays\/([0-9a-f-]+)/u.exec(page.url())?.[1];
+    if (!screenplayId) {
+      throw new Error(`Could not find a screenplay id in ${page.url()}.`);
+    }
+    const persisted = await page.request.get(`/api/screenplays/${screenplayId}`);
+    expect(persisted.ok()).toBe(true);
+    const { screenplay } = (await persisted.json()) as {
+      screenplay: { blocks: ScreenplayBlock[] };
+    };
+    const persistedHeading = screenplay.blocks[1];
+    expect(persistedHeading && 'text' in persistedHeading ? persistedHeading.text : undefined).toBe(
+      HEADING,
+    );
+    expect(await ghost.evaluate((element) => element.textContent)).toBe(GHOST);
+
+    /**
+     * The optional candidate list (apps/web/src/smartTypeList.tsx), opened over the same caret.
+     *
+     * Its claim to being out of the manuscript is stronger than the ghost's -- it is a
+     * `position: fixed` panel rendered at the application root, so it is not in `.page`'s box tree
+     * at all -- but "it floats" is an argument, not a measurement, and floating boxes still take
+     * part in layout in the ways that matter here if anything about that is wrong: a panel that
+     * ended up in the flow of `.script-body`, or one that widened `.editor-region`'s scrollable
+     * area, would move lines exactly the way an in-flow ghost does. So the list is held to the
+     * identical standard: the whole page, measured with the list open, against the baseline
+     * measured with nothing showing at all.
+     *
+     * The panel is checked to be genuinely painted first. An equality against a baseline is most
+     * easily satisfied by a list that is not there, so its box is required to be real and to sit
+     * where a list belongs -- under the completion it offers alternatives to.
+     *
+     * REMOVING THE LIST: everything from here to the `// Escape dismisses it` comment below goes
+     * with it, along with the two mentions of the list in this test's name and doc comment. That
+     * layer is otherwise a self-contained delete (see `smartTypeList.tsx`'s own header for the full
+     * checklist); this test is the one place outside it that breaks if it is missed, and it breaks
+     * on a listbox that will never appear rather than on anything that names the layer.
+     */
+    await page.keyboard.press('ArrowDown');
+    const listbox = page.getByRole('listbox', { name: 'SmartType completions' });
+    await expect(listbox).toBeVisible();
+    // Two candidates, and their order is the vocabulary's: `LATE NIGHT` was authored in the scene
+    // above, `LATER` is one of `deriveVocabulary`'s seeded times and has never been authored.
+    await expect(listbox.getByRole('option')).toHaveText(['LATE NIGHT', 'LATER']);
+
+    const listBox = await listbox.boundingBox();
+    const ghostBox = await ghost.boundingBox();
+    if (!listBox || !ghostBox) {
+      throw new Error('The list or the ghost is not being painted.');
+    }
+    expect(listBox.width).toBeGreaterThan(0);
+    expect(listBox.height).toBeGreaterThan(0);
+    expect(listBox.y).toBeGreaterThanOrEqual(ghostBox.y + ghostBox.height);
+    expect(Math.abs(listBox.x - ghostBox.x)).toBeLessThan(2);
+
+    // The constraint, for the list this time.
+    expect(await measure()).toEqual(withoutGhost);
+
+    // The manuscript (`canvas`, from `createAndOpenScreenplay` above) is still a textbox --
+    // `combobox` has no `aria-multiline` -- paired with the popup for as long as the popup exists,
+    // and publishing the selected option rather than moving focus into the list, which would cost
+    // the writer their caret.
+    await expect(canvas).toHaveAttribute('aria-expanded', 'true');
+    await expect(canvas).toHaveAttribute('aria-controls', 'smarttype-list');
+    await expect(canvas).toHaveAttribute('aria-activedescendant', 'smarttype-option-0');
+
+    // Moving the selection moves the ghost with it, so the two never disagree about what Tab would
+    // insert -- and a longer ghost, drawn further past the right edge of a line that is already
+    // one character short of full, still moves nothing.
+    await page.keyboard.press('ArrowDown');
+    await expect(canvas).toHaveAttribute('aria-activedescendant', 'smarttype-option-1');
+    await expect(listbox.getByRole('option').nth(1)).toHaveAttribute('aria-selected', 'true');
+    expect(await ghost.evaluate((element) => element.textContent)).toBe('R');
+    expect(await measure()).toEqual(withoutGhost);
+
+    // Escape closes the list and leaves the ghost standing, back on its own top-ranked candidate.
+    // The second Escape, below, is the one that dismisses the ghost.
+    await page.keyboard.press('ArrowUp');
+    await page.keyboard.press('Escape');
+    await expect(listbox).toHaveCount(0);
+    await expect(canvas).not.toHaveAttribute('aria-expanded', 'true');
+    await expect(ghost).toBeAttached();
+    expect(await ghost.evaluate((element) => element.textContent)).toBe(GHOST);
+    expect(await measure()).toEqual(withoutGhost);
+
+    // Escape dismisses it, and dismissing it moves nothing either.
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.smarttype-ghost')).toHaveCount(0);
+    expect(await measure()).toEqual(withoutGhost);
+
+    // The other half of the contract, through a real keystroke rather than a dispatched keymap
+    // call: typing again brings the completion back (Escape dismisses until the writer types, not
+    // for good), Tab accepts it into the document for real, and the accepted text -- not the ghost
+    // -- is what the API is holding afterwards.
+    const accepted = `${HEADING}${GHOST}`;
+    await page.keyboard.type(' ');
+    await expect(ghost).toHaveText(GHOST.slice(1));
+    const acceptSaved = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'PUT' &&
+        response.url().includes('/api/screenplays/') &&
+        response.status() === 200,
+    );
+    await page.keyboard.press('Tab');
+    await expect(page.locator('.smarttype-ghost')).toHaveCount(0);
+    expect(
+      await page.evaluate(
+        () => document.querySelectorAll('[data-screenplay-block]')[1]?.textContent ?? '',
+      ),
+    ).toBe(accepted);
+
+    await acceptSaved;
+    const afterAccept = await page.request.get(`/api/screenplays/${screenplayId}`);
+    expect(afterAccept.ok()).toBe(true);
+    const { screenplay: acceptedScreenplay } = (await afterAccept.json()) as {
+      screenplay: { blocks: ScreenplayBlock[] };
+    };
+    const acceptedHeading = acceptedScreenplay.blocks[1];
+    expect(acceptedHeading && 'text' in acceptedHeading ? acceptedHeading.text : undefined).toBe(
+      accepted,
+    );
+  });
 });
