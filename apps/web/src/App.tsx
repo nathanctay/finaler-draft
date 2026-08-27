@@ -22,6 +22,7 @@ import type { Editor } from '@tiptap/core';
 import { EditorContent, useEditor } from '@tiptap/react';
 import {
   convertActiveScreenplayBlock,
+  displayElement,
   findScreenplayBlockPosition,
   getActiveScreenplayBlock,
   editorContentFromScreenplay,
@@ -39,6 +40,7 @@ import {
 import { PAGE_GAP_IN, pageStackMinHeightIn } from './pagination.js';
 import { SmartTypeGhostExtension } from './smartTypeGhost.js';
 import { SmartTypeList, SmartTypeListExtension } from './smartTypeList.js';
+import { ElementMenu, ElementMenuExtension } from './elementMenu.js';
 import { ApiError, api, type PersistedScreenplay } from './api.js';
 import { applyPageGeometryCssVariables } from './pageGeometryCss.js';
 import { TitlePageView } from './titlePageEditor.js';
@@ -79,13 +81,6 @@ function ToolButton({
       {children}
     </button>
   );
-}
-
-function displayElement(element: ScreenplayElementType): string {
-  return element
-    .split('_')
-    .map((word) => `${word[0]?.toUpperCase()}${word.slice(1)}`)
-    .join(' ');
 }
 
 function wordsInProjection(projection: LocalScreenplayProjection): number {
@@ -458,6 +453,11 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
       // below, the import above, its own file and its own block in styles.css are the whole of it,
       // and the ghost above neither reads its state nor knows it exists.
       SmartTypeListExtension,
+      // The element menu (elementMenu.tsx): what Enter does at an empty block. Mounted here for
+      // the same reason the two above are -- a layer over the screenplay editor, not part of what
+      // a block is -- and, like them, carrying its own explicit priority, so this line's position
+      // in this array decides nothing about which layer sees Enter first.
+      ElementMenuExtension,
     ],
     onCreate: ({ editor: editorInstance }) => {
       syncEditorState(editorInstance);
@@ -1241,6 +1241,11 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
           viewport coordinates. Rendering it inside the manuscript would put a floating panel in
           the box tree of a page whose every line position is normative. */}
       <SmartTypeList editor={editor} />
+      {/* The element menu (elementMenu.tsx). At the application root and outside `.page` for the
+          same reason as the list above: it is fixed-position chrome placed in viewport
+          coordinates, and a floating panel inside a page whose every line position is normative
+          would be a way to move one. */}
+      <ElementMenu editor={editor} />
     </main>
   );
 }

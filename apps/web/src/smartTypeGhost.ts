@@ -33,8 +33,8 @@
  *     old DOM is reused verbatim. A key that named only the position would leave the first
  *     ghost's text on screen for the rest of the word. See `ghostDecorations`.
  *
- * Deliberately not here: `Enter` is untouched (it belongs to `splitScreenplayBlock`, and the
- * element menu will claim a second-Enter behaviour later), and there is no list, popup, or
+ * Deliberately not here: `Enter` is untouched (it belongs to `splitScreenplayBlock`, and to the
+ * element menu's second-Enter at an empty block -- `elementMenu.tsx`), and there is no list, popup, or
  * ranking UI -- stage 3's optional accept-by-list layer (`smartTypeList.tsx`) consumes the same
  * `suggest` output independently, from `App.tsx`, and can be removed again without unpicking
  * anything here.
@@ -341,8 +341,11 @@ export const SmartTypeGhostExtension = Extension.create({
     return {
       /**
        * Accept. `Enter` is deliberately not bound here, in any form: it belongs to
-       * `splitScreenplayBlock` and the element menu will claim a second-Enter behaviour later, so
-       * a completion that could be accepted with it would be a collision waiting to happen.
+       * `splitScreenplayBlock` and to the element menu's second-Enter at an empty block
+       * (`elementMenu.tsx`), so a completion that could be accepted with it would be a collision.
+       * That menu opens on an empty scene heading, which is exactly where this module still offers
+       * a ghost -- it dismisses the ghost through `dismissSmartTypeGhost` as it opens, so the two
+       * are never on screen together and `Tab` never means two things at one caret.
        */
       Tab: () => acceptSmartTypeGhost(this.editor.view),
       Escape: () => dismissSmartTypeGhost(this.editor.view),

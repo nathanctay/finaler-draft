@@ -161,6 +161,73 @@ function expectedTopIn(pageIndex: number, lineIndex: number): number {
   return pageIndex * PAGE_PITCH_IN + MARGIN_TOP_IN + lineIndex / LINES_PER_INCH;
 }
 
+/**
+ * Everything the page paints, measured from `.page`'s own top so the editor's scroll position
+ * cancels out: every block's box, every rendered line of text (one client rectangle per line,
+ * taken over the block's own text node, which no overlay is ever part of), every page break's
+ * spacer, the page's height, the manuscript's own content box, and the scrolled extent of the
+ * region around it -- an absolutely positioned overlay that overflowed its line would show up in
+ * those last three and nowhere else.
+ *
+ * `scriptBodyHeight` and the region's two scroll extents are not decoration. Block tops alone
+ * cannot see an overlay that renders *after* the last block: it displaces nothing above it, so
+ * every top, every line rectangle and every spacer is unchanged, and `.page`'s own height is fixed
+ * by the paper size. `.script-body` is content-sized (see App.tsx), so it is the one box that grows
+ * -- and that omission was real, not hypothetical: an element menu moved into `.script-body` and
+ * given `position: static` passed this whole test before these three were added.
+ *
+ * Shared by the two overlay tests below (SmartType's ghost and list; the element menu) so that
+ * both are held to one definition of "the page did not move" rather than two that could drift.
+ */
+function measurePage(page: Page) {
+  return page.evaluate(() => {
+    const pageEl = document.querySelector('.page');
+    const region = document.querySelector('.editor-region');
+    if (!pageEl || !region) {
+      throw new Error('Missing .page or .editor-region element.');
+    }
+    const pageRect = pageEl.getBoundingClientRect();
+    const blocks = Array.from(document.querySelectorAll('[data-screenplay-block]')).map((block) => {
+      const rect = block.getBoundingClientRect();
+      const textNode = block.firstChild;
+      const lines: number[][] = [];
+      if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+        const range = document.createRange();
+        range.setStart(textNode, 0);
+        range.setEnd(textNode, textNode.textContent?.length ?? 0);
+        for (const lineRect of Array.from(range.getClientRects())) {
+          lines.push([
+            lineRect.left - pageRect.left,
+            lineRect.top - pageRect.top,
+            lineRect.width,
+            lineRect.height,
+          ]);
+        }
+      }
+      return {
+        id: block.getAttribute('data-block-id'),
+        top: rect.top - pageRect.top,
+        height: rect.height,
+        lines,
+      };
+    });
+    const scriptBody = pageEl.querySelector('.script-body');
+    if (!scriptBody) {
+      throw new Error('Missing .script-body element.');
+    }
+    return {
+      blocks,
+      spacerBottoms: Array.from(document.querySelectorAll('.page-break-spacer')).map(
+        (spacer) => spacer.getBoundingClientRect().bottom - pageRect.top,
+      ),
+      pageHeight: pageRect.height,
+      scriptBodyHeight: scriptBody.getBoundingClientRect().height,
+      scrollHeight: region.scrollHeight,
+      scrollWidth: region.scrollWidth,
+    };
+  });
+}
+
 test.describe('page rendering: real editor, real DOM', () => {
   test('every block lands where the model predicts, every break anchors as the model says, and the last partial page still paints in full', async ({
     page,
@@ -701,56 +768,7 @@ test.describe('page rendering: real editor, real DOM', () => {
     await saved;
     await page.waitForTimeout(400);
 
-    /**
-     * Everything the page paints, measured from `.page`'s own top so the editor's scroll position
-     * cancels out: every block's box, every rendered line of text (one client rectangle per line,
-     * taken over the block's own text node, which the ghost is never part of), every page break's
-     * spacer, the page's height, and the scroll width of the region around it -- an absolutely
-     * positioned ghost that overflowed its line would show up there and nowhere else.
-     */
-    const measure = () =>
-      page.evaluate(() => {
-        const pageEl = document.querySelector('.page');
-        const region = document.querySelector('.editor-region');
-        if (!pageEl || !region) {
-          throw new Error('Missing .page or .editor-region element.');
-        }
-        const pageRect = pageEl.getBoundingClientRect();
-        const blocks = Array.from(document.querySelectorAll('[data-screenplay-block]')).map(
-          (block) => {
-            const rect = block.getBoundingClientRect();
-            const textNode = block.firstChild;
-            const lines: number[][] = [];
-            if (textNode && textNode.nodeType === Node.TEXT_NODE) {
-              const range = document.createRange();
-              range.setStart(textNode, 0);
-              range.setEnd(textNode, textNode.textContent?.length ?? 0);
-              for (const lineRect of Array.from(range.getClientRects())) {
-                lines.push([
-                  lineRect.left - pageRect.left,
-                  lineRect.top - pageRect.top,
-                  lineRect.width,
-                  lineRect.height,
-                ]);
-              }
-            }
-            return {
-              id: block.getAttribute('data-block-id'),
-              top: rect.top - pageRect.top,
-              height: rect.height,
-              lines,
-            };
-          },
-        );
-        return {
-          blocks,
-          spacerBottoms: Array.from(document.querySelectorAll('.page-break-spacer')).map(
-            (spacer) => spacer.getBoundingClientRect().bottom - pageRect.top,
-          ),
-          pageHeight: pageRect.height,
-          scrollWidth: region.scrollWidth,
-        };
-      });
+    const measure = () => measurePage(page);
 
     const withoutGhost = await measure();
     expect(await page.locator('.smarttype-ghost').count()).toBe(0);
@@ -912,5 +930,188 @@ test.describe('page rendering: real editor, real DOM', () => {
     expect(acceptedHeading && 'text' in acceptedHeading ? acceptedHeading.text : undefined).toBe(
       accepted,
     );
+  });
+
+  /**
+   * The element menu (apps/web/src/elementMenu.tsx): the panel a second Enter opens at an empty
+   * block, offering the element types instead of stacking a further empty one.
+   *
+   * It is a `position: fixed` panel rendered at the application root, so it ought to be incapable
+   * of moving anything on the page -- but "it floats" is a claim about a stylesheet, and this file
+   * exists because claims about stylesheets have been wrong here three times (PRs #16, #19, #20).
+   * A panel that ended up in the flow of `.script-body`, or one that widened `.editor-region`'s
+   * scrollable area, would move lines exactly the way in-flow text does. So it is measured against
+   * the identical document, in the identical browser, painted moments earlier -- the same standard
+   * the ghost and the candidate list are held to above.
+   *
+   * The fixture spans a page break deliberately: a panel that added so much as one line to the
+   * flow would move a page frame as well as the blocks under it, and only a document long enough
+   * to break can show that.
+   *
+   * The other half of the contract is what reaches the document. Opening, moving the highlight and
+   * dismissing must write nothing at all -- the empty block is still there afterwards, still empty,
+   * still the element the first Enter gave it -- and choosing a type must write the type change and
+   * nothing else, read back through the real API rather than off the screen.
+   */
+  test('an open element menu moves no line and no page, and only an explicit choice reaches the document', async ({
+    page,
+  }) => {
+    test.setTimeout(60_000);
+    const { canvas } = await createAndOpenScreenplay(page);
+    await requireCourierPrime(page);
+    await canvas.click();
+
+    await page.getByLabel('Active screenplay element').selectOption({ label: 'Scene Heading' });
+    await page.keyboard.insertText('INT. HARBOUR OFFICE - NIGHT');
+    for (const filler of [linesOfLength(ACTION_BUDGET, 55), linesOfLength(ACTION_BUDGET, 20)]) {
+      await page.keyboard.press('Enter');
+      await page.keyboard.insertText(filler);
+    }
+
+    const fixtureSaved = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'PUT' &&
+        response.url().includes('/api/screenplays/') &&
+        response.status() === 200,
+    );
+    await fixtureSaved;
+    await page.waitForTimeout(400);
+
+    // The first Enter, at the end of a block with text in it: the writer starting the next
+    // element, which is untouched by this feature and still creates the empty block.
+    const blockCount = () => page.locator('[data-screenplay-block]').count();
+    const fixtureBlocks = await blockCount();
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(400);
+    expect(await blockCount()).toBe(fixtureBlocks + 1);
+
+    // The baseline: this exact document, with the empty block on it and no panel showing.
+    const withoutMenu = await measurePage(page);
+    expect(withoutMenu.spacerBottoms.length).toBeGreaterThanOrEqual(1);
+    expect(await page.getByRole('listbox', { name: 'Element types' }).count()).toBe(0);
+
+    // The second Enter: the menu, instead of a second empty block.
+    await page.keyboard.press('Enter');
+    const elementMenu = page.getByRole('listbox', { name: 'Element types' });
+    await expect(elementMenu).toBeVisible();
+    expect(await blockCount()).toBe(fixtureBlocks + 1);
+    await expect(elementMenu.getByRole('option')).toHaveText([
+      'Scene HeadingS',
+      'ActionA',
+      'CharacterC',
+      'DialogueD',
+      'ParentheticalP',
+      'TransitionT',
+      'ShotH',
+    ]);
+
+    // The panel is genuinely painted, and against the block it belongs to. An equality against a
+    // baseline is most easily satisfied by a panel that is not there at all.
+    //
+    // Adjacent on one side rather than specifically below: `placeAtCaret` (floatingPanel.ts) puts
+    // the panel below the caret when it fits there and flips above when it does not, and this
+    // fixture reaches the flip -- the empty block is the last line of a document long enough to
+    // break a page, so it sits near the bottom of the window with no room for seven rows beneath
+    // it. What must hold either way is that the panel is beside the line it belongs to and not
+    // over it: the gap on whichever side it took is the 4px `CARET_GAP_PX`, and never negative.
+    const menuBox = await elementMenu.boundingBox();
+    const emptyBlockBox = await page.locator('[data-screenplay-block]').last().boundingBox();
+    if (!menuBox || !emptyBlockBox) {
+      throw new Error('The element menu or the empty block is not being painted.');
+    }
+    expect(menuBox.width).toBeGreaterThan(0);
+    expect(menuBox.height).toBeGreaterThan(0);
+    const gapBelow = menuBox.y - (emptyBlockBox.y + emptyBlockBox.height);
+    const gapAbove = emptyBlockBox.y - (menuBox.y + menuBox.height);
+    expect(Math.max(gapBelow, gapAbove)).toBeGreaterThanOrEqual(0);
+    expect(Math.max(gapBelow, gapAbove)).toBeLessThanOrEqual(4);
+    expect(Math.abs(menuBox.x - emptyBlockBox.x)).toBeLessThan(2);
+
+    // The constraint.
+    expect(await measurePage(page)).toEqual(withoutMenu);
+
+    // The manuscript is still a textbox -- `combobox` has no `aria-multiline` -- paired with the
+    // popup for as long as the popup exists, and publishing the highlighted row rather than moving
+    // focus into it, which would cost the writer the caret the menu is about. The row that opens
+    // highlighted is the block's own current element (`action`, index 1), which is how the menu
+    // tells the writer what this blank line currently is.
+    await expect(canvas).toHaveAttribute('aria-expanded', 'true');
+    await expect(canvas).toHaveAttribute('aria-controls', 'element-menu');
+    await expect(canvas).toHaveAttribute('aria-activedescendant', 'element-menu-option-1');
+
+    await page.keyboard.press('ArrowDown');
+    await expect(canvas).toHaveAttribute('aria-activedescendant', 'element-menu-option-2');
+    await expect(elementMenu.getByRole('option').nth(2)).toHaveAttribute('aria-selected', 'true');
+    expect(await measurePage(page)).toEqual(withoutMenu);
+
+    // Dismissing keeps the empty block, with the type the first Enter gave it -- Enter then Escape
+    // leaves the block standing rather than silently undoing it -- and moves nothing either.
+    await page.keyboard.press('Escape');
+    await expect(elementMenu).toHaveCount(0);
+    await expect(canvas).not.toHaveAttribute('aria-expanded', 'true');
+    expect(await blockCount()).toBe(fixtureBlocks + 1);
+    await expect(page.locator('[data-screenplay-block]').last()).toHaveAttribute(
+      'data-screenplay-element',
+      'action',
+    );
+    expect(await measurePage(page)).toEqual(withoutMenu);
+
+    /*
+     * Ghost suppression, which only a real browser with the real vocabulary can show. Choosing
+     * Scene Heading leaves the block empty, and an empty scene heading is exactly where SmartType
+     * still offers a ghost (`INT.`) -- deliberately, so that Enter stays free for this menu. With
+     * the menu open, that ghost must be gone: a greyed completion offering Tab behind a panel
+     * offering element types is two affordances competing over one caret.
+     */
+    const chosen = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'PUT' &&
+        response.url().includes('/api/screenplays/') &&
+        response.status() === 200,
+    );
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('s');
+    await expect(elementMenu).toHaveCount(0);
+    await expect(page.locator('[data-screenplay-block]').last()).toHaveAttribute(
+      'data-screenplay-element',
+      'scene_heading',
+    );
+    await expect(page.locator('.smarttype-ghost')).toHaveCount(1);
+    await page.waitForTimeout(400);
+
+    // A fresh baseline: the block is a scene heading now, which indents differently, and it is
+    // showing a ghost -- itself proved layout-neutral by the test above.
+    const withGhostOnly = await measurePage(page);
+
+    // Behaviour 4: the block is still empty, so Enter offers the types again rather than creating
+    // a further empty block. And the ghost goes while the menu is up.
+    await page.keyboard.press('Enter');
+    await expect(elementMenu).toBeVisible();
+    await expect(page.locator('.smarttype-ghost')).toHaveCount(0);
+    expect(await blockCount()).toBe(fixtureBlocks + 1);
+    await expect(canvas).toHaveAttribute('aria-activedescendant', 'element-menu-option-0');
+    expect(await measurePage(page)).toEqual(withGhostOnly);
+
+    await page.keyboard.press('Enter');
+    await expect(elementMenu).toHaveCount(0);
+    expect(await measurePage(page)).toEqual(withGhostOnly);
+
+    // What actually reached the canonical screenplay across all of that: one more block than the
+    // fixture had, empty, carrying the one type that was explicitly chosen. No text, and no second
+    // empty block from any of the six Enters above.
+    await chosen;
+    const screenplayId = /\/screenplays\/([0-9a-f-]+)/u.exec(page.url())?.[1];
+    if (!screenplayId) {
+      throw new Error(`Could not find a screenplay id in ${page.url()}.`);
+    }
+    const persisted = await page.request.get(`/api/screenplays/${screenplayId}`);
+    expect(persisted.ok()).toBe(true);
+    const { screenplay } = (await persisted.json()) as {
+      screenplay: { blocks: ScreenplayBlock[] };
+    };
+    expect(screenplay.blocks).toHaveLength(fixtureBlocks + 1);
+    const lastBlock = screenplay.blocks[screenplay.blocks.length - 1];
+    expect(lastBlock?.type).toBe('scene_heading');
+    expect(lastBlock && 'text' in lastBlock ? lastBlock.text : undefined).toBe('');
   });
 });
