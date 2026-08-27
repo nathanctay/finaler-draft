@@ -216,20 +216,26 @@ function closeMenu(view: EditorView): void {
 }
 
 /**
- * `Enter`: open the menu at an empty block, close it if it is already open, and decline everywhere
- * else so `splitScreenplayBlock` keeps `Enter` for itself.
+ * `Enter`: open the menu at an empty block, choose the highlighted row if it is already open, and
+ * decline everywhere else so `splitScreenplayBlock` keeps `Enter` for itself.
  *
- * Closing on a second `Enter` rather than accepting the highlighted row is plan.md's own wording
- * ("Pressing Enter again with the menu open closes it; the writer is never trapped in it") and is
- * what makes `Enter` `Enter` safe to press blind: two presses on an empty block leave the writer
- * exactly where they started, with one block, ready to type. `Tab` is the accept -- see
- * `chooseSelected`.
+ * Choosing rather than closing is what a panel with a highlighted row means everywhere else,
+ * including `smartTypeList.tsx`'s own `Enter`, and pressing `Tab` instead is the surprise. It reads
+ * narrower than plan.md's wording ("Pressing Enter again with the menu open closes it; the writer
+ * is never trapped in it"), and it is not: the menu opens with the block's CURRENT element
+ * highlighted, so `Enter` `Enter` chooses the element the block already has. That converts nothing
+ * -- `chooseSelected` writes no step for a block that is already the chosen type -- and closes the
+ * menu, which is the same two-presses-and-you-are-back-where-you-started behaviour that sentence
+ * describes. `Escape` remains an unconditional dismiss, so "never trapped" holds outright rather
+ * than by argument.
+ *
+ * The behaviours only diverge once the writer has moved the highlight, which is exactly when
+ * choosing is what they meant. `Tab` still chooses too.
  */
 function toggleOnEnter(editor: Editor): boolean {
   const menu = readElementMenu(editor.state);
   if (menu.open) {
-    closeMenu(editor.view);
-    return true;
+    return chooseSelected(editor);
   }
   if (!menu.block) {
     return false;

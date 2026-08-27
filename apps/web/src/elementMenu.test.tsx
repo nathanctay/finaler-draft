@@ -332,6 +332,24 @@ describe('choosing a type', () => {
     expect(editor.state.doc.child(AUTHORED.length).attrs.element).toBe('shot');
   });
 
+  /*
+   * The case that distinguishes choosing from closing, and the reason "closes on a second Enter"
+   * above could not catch this change: that test never moves the highlight, so it chooses the type
+   * the block already has -- which writes nothing and closes -- and reads identically whether Enter
+   * chooses or merely dismisses. Only a moved highlight tells them apart.
+   */
+  it('accepts the highlighted row on Enter once the writer has moved the highlight', async () => {
+    const editor = await openEmptyBlock('transition');
+
+    press(editor, 'Enter');
+    press(editor, 'ArrowDown');
+    expect(selectedOption()).toBe('ShotH');
+    expect(press(editor, 'Enter')).toBe(true);
+
+    expect(menu()).toBeNull();
+    expect(editor.state.doc.child(AUTHORED.length).attrs.element).toBe('shot');
+  });
+
   it('accepts a row clicked with the mouse, without letting the click take the caret', async () => {
     const editor = await openEmptyBlock('action');
     press(editor, 'Enter');
