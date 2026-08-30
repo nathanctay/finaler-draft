@@ -108,3 +108,51 @@ export function createLoggingMailPort(options: LoggingMailPortOptions = {}): Mai
     },
   };
 }
+
+export interface SelectMailPortOptions {
+  /** Mirrors `server.ts`'s `FINALER_SYSTEM_TEST` flag. */
+  readonly systemTestMode: boolean;
+  readonly resendApiKey: string | undefined;
+  readonly mailFromAddress: string | undefined;
+  /**
+   * Forwarded to `createLoggingMailPort` untouched whenever the logging port is selected --
+   * server.ts's system-test mailbox hook. Left `undefined` outside system-test mode, same as
+   * before this function existed.
+   */
+  readonly onSend?: ((message: MailMessage) => void) | undefined;
+}
+
+/**
+ * Chooses between the two `MailPort` implementations. This is the entire safety property the
+ * comment in `server.ts` used to assert without enforcing: in system-test mode the logging port
+ * is selected regardless of whether Resend credentials are present, so a real `RESEND_API_KEY`
+ * sitting in a developer's environment or `.env` -- which legitimately belongs there for normal
+ * local runs -- can never reach a live send during a system-test process. Credentials are
+ * ignored, not rejected: refusing to start would break the owner's own local runs, since his
+ * `.env` carries a real key.
+ *
+ * The suppression is deliberately not silent. When system-test mode discards otherwise-usable
+ * credentials, this logs one structured line naming the variables that were ignored -- never
+ * their values -- so the safety property is observable instead of only asserted in a comment.
+ */
+export function selectMailPort(options: SelectMailPortOptions): MailPort {
+  const { resendApiKey, mailFromAddress, systemTestMode, onSend } = options;
+
+  if (systemTestMode) {
+    if (resendApiKey && mailFromAddress) {
+      console.log(
+        JSON.stringify({
+          event: 'mail_credentials_suppressed_system_test_mode',
+          variables: ['RESEND_API_KEY', 'MAIL_FROM_ADDRESS'],
+        }),
+      );
+    }
+    return createLoggingMailPort({ onSend });
+  }
+
+  if (resendApiKey && mailFromAddress) {
+    return createResendMailPort({ apiKey: resendApiKey, from: mailFromAddress });
+  }
+
+  return createLoggingMailPort({ onSend });
+}
