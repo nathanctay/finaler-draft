@@ -5,6 +5,7 @@ import {
   LINES_PER_INCH,
   MARGIN_TOP_IN,
   PAGE_HEIGHT_IN,
+  PAGE_WIDTH_IN,
 } from '@finaler-draft/screenplay/pageFormat';
 import { PAGE_GAP_IN, pageStackMinHeightIn } from '../src/pagination.js';
 import { requireCourierPrime } from './requireCourierPrime.js';
@@ -1195,5 +1196,200 @@ test.describe('page rendering: real editor, real DOM', () => {
     const crossingDelta = afterCrossing - afterControl;
 
     expect(Math.abs(crossingDelta - controlDelta)).toBeLessThanOrEqual(4);
+  });
+
+  /**
+   * The jump scroll itself (`maybeJumpScrollCaretIntoView` in paginationExtension.ts), proved
+   * directly against the owner's own description of the behaviour he wants -- not merely "it
+   * scrolled at some point", which a continuous-margin implementation (the abandoned
+   * `EditorProps.scrollMargin` approach, see that function's own comment) would also satisfy:
+   *
+   * > if I'm at the bottom of my scroll, I hit enter to make a new line, and now I can see 5
+   * > lines worth. I type stuff and hit enter again, now there are only 4 lines because I used 1
+   * > ... type stuff on this last line, hit enter, which should now be at the bottom of the
+   * > screen and scroll 5 new lines worth
+   *
+   * This advances one manuscript line at a time by hard-wrapping a single continuous action
+   * block (`linesOfLength(ACTION_BUDGET, _)`, the same technique the "typing across a page
+   * boundary" test above already relies on), not by pressing Enter between separate blocks. That
+   * is a deliberate substitution, not a shortcut around the owner's words: `nextElementOnEnter`
+   * and `BLANK_LINES_BEFORE` (screenplayEditor.ts, packages/screenplay/pageFormat.ts) mean no
+   * screenplay element repeats itself through Enter with a clean, uniform one-line advance --
+   * `action` followed by `action` carries its own mandatory blank line before it, so a real
+   * Enter-driven chain of action blocks advances by *two* lines per Enter, not one, confirmed the
+   * hard way: an earlier version of this fixture pressed Enter between blocks and measured a jump
+   * distance and a "stay still" count that made no sense until this was understood. Hard-wrapping
+   * one continuous paragraph -- exactly how a writer fills an action line without ever touching
+   * Enter -- reaches the same `.editor-region`-bottom trigger with a true one-line advance per
+   * edit, which is what a precise, per-line assertion needs.
+   *
+   * The two geometric invariants this proves, both following directly from
+   * `maybeJumpScrollCaretIntoView`'s own formula (`desiredCaretTop = regionRect.bottom -
+   * JUMP_SCROLL_LINES * lineHeightPx`) rather than from the owner's prose numbers directly, since
+   * exactly how many lines a real, unpredictable trigger overshoots the edge by (anywhere up to
+   * one line, confirmed empirically) is not itself something this test controls:
+   *
+   *  1. Every time the view jumps, the caret's line lands with its *bottom* edge exactly four
+   *     manuscript lines above `.editor-region`'s own bottom -- "five lines worth" counted
+   *     inclusively from the caret's own (top) edge, which is what the owner sees.
+   *  2. Between jumps, the view holds `scrollTop` completely fixed across more than one edit
+   *     while the room below the caret's line visibly shrinks by one line each time -- the
+   *     property a continuous margin cannot produce, since it would move by a little on every
+   *     single edit instead.
+   *
+   * The default viewport (`devices['Desktop Chrome']`, `playwright.persistence.config.ts`) is
+   * kept rather than shrunk: `.page` reserves a full `PAGE_HEIGHT_IN` of scrollable height
+   * regardless of how little text it holds (`pagination.ts`'s `pageStackMinHeightIn`, this file's
+   * own module comment), so a viewport shrunk enough to reach the bottom edge quickly leaves too
+   * little slack between that edge and `.editor-region`'s own true maximum `scrollTop` for two
+   * clean five-line jumps to fit without the second one clamping -- confirmed the hard way, not
+   * assumed, by an earlier version of this fixture that did shrink the viewport and clamped.
+   *
+   * The priming loop below is deliberately not a precomputed line count: it fills the block one
+   * hard-wrapped line at a time, watching `.editor-region`'s own `scrollTop`, until it changes for
+   * the first time -- that is the owner's "at the bottom of my scroll" moment, found by
+   * observation rather than by predicting exactly how many lines a real browser chrome (toolbar,
+   * ruler, statusbar) leaves for the canvas. Bounded generously so a jump scroll that never fires
+   * fails loudly with a clear message instead of running until the test's own timeout.
+   */
+  test('at the bottom of the scroll, a new line jumps the view forward five manuscript lines, then holds still until they are used', async ({
+    page,
+  }) => {
+    const { canvas } = await createAndOpenScreenplay(page);
+    await requireCourierPrime(page);
+    await canvas.click();
+
+    // Waits for the pagination plugin's own `requestAnimationFrame`-coalesced repagination pass
+    // (paginationExtension.ts's module comment) to have run and settled -- two frames, not one:
+    // the first is when the scheduled callback itself fires, the second lets any DOM/scroll
+    // adjustment it makes actually commit before the next read. Without this, a `scrollTop` read
+    // immediately after typing can catch the view mid-flight between the edit's own synchronous
+    // jump-scroll check and the following frame's repagination settling.
+    const settle = () =>
+      page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          ),
+      );
+
+    const scrollTop = () =>
+      page.evaluate(() => {
+        const region = document.querySelector('.editor-region');
+        if (!(region instanceof HTMLElement)) {
+          throw new Error('Expected .editor-region to exist.');
+        }
+        return region.scrollTop;
+      });
+
+    const caretBottom = () =>
+      page.evaluate(() => {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) {
+          throw new Error('No selection to measure the caret from.');
+        }
+        return selection.getRangeAt(0).getBoundingClientRect().bottom;
+      });
+
+    const regionBottom = () =>
+      page.evaluate(() => {
+        const region = document.querySelector('.editor-region');
+        if (!(region instanceof HTMLElement)) {
+          throw new Error('Expected .editor-region to exist.');
+        }
+        return region.getBoundingClientRect().bottom;
+      });
+
+    const gapBelowCaret = async (): Promise<number> =>
+      (await regionBottom()) - (await caretBottom());
+
+    // Real, measured pixels-per-inch and manuscript line height, at whatever zoom the app opens
+    // at (100%, per App.tsx's `useState(100)`) -- not assumed. `.page`'s CSS width is fixed at
+    // PAGE_WIDTH_IN inches, so dividing its painted width by that gives px/in, and by
+    // LINES_PER_INCH gives one manuscript line -- exactly what `paginationExtension.ts`'s own
+    // `pixelsPerInch`/`lineHeightPx` compute, measured independently here rather than imported.
+    const lineHeightPx = await page.evaluate(
+      ([pageWidthIn, linesPerInch]) => {
+        const pageEl = document.querySelector('.page');
+        if (!(pageEl instanceof HTMLElement)) {
+          throw new Error('Expected a .page element to measure.');
+        }
+        const pixelsPerInch = pageEl.getBoundingClientRect().width / pageWidthIn;
+        return pixelsPerInch / linesPerInch;
+      },
+      [PAGE_WIDTH_IN, LINES_PER_INCH] as const,
+    );
+
+    const oneLine = 'x'.repeat(ACTION_BUDGET);
+
+    // Priming: one hard-wrapped line at a time, until the caret first reaches the bottom edge and
+    // the view jumps.
+    let scrollTopBeforeJump: number | undefined;
+    for (let i = 0; i < 60; i += 1) {
+      const before = await scrollTop();
+      await page.keyboard.insertText(oneLine);
+      await settle();
+      const after = await scrollTop();
+      if (after !== before) {
+        scrollTopBeforeJump = before;
+        break;
+      }
+    }
+    if (scrollTopBeforeJump === undefined) {
+      throw new Error(
+        'The view never jumped while priming the fixture up to .editor-region’s bottom edge.',
+      );
+    }
+
+    /**
+     * Confirms `maybeJumpScrollCaretIntoView`'s own landing invariant right after a jump (the
+     * caret's line sits four manuscript lines above the bottom edge -- five, counted inclusively
+     * from its own top edge), then walks forward one hard-wrapped line at a time asserting
+     * `scrollTop` stays completely fixed and the gap below the caret shrinks by one line each
+     * time, until the next jump fires. Returns the jump size and how many edits held still, so
+     * the caller can assert both jumps behave the same way and that "held still" means more than
+     * one edit -- the property a continuous margin cannot produce.
+     */
+    async function verifyJumpAndSubsequentHold(
+      scrollTopBeforeThisJump: number,
+    ): Promise<{ jumpDelta: number; heldStillFor: number; scrollTopBeforeNextJump: number }> {
+      const scrollTopAfterJump = await scrollTop();
+      const jumpDelta = scrollTopAfterJump - scrollTopBeforeThisJump;
+      // Landing invariant: exactly four manuscript lines of room remain below the caret's own
+      // line, regardless of exactly how far the triggering edit overshot the edge by (this is
+      // the target `maybeJumpScrollCaretIntoView` always computes, not a function of overshoot).
+      expect(Math.abs((await gapBelowCaret()) - 4 * lineHeightPx)).toBeLessThanOrEqual(4);
+      // A real jump, not a few pixels of continuous margin.
+      expect(jumpDelta).toBeGreaterThan(2 * lineHeightPx);
+
+      let heldStillFor = 0;
+      let scrollTopBeforeNextJump = scrollTopAfterJump;
+      for (let i = 0; i < 10; i += 1) {
+        const gapBefore = await gapBelowCaret();
+        scrollTopBeforeNextJump = await scrollTop();
+        await page.keyboard.insertText(oneLine);
+        await settle();
+        if ((await scrollTop()) !== scrollTopAfterJump) {
+          break;
+        }
+        heldStillFor += 1;
+        // Each held-still edit consumes exactly one manuscript line of the room the jump created.
+        expect(Math.abs((await gapBelowCaret()) - (gapBefore - lineHeightPx))).toBeLessThanOrEqual(
+          4,
+        );
+      }
+      return { jumpDelta, heldStillFor, scrollTopBeforeNextJump };
+    }
+
+    const first = await verifyJumpAndSubsequentHold(scrollTopBeforeJump);
+    // More than one edit held the view still -- distinguishing this from a margin that would
+    // have moved on every single one.
+    expect(first.heldStillFor).toBeGreaterThan(1);
+
+    // The edit that broke the hold is itself the next jump (already applied, above): prove the
+    // whole cycle repeats, landing on the same invariant and holding still again, not a one-off
+    // correction.
+    const second = await verifyJumpAndSubsequentHold(first.scrollTopBeforeNextJump);
+    expect(second.heldStillFor).toBeGreaterThan(1);
   });
 });

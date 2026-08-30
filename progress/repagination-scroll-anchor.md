@@ -269,3 +269,164 @@ byte-identical restoration before the final gate run.
 ### 2026-08-30 -- implementation agent -- complete
 
 Status: ready-for-review
+
+## Second slice: Enter-does-not-scroll, and five lines of breathing room
+
+Two further, related defects on the same branch, on top of the scroll-anchor fix above (left
+completely unmodified).
+
+### Task 1: Enter does not scroll
+
+`splitScreenplayBlock` (screenplayEditor.ts) built its transaction, called `setSelection`, and
+dispatched -- with no `.scrollIntoView()`. Every command in `prosemirror-commands` marks its own
+transaction with `.scrollIntoView()`; this hand-rolled split never did. At the bottom of the
+document and the bottom of the scroll, Enter split the block correctly but the view stayed put,
+leaving the new line off-screen -- explaining the reported "only scrolls once I type a character":
+ordinary text input goes through ProseMirror's own `readDOMChange`, which always marks its own
+transaction, a different path this command never shared.
+
+Fix: one line, `transaction.scrollIntoView();` before the dispatch.
+
+**Sibling commands checked, not changed.** `convertActiveScreenplayBlock` (Tab, element
+conversion) and the `Enter`-on-an-empty-document branch in `ScreenplayBlockNode
+.addKeyboardShortcuts()` both dispatch with no `.scrollIntoView()` either. Neither was touched:
+Tab only moves the selection by one character (paren-wrap toggling) and never leaves the visible
+area; the empty-document branch fires once, before there is anything to scroll to. Flagged, not
+silently ignored.
+
+**Unit test:** `screenplayEditor.test.ts`, "asks the view to scroll the caret into view when Enter
+splits a block" -- spies on `editor.view.dispatch` and asserts the split transaction's
+`.scrolledIntoView` is `true`. Mutation-tested: removing `.scrollIntoView()` from the source made
+this test fail (`expected false to be true`); restored, green again.
+
+**A real, general jsdom gap this surfaced:** adding `.scrollIntoView()` here made
+`App.test.tsx`'s "dispatches keyboard transitions..." test throw an _uncaught_ exception (DOM
+event dispatch reports a listener's throw to the global handler rather than propagating it back to
+the caller, so the test's own assertions still passed while the whole `pnpm test` run still
+failed). Cause: jsdom 26.1.0 implements neither `Range.prototype.getClientRects` nor
+`Range.prototype.getBoundingClientRect` at all (confirmed directly against the installed jsdom, not
+assumed), and `prosemirror-view`'s `coordsAtPos` calls both when ProseMirror's own native
+`scrollToSelection()` resolves a text-node position -- exactly what a `.scrollIntoView()`-marked
+transaction now triggers. Fixed with a small, well-documented polyfill in the shared
+`src/test/setup.ts` (an empty rect list / a zero rect, matching jsdom's own existing answer for
+`Element.prototype.getBoundingClientRect`), since this is a general environment gap any future
+`.scrollIntoView()`-marked command would hit the same way, not something specific to this one test.
+
+### Task 2: five manuscript lines of breathing room -- a jump, not a margin
+
+**First attempt, abandoned:** ProseMirror's own `EditorProps.scrollMargin`, computed from a
+zoom-aware `pixelsPerInch` measured off `.page`'s live width (the same pattern
+`feature/page-seam-caret`'s `seamCaret.ts` uses), refreshed every plugin-view `update()` since
+`someProp("scrollMargin")` reads `view._props` as a plain value, not a function, and Tiptap's own
+`{...editorProps}` spread at construction destroys any getter. This was built, unit-tested (3
+tests), and working -- then rejected by the owner: `scrollMargin` is a _continuous_ margin, nudging
+the view a little on every scroll: it cannot express "stay still until the edge, then jump five
+lines, then stay still again." All of that work (`CSS_PX_PER_IN`/`SCROLL_MARGIN_LINES`
+/`computeScrollMarginPx`/`refreshScrollMargin`, the `view.props.scrollMargin` wiring, and the three
+`scroll margin tracks zoom` tests) was fully removed, not layered over.
+
+**What shipped instead:** `maybeJumpScrollCaretIntoView(view)` in paginationExtension.ts, called
+directly (never through a ProseMirror prop) from the pagination plugin's own `view().update()`
+hook, on every transaction. Stateless and re-derived every call: if the caret's current line has
+reached or passed `.editor-region`'s bottom edge (`caret.bottom >= regionRect.bottom`), scroll
+forward so the caret's line sits `JUMP_SCROLL_LINES` (5) manuscript lines above that edge --
+its own line plus four empty ones beneath -- clamped to `.editor-region`'s own actual maximum
+`scrollTop` in one shot (never a second corrective write), and never decreasing `scrollTop`.
+Otherwise, nothing happens at all. `pixelsPerInch`/`lineHeightPx` reuse the exact "measure `.page`'s
+live width, don't read zoom state" pattern from the abandoned attempt -- that part of the design was
+right, only the ProseMirror-prop delivery mechanism was wrong.
+
+**The interaction with `compensateScrollForRepagination`, re-decided for the jump design:**
+restoring the caret's _exact_ prior screen position (that function's whole job) can legitimately
+land it at or past the bottom edge -- the writer could have been reading right at the edge,
+comfortably "visible" under `isRectVisibleInRegion`'s plain geometric test, when a repagination
+pushed everything below a break down by a spacer's height. `isRectVisibleInRegion` itself is
+**unchanged**: shrinking its notion of "visible" to match the jump-scroll's trigger would make the
+`wasVisible` gate _more_ restrictive, not more correct -- a caret one line from the edge would be
+judged "not visible" and left completely uncorrected by a repagination, which is worse than the
+defect the gate exists to prevent. Instead, `compensateScrollForRepagination` now calls
+`maybeJumpScrollCaretIntoView` explicitly, once, immediately after its own shift correction settles
+-- and only inside the `wasVisible` branch, never for a writer who had scrolled away (that gate is
+unchanged and must stay that way). A `WeakSet<EditorView>` (`viewsCompensatingForRepagination`)
+suppresses the _generic_ per-transaction hook for the one transaction `compensateScrollForRepagination`
+is already handling itself, so the two calls can never both fire for the same dispatch and corrupt
+each other's before/after measurement -- verified by mutation (removing the suppression made four
+existing/new unit tests fail on wrong `coordsAtPos` call counts, restored, green).
+
+**Unit tests**, `paginationExtension.test.ts`'s new `describe('jump scroll', ...)` (6 tests) plus
+two existing `repagination scroll anchor` tests updated to the new, correct call-count once the
+generic hook also runs on the plain doc-change dispatch those tests exercise (the underlying
+`compensateScrollForRepagination` behaviour and its asserted `scrollTop` values are **unchanged** --
+only the `coordsAtPos` call count grew from 2 to 4, and 2 to 3, which is a real, correct consequence
+of the new mechanism, not a weakened assertion). All 6 mutations targeted at the new code (dropped
+the comfortable-early-return guard; flipped the `<` boundary to `<=`; wrong `JUMP_SCROLL_LINES`;
+hardcoded `pixelsPerInch` to ignore `.page`; dropped the clamp; dropped the never-decreases guard)
+were caught, restored, confirmed green.
+
+**E2E test:** `page-rendering-persistence.spec.ts`, "at the bottom of the scroll, a new line jumps
+the view forward five manuscript lines, then holds still until they are used". Advances one
+manuscript line at a time by hard-wrapping a single continuous action block
+(`linesOfLength(ACTION_BUDGET, _)`), not by pressing Enter between separate blocks -- confirmed the
+hard way that Enter between `action` blocks does not give a clean one-line advance:
+`BLANK_LINES_BEFORE.action = 1` means an Enter-driven chain of action blocks advances two lines per
+Enter, not one (no screenplay element self-chains through Enter with zero blank line before it), so
+literal Enter presses cannot support a precise per-line assertion the way hard-wrapping a single
+paragraph can. Primes to the bottom edge with a bounded, dynamic loop (not a precomputed line
+count), then asserts, dynamically, across two full jump cycles: the landing invariant (`regionBottom
+
+- caretBottom ≈ 4 \* lineHeightPx`, exactly what "five lines counted inclusively from the caret's own
+top edge" means), that `scrollTop`holds completely fixed for more than one edit between jumps, and
+that the gap below the caret shrinks by exactly one line per held-still edit. Run three times over
+the real`pnpm test:system:persistence` pipeline (full rebuild each time, not a stale bundle) with
+  no flakes.
+
+**Mutation-tested against the real browser, with a full rebuild between each run** (a debug harness
+that skipped `pnpm build` gave false negatives on the first pass -- caught by re-verifying the
+_baseline_ still passed after "fixing" a mutation, not by assuming a stale dev-server bundle
+reflected source edits):
+
+- `JUMP_SCROLL_LINES` mutated to `0` -- caught: `Received: 64` against the landing-gap assertion.
+- The comfortable-early-return guard mutated to `if (true)` (function-level TypeScript narrowing
+  made an unconditional early `return` before the guards produce compile errors instead, an
+  instructive dead end, not a false pass) -- retried as `if (X || true)`, same narrowing issue,
+  retried via `JUMP_SCROLL_LINES = 0` instead, which exercises the identical code path
+  type-safely and is the mutation recorded above.
+
+**The one requirement this test cannot prove, and why -- read before assuming e2e is a substitute
+for the unit test:** with a real rebuild, this e2e test **passes even with Task 1 fully reverted**.
+Cause, confirmed by disabling `maybeJumpScrollCaretIntoView` instead (which _does_ fail the test):
+the jump scroll runs from the pagination plugin's generic per-transaction `update()` hook,
+completely independent of whether the triggering transaction was marked `.scrollIntoView()`. For
+this editor's line-height-granular caret geometry, the jump scroll's own trigger
+(`caret.bottom >= regionRect.bottom`) and native ProseMirror's default `scrollIntoView` threshold
+coincide almost exactly, so once the jump scroll exists it independently reproduces correct
+scrolling for the exact bottom-edge scenario Task 1 fixes -- Task 1 is still correct and still
+matches every sibling `prosemirror-commands` convention, but it is no longer the _only_ thing
+making Enter scroll at the bottom of the document, and no pixel-observable e2e behaviour can any
+longer distinguish "Task 1 present" from "Task 1 reverted, Task 2 covering for it". Task 1's own
+revert is instead caught precisely by the unit test above (spying on `.scrolledIntoView` directly,
+independent of any downstream scrolling mechanism). This is reported here rather than silently
+worked around: the "e2e must fail if either task is reverted" requirement is genuinely
+unsatisfiable at the pixel level once both fixes coexist, for this specific pair of defects.
+
+**Existing e2e fixture geometry:** unchanged. All 15 pre-existing tests in the persistence suite
+pass with their original, untouched numeric tolerances (including "typing across a page boundary"
+and "an open element menu...", the two tests that press Enter as part of their own setup) -- no
+investigation needed beyond confirming this, since nothing shifted.
+
+### Gates (this slice)
+
+- `pnpm lint` -- clean.
+- `pnpm format:check` -- clean.
+- `pnpm typecheck` -- clean, full workspace.
+- `pnpm test` -- clean, 453/453 in `apps/web` (no unhandled errors, once the jsdom `Range` polyfill
+  landed), plus every other package unchanged and green.
+- `pnpm --filter @finaler-draft/web test:coverage` -- clean; `paginationExtension.ts` 92.78%
+  statements / 89.55% branches / 100% functions; `screenplayEditor.ts` 96.17% / 92% / 100%; both
+  comfortably over the repo's 80%-per-file threshold.
+- `pnpm test:system:persistence` -- **16/16 pass** (the 15 pre-existing plus the one new test),
+  run three times over the course of this work with no flakes.
+
+### 2026-08-30 -- implementation agent -- second slice complete
+
+Status: ready-for-review
