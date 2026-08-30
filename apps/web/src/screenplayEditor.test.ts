@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Editor } from '@tiptap/core';
 import { TextSelection } from '@tiptap/pm/state';
 import { DEFAULT_DOCUMENT_SETTINGS } from '@finaler-draft/screenplay';
@@ -163,6 +163,35 @@ describe('Enter', () => {
       { element: 'character', text: '' },
       { element: 'dialogue', text: '' },
     ]);
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * The reported defect: at the bottom of the document and the bottom of the scroll, Enter split
+   * the block but the view never scrolled -- it only scrolled once the writer typed a character
+   * into the new line. jsdom lays nothing out, so this cannot observe an actual pixel scroll (that
+   * is `page-rendering-persistence.spec.ts`'s job); what it can observe is the one thing that
+   * decides whether ProseMirror will scroll at all -- every `prosemirror-commands` command marks
+   * its own transaction with `.scrollIntoView()` (`Transaction.scrolledIntoView`,
+   * `EditorState`'s `scrollToSelection` field only ever increments off it), and this split command
+   * previously never did, which is exactly why typing afterward "fixed" it: ordinary text input
+   * goes through ProseMirror's own `readDOMChange`, which always calls `tr.scrollIntoView()` on
+   * its own separate transaction.
+   *
+   * Spies on `dispatch` rather than calling `splitScreenplayBlock` directly: this has to be the
+   * transaction the real Enter keymap entry produces, not a hand-built one that could pass by
+   * construction. `pressEnterAt` itself dispatches one transaction to place the selection before
+   * triggering the keydown, so the split transaction is the *last* dispatch, not the only one.
+   */
+  it('asks the view to scroll the caret into view when Enter splits a block', () => {
+    const { editor, mount } = buildEditor([{ element: 'action', text: 'Some action beat.' }]);
+    const dispatchSpy = vi.spyOn(editor.view, 'dispatch');
+
+    pressEnterAt(editor, 'Some action beat.'.length);
+
+    const splitTransaction = dispatchSpy.mock.calls.at(-1)?.[0];
+    expect(splitTransaction?.scrolledIntoView).toBe(true);
     editor.destroy();
     mount.remove();
   });
