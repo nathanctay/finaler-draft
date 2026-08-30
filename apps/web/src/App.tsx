@@ -38,6 +38,7 @@ import {
   updatePaginationDocumentSettings,
 } from './paginationExtension.js';
 import { PAGE_GAP_IN, pageStackMinHeightIn } from './pagination.js';
+import { SeamCaretExtension } from './seamCaret.js';
 import { SmartTypeGhostExtension } from './smartTypeGhost.js';
 import { SmartTypeList, SmartTypeListExtension } from './smartTypeList.js';
 import { ElementMenu, ElementMenuExtension } from './elementMenu.js';
@@ -443,6 +444,11 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     extensions: [
       ...screenplayExtensions,
       PaginationExtension.configure({ documentSettings: initial.screenplay.documentSettings }),
+      // The caret at a mid-block page seam (seamCaret.ts). Mounted directly after the plugin whose
+      // decorations it reads, and like every layer here it is removable on its own: this line, its
+      // own file, its own tests, and its two blocks in styles.css are the whole of it. Nothing in
+      // pagination knows it exists.
+      SeamCaretExtension,
       // SmartType's inline ghost completion (smartTypeGhost.ts). A layer over the screenplay
       // editor rather than part of what a block is, exactly like pagination above -- and
       // self-contained, so stage 3's optional accept-by-list layer attaches here beside it rather
