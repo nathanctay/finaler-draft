@@ -95,6 +95,40 @@ function buildEditor(
   return { editor, mount };
 }
 
+/**
+ * `buildEditor`, but with the mount wrapped in a real `.editor-region` div carrying a stubbed
+ * `getBoundingClientRect` -- the scroll-anchor compensation
+ * (`compensateScrollForRepagination` in paginationExtension.ts) looks up this ancestor by class
+ * name exactly the way `App.tsx`'s real DOM does (see `styles.css`'s `.editor-region`, the
+ * `overflow: auto` scroll container the compensation adjusts `scrollTop` on). jsdom lays out
+ * nothing, so both this box and the caret's own rectangle (`coordsAtPos`, stubbed per test below)
+ * are stated rather than measured -- the house precedent for stubbing a rect directly is
+ * `floatingPanel.test.ts:29-33`.
+ */
+function buildEditorInRegion(
+  blocks: readonly ScreenplayBlock[],
+  regionRect: { top: number; height: number },
+) {
+  const region = document.createElement('div');
+  region.className = 'editor-region';
+  region.getBoundingClientRect = () => new DOMRect(0, regionRect.top, 800, regionRect.height);
+  document.body.append(region);
+  const mount = document.createElement('div');
+  region.append(mount);
+  const editor = new Editor({
+    content: docContentFor(blocks),
+    element: mount,
+    extensions: [...screenplayExtensions, PaginationExtension],
+  });
+  return { editor, mount, region };
+}
+
+/** A stubbed `coordsAtPos` result. Only `top`/`bottom` are read by the compensation, but the real
+ * return type also carries `left`/`right`, so both are supplied here to match it. */
+function coordsAt(top: number): { top: number; bottom: number; left: number; right: number } {
+  return { top, bottom: top + 16, left: 0, right: 0 };
+}
+
 let cleanups: Array<() => void> = [];
 
 afterEach(() => {
@@ -462,5 +496,170 @@ describe('scene numbers (live)', () => {
 
     editor.destroy();
     mount.remove();
+  });
+});
+
+/**
+ * Coverage for `compensateScrollForRepagination` (paginationExtension.ts): repagination
+ * materializes a page-break spacer that can push everything below it down without ProseMirror
+ * scrolling to correct for it (see that function's own comment for the full mechanism). These
+ * exercise the fix through both places it is wired in -- the frame-coalesced doc-change path
+ * (`scheduleRepagination`'s `requestAnimationFrame` callback), the actual site of the diagnosed
+ * defect, and the synchronous `updatePaginationDocumentSettings` path, which is also where the
+ * owner's own illustrative scenario (a document-settings change repaginating while the writer has
+ * scrolled away to reread an earlier page) lives.
+ */
+describe('repagination scroll anchor', () => {
+  it('compensates a caret visible before repagination and pushed down by it, by exactly the shift', () => {
+    vi.useFakeTimers();
+    const { editor, mount, region } = buildEditorInRegion(plainTwoPageBlocks().slice(0, 1), {
+      top: 0,
+      height: 600,
+    });
+    cleanups.push(() => {
+      editor.destroy();
+      mount.remove();
+      region.remove();
+    });
+    const coordsSpy = vi
+      .spyOn(editor.view, 'coordsAtPos')
+      // Before: a caret comfortably inside the 600px region.
+      .mockReturnValueOnce(coordsAt(300))
+      // After: the same document position, now 193px lower -- a page-break spacer materializing
+      // above it, the exact shift the real defect measured (see
+      // progress/repagination-scroll-anchor.md).
+      .mockReturnValueOnce(coordsAt(493));
+    region.scrollTop = 50;
+
+    // Append the remaining blocks in one transaction, forcing the doc from one page to two --
+    // the same "typing across a page boundary" shape `paginationExtension.test.ts`'s own "does
+    // not repaginate until the next animation frame" test uses.
+    const remaining = plainTwoPageBlocks().slice(1);
+    const nodes = remaining.map((block) =>
+      editor.schema.nodes.screenplayBlock!.create(
+        { element: block.type, id: block.id },
+        'text' in block && block.text !== '' ? editor.schema.text(block.text) : undefined,
+      ),
+    );
+    editor.view.dispatch(
+      editor.state.tr.insert(editor.state.doc.content.size, Fragment.fromArray(nodes)),
+    );
+    vi.runOnlyPendingTimers();
+
+    expect(mount.querySelectorAll('.page-break-widget')).toHaveLength(1);
+    expect(coordsSpy).toHaveBeenCalledTimes(2);
+    // 50 (where the writer had already scrolled to) + 193 (the measured shift): the caret lands
+    // back at the same 300px screen position it started at, not merely somewhere on screen.
+    expect(region.scrollTop).toBe(243);
+  });
+
+  it('leaves scrollTop alone when the caret was already out of view before repagination', () => {
+    const { editor, mount, region } = buildEditorInRegion(plainTwoPageBlocks(), {
+      top: 0,
+      height: 600,
+    });
+    cleanups.push(() => {
+      editor.destroy();
+      mount.remove();
+      region.remove();
+    });
+    // The writer scrolled away to reread an earlier page; the caret they left behind sits well
+    // below the 600px-tall region, already out of view before a document-settings change
+    // repaginates -- the owner's own example (see this module's header) of why the gate exists.
+    const coordsSpy = vi.spyOn(editor.view, 'coordsAtPos').mockReturnValueOnce(coordsAt(900));
+    region.scrollTop = 120;
+
+    updatePaginationDocumentSettings(editor, {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      pageNumberStyle: 'roman',
+    });
+
+    // The settings change itself still took effect...
+    expect(mount.querySelector('.page-break-number')?.textContent).toBe('II.');
+    // ...while the reading position the writer chose is completely untouched: only the one
+    // "before" measurement ever happened -- proving no "after" measurement, and so no
+    // compensation, was attempted at all, not merely that the two measurements happened to
+    // cancel out.
+    expect(coordsSpy).toHaveBeenCalledTimes(1);
+    expect(region.scrollTop).toBe(120);
+  });
+
+  it('still compensates a visible caret even when the view is unfocused -- the document-settings dialog always unfocuses it', () => {
+    const { editor, mount, region } = buildEditorInRegion(plainTwoPageBlocks(), {
+      top: 0,
+      height: 600,
+    });
+    cleanups.push(() => {
+      editor.destroy();
+      mount.remove();
+      region.remove();
+    });
+    // Unfocused, deliberately not stubbed: jsdom's own default (nothing here ever calls
+    // `.focus()`) already models exactly what the real app does the instant the document-settings
+    // dialog opens -- it moves DOM focus onto its own first input (see
+    // `documentSettingsDialog.tsx`), which is the only real-world trigger for this call site. If
+    // compensation were gated on focus, it would never fire for that scenario at all.
+    expect(editor.view.hasFocus()).toBe(false);
+    const coordsSpy = vi
+      .spyOn(editor.view, 'coordsAtPos')
+      .mockReturnValueOnce(coordsAt(200))
+      .mockReturnValueOnce(coordsAt(240));
+    region.scrollTop = 30;
+
+    updatePaginationDocumentSettings(editor, {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      pageNumberStyle: 'roman',
+    });
+
+    expect(mount.querySelector('.page-break-number')?.textContent).toBe('II.');
+    expect(coordsSpy).toHaveBeenCalledTimes(2);
+    // 30 + 40 (the measured shift): compensated exactly as it would be if the view were focused.
+    expect(region.scrollTop).toBe(70);
+  });
+
+  it('changes scrollTop by exactly zero when a repagination shifts nothing near the caret', () => {
+    vi.useFakeTimers();
+    const { editor, mount, region } = buildEditorInRegion(plainTwoPageBlocks().slice(0, 1), {
+      top: 0,
+      height: 600,
+    });
+    cleanups.push(() => {
+      editor.destroy();
+      mount.remove();
+      region.remove();
+    });
+    // The same position measured both times: this repagination's new page break lands well below
+    // the caret, so the new decorations move nothing around it.
+    vi.spyOn(editor.view, 'coordsAtPos').mockReturnValue(coordsAt(120));
+    // An own-property override, not `region.scrollTop = 77` alone: a mutation that drops the
+    // `if (shift !== 0)` guard and always writes `scrollTop += shift` would still read back 77
+    // afterward (77 + 0), so a value-only assertion cannot catch it. This intercepts the write
+    // itself and proves it never happens -- the guard against a per-keystroke rounding drift this
+    // test exists for.
+    let scrollTopValue = 77;
+    const setScrollTop = vi.fn((value: number) => {
+      scrollTopValue = value;
+    });
+    Object.defineProperty(region, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTopValue,
+      set: setScrollTop,
+    });
+
+    const remaining = plainTwoPageBlocks().slice(1);
+    const nodes = remaining.map((block) =>
+      editor.schema.nodes.screenplayBlock!.create(
+        { element: block.type, id: block.id },
+        'text' in block && block.text !== '' ? editor.schema.text(block.text) : undefined,
+      ),
+    );
+    editor.view.dispatch(
+      editor.state.tr.insert(editor.state.doc.content.size, Fragment.fromArray(nodes)),
+    );
+    vi.runOnlyPendingTimers();
+
+    expect(mount.querySelectorAll('.page-break-widget')).toHaveLength(1);
+    expect(setScrollTop).not.toHaveBeenCalled();
+    expect(region.scrollTop).toBe(77);
   });
 });

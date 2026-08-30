@@ -1114,4 +1114,86 @@ test.describe('page rendering: real editor, real DOM', () => {
     expect(lastBlock?.type).toBe('scene_heading');
     expect(lastBlock && 'text' in lastBlock ? lastBlock.text : undefined).toBe('');
   });
+
+  /**
+   * The scroll-anchor fix itself (`compensateScrollForRepagination` in paginationExtension.ts),
+   * proved directly rather than through a symptom: the element-menu test above catches this
+   * defect only incidentally, through where a floating panel lands. This measures the writer's
+   * own caret, typing straight across a page boundary -- the exact ordering race the defect was
+   * diagnosed in (see progress/repagination-scroll-anchor.md): an edit's own synchronous
+   * scroll-into-view runs against the *old* decorations, and the frame-coalesced repagination
+   * that follows a moment later materializes the new page break with nothing to correct the
+   * caret's now-wrong screen position, unless this fix does.
+   *
+   * A single edit's own delta cannot be asserted against a literal expected value the way
+   * `updatePaginationDocumentSettings`'s callers can (see that path's own unit-test coverage in
+   * paginationExtension.test.ts): typing a line is *supposed* to move the caret down by one line,
+   * correctly, and that ordinary advance cannot be told apart from the defect's spurious one by
+   * inspecting a single before/after pair. So this compares two structurally identical edits --
+   * each one line's worth of hard-wrapped text, typed into the same block the same way -- where
+   * only the second one crosses the boundary. Without the fix, the second edit's delta is the
+   * first edit's delta *plus* a page-break spacer's height (pagination.ts's `spacerHeightIn`, on
+   * the order of two inches): far outside the tolerance below. With it, the two deltas match.
+   *
+   * The fixture is `fourPageMixedAnchorFixture`'s own block 0 recipe (a single action block,
+   * typed straight into the editor's pre-seeded empty block, per that test's own comment on why):
+   * 55 lines of `linesOfLength(ACTION_BUDGET, _)` fill page 1 exactly with no break yet, verified
+   * against the real `paginateScreenplay` above rather than assumed. One line short of that (54)
+   * leaves exactly one line of room.
+   */
+  test('typing across a page boundary leaves the caret at the same screen position an equivalent same-page edit would have', async ({
+    page,
+  }) => {
+    const { canvas } = await createAndOpenScreenplay(page);
+    await requireCourierPrime(page);
+    await canvas.click();
+
+    const singleActionBlock = (lines: number) => [
+      { id: 'block-0', type: 'action' as const, text: linesOfLength(ACTION_BUDGET, lines) },
+    ];
+    expect(paginateScreenplay(singleActionBlock(55)).pages.length).toBe(1);
+    expect(paginateScreenplay(singleActionBlock(56)).pages.length).toBe(2);
+
+    // One line of room left on page 1 (54 of the 55 lines it holds).
+    await page.keyboard.insertText(linesOfLength(ACTION_BUDGET, 54));
+    const fixtureSaved = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'PUT' &&
+        response.url().includes('/api/screenplays/') &&
+        response.status() === 200,
+    );
+    await fixtureSaved;
+    await page.waitForTimeout(400);
+    expect(await page.locator('.page-break-widget').count()).toBe(0);
+
+    const caretTop = () =>
+      page.evaluate(() => {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) {
+          throw new Error('No selection to measure the caret from.');
+        }
+        return selection.getRangeAt(0).getBoundingClientRect().top;
+      });
+
+    const beforeControl = await caretTop();
+
+    // The control edit: one more full hard-wrapped line, appended to the same block. 54 -> 55
+    // lines -- still page 1 in full per the model above, so this edit's only effect on the
+    // caret's screen position is the ordinary one-line advance any such edit produces.
+    await page.keyboard.insertText('x'.repeat(ACTION_BUDGET));
+    await page.waitForTimeout(400);
+    expect(await page.locator('.page-break-widget').count()).toBe(0);
+    const afterControl = await caretTop();
+    const controlDelta = afterControl - beforeControl;
+
+    // The crossing edit: identical in shape to the control edit, but this one (55 -> 56 lines)
+    // tips the block onto a second page.
+    await page.keyboard.insertText('x'.repeat(ACTION_BUDGET));
+    await expect(page.locator('.page-break-widget')).toHaveCount(1);
+    await page.waitForTimeout(400);
+    const afterCrossing = await caretTop();
+    const crossingDelta = afterCrossing - afterControl;
+
+    expect(Math.abs(crossingDelta - controlDelta)).toBeLessThanOrEqual(4);
+  });
 });

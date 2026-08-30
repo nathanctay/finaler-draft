@@ -38,7 +38,7 @@
  */
 import { Extension, type Editor } from '@tiptap/core';
 import { Plugin, PluginKey } from '@tiptap/pm/state';
-import { DecorationSet } from '@tiptap/pm/view';
+import { DecorationSet, type EditorView } from '@tiptap/pm/view';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
 import { paginateScreenplay } from '@finaler-draft/layout';
 import { DEFAULT_DOCUMENT_SETTINGS, type DocumentSettings } from '@finaler-draft/screenplay';
@@ -105,6 +105,101 @@ function computePaginationState(
 }
 
 /**
+ * The caret's viewport rectangle, or `undefined` when there is no well-defined one to compensate
+ * around: a destroyed view, or a selection head `coordsAtPos` cannot resolve against the current
+ * document (it throws on an invalid position -- this is that guard).
+ *
+ * Deliberately not gated on `view.hasFocus()`, even though the writer's caret is the thing being
+ * anchored: the owner's own canonical trigger for this path -- closing the document-settings
+ * dialog (`updatePaginationDocumentSettings`, App.tsx's `updateDocumentSettings`) -- always steals
+ * DOM focus onto the dialog's own first input the instant it opens
+ * (`documentSettingsDialog.tsx`), so the editor is unfocused for the entire time a settings change
+ * can trigger this. Gating on focus would silently disable compensation for exactly the scenario
+ * the owner described. `coordsAtPos` is a pure DOM geometry read and needs no focus to be
+ * accurate; visibility inside `.editor-region`, not focus, is the gate this function's caller
+ * actually applies.
+ */
+function readCaretRect(view: EditorView): { top: number; bottom: number } | undefined {
+  if (view.isDestroyed) {
+    return undefined;
+  }
+  try {
+    const { top, bottom } = view.coordsAtPos(view.state.selection.head);
+    return { top, bottom };
+  } catch {
+    return undefined;
+  }
+}
+
+/** The scroll container `App.tsx` gives `.editor-region` (`overflow: auto`, see styles.css) -- the
+ * only element this compensation ever adjusts `scrollTop` on. */
+function findScrollRegion(view: EditorView): HTMLElement | null {
+  return view.dom.closest<HTMLElement>('.editor-region');
+}
+
+/**
+ * Whether `rect` -- a caret rectangle, in viewport coordinates, from `readCaretRect` -- falls
+ * inside `region`'s own visible viewport box. A region with no height (not yet laid out, or
+ * hidden) shows nothing, so nothing in it counts as visible.
+ */
+function isRectVisibleInRegion(
+  rect: { top: number; bottom: number },
+  region: HTMLElement,
+): boolean {
+  const regionRect = region.getBoundingClientRect();
+  if (regionRect.height <= 0) {
+    return false;
+  }
+  return rect.bottom > regionRect.top && rect.top < regionRect.bottom;
+}
+
+/**
+ * Repagination must not change whether the caret is visible, and must not appear to move the line
+ * being typed (the owner's requirement -- see progress/repagination-scroll-anchor.md). A
+ * repagination transaction changes neither the document nor the selection (it only carries a
+ * freshly computed `PaginationState` as meta), so `EditorView` has no reason of its own to scroll
+ * when the new page-break decorations it materializes push everything below a break down by the
+ * spacer's height -- nothing corrects the caret's now-wrong screen position on its own.
+ *
+ * This wraps a repagination `dispatch` and restores the caret's exact screen position afterward,
+ * by adjusting `.editor-region`'s `scrollTop` by precisely the shift the new decorations
+ * introduced -- never by scrolling the caret back into view outright, which the owner rejected: it
+ * would also fire when a writer had deliberately scrolled away (rereading page 1 while a
+ * document-settings change repaginates the whole document), snapping their view back the instant
+ * the repagination committed. The gate is therefore on the caret having been visible inside
+ * `.editor-region` *before* this dispatch: only then is anything adjusted. If the shift measured
+ * after is zero -- most repaginations move nothing near the caret at all -- `scrollTop` is left
+ * completely untouched, not written with a zero delta, so a repagination that changes nothing
+ * never introduces so much as a rounding drift.
+ *
+ * Decorations are applied synchronously inside `dispatch` (verified against Tiptap's
+ * `Editor.dispatchTransaction`, which calls `view.updateState` -- itself synchronous -- before
+ * returning, with no microtask or animation-frame boundary in between), so the "after" measurement
+ * below is taken immediately after `dispatch` returns, with no `setTimeout` or second frame
+ * needed.
+ */
+function compensateScrollForRepagination(view: EditorView, dispatch: () => void): void {
+  const region = findScrollRegion(view);
+  const before = region ? readCaretRect(view) : undefined;
+  const wasVisible =
+    before !== undefined && region !== null && isRectVisibleInRegion(before, region);
+
+  dispatch();
+
+  if (!wasVisible || !region || !before) {
+    return;
+  }
+  const after = readCaretRect(view);
+  if (!after) {
+    return;
+  }
+  const shift = after.top - before.top;
+  if (shift !== 0) {
+    region.scrollTop += shift;
+  }
+}
+
+/**
  * Applies a new `documentSettings` to the live pagination plugin, in place. Dispatches a
  * transaction carrying the freshly computed `PaginationState` as `paginationPluginKey`'s meta --
  * the identical mechanism the `view()` handler's own frame-coalesced repagination already uses
@@ -133,7 +228,9 @@ export function updatePaginationDocumentSettings(
   documentSettings: DocumentSettings,
 ): void {
   const paginationState = computePaginationState(editor.state.doc, documentSettings);
-  editor.view.dispatch(editor.state.tr.setMeta(paginationPluginKey, paginationState));
+  compensateScrollForRepagination(editor.view, () => {
+    editor.view.dispatch(editor.state.tr.setMeta(paginationPluginKey, paginationState));
+  });
 }
 
 export type PaginationExtensionOptions = {
@@ -209,9 +306,11 @@ export const PaginationExtension = Extension.create<PaginationExtensionOptions>(
                 editorView.state.doc,
                 currentDocumentSettings,
               );
-              editorView.dispatch(
-                editorView.state.tr.setMeta(paginationPluginKey, paginationState),
-              );
+              compensateScrollForRepagination(editorView, () => {
+                editorView.dispatch(
+                  editorView.state.tr.setMeta(paginationPluginKey, paginationState),
+                );
+              });
             });
           };
           return {
