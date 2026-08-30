@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Editor } from '@tiptap/core';
 import { TextSelection } from '@tiptap/pm/state';
 import type { ScreenplayBlock } from '@finaler-draft/screenplay';
+import { BODY_WIDTH_IN, MARGIN_TOP_IN } from '@finaler-draft/screenplay/pageFormat';
 import { screenplayExtensions } from './screenplayEditor.js';
 import { PaginationExtension, paginationPluginKey } from './paginationExtension.js';
 import { SeamCaretExtension, seamCaretPluginKey, setSeamCaretDownstream } from './seamCaret.js';
@@ -131,6 +132,70 @@ function suppressedBlockIds(mount: HTMLElement): string[] {
   return Array.from(mount.querySelectorAll('[data-screenplay-block].page-seam-caret-host')).map(
     (element) => element.getAttribute('data-block-id') ?? '',
   );
+}
+
+/**
+ * Overrides one element's own `getBoundingClientRect`, the same technique -- and the same reason --
+ * `floatingPanel.test.ts` uses it: jsdom lays nothing out, so a fixed `DOMRect` is what makes the
+ * geometry under test an exact arithmetic claim rather than an approximation.
+ */
+function stubRect(element: Element, rect: DOMRect): void {
+  element.getBoundingClientRect = () => rect;
+}
+
+/** `buildEditor`, but without `PaginationExtension` -- the shape `isMidBlockSeam`'s own `if
+ * (!decorations)` guard exists for: a consumer that installs `SeamCaretExtension` without the
+ * plugin it reads from. */
+function buildEditorWithoutPagination(blocks: readonly ScreenplayBlock[]) {
+  const mount = document.createElement('div');
+  document.body.append(mount);
+  const editor = new Editor({
+    content: docContentFor(blocks),
+    element: mount,
+    extensions: [...screenplayExtensions, SeamCaretExtension],
+  });
+  return { editor, mount };
+}
+
+/**
+ * `buildEditor`, but with the mount wrapped in a `.editor-region` ancestor -- the element
+ * `SeamCaretView.sync` requires (`this.view.dom.closest('.editor-region')`) before it will draw
+ * anything, matching `App.tsx:1086`'s real `<section className="editor-region">`. The bare
+ * `buildEditor` above deliberately omits it: every other test in this file drives the plugin's
+ * state machine only, and `sync`'s own DOM-measurement half is exactly what this omission was
+ * documented (this file's header comment) to be leaving to the e2e suite.
+ */
+function buildEditorInRegion(blocks: readonly ScreenplayBlock[]) {
+  const region = document.createElement('div');
+  region.className = 'editor-region';
+  document.body.append(region);
+  const mount = document.createElement('div');
+  region.append(mount);
+  const editor = new Editor({
+    content: docContentFor(blocks),
+    element: mount,
+    extensions: [...screenplayExtensions, PaginationExtension, SeamCaretExtension],
+  });
+  return { editor, region };
+}
+
+/**
+ * Drives the seam caret plugin's own `handleClick` directly, with a synthetic event carrying only
+ * the one field this module reads off it (`clientY`). Reached via `seamCaretPluginKey.get` rather
+ * than `view.someProp('handleClick', ...)`: `someProp` returns the first *truthy* result across
+ * every plugin's `handleClick`, and this module's own always returns `false` (its own doc comment:
+ * "returns `false` in every case") -- `someProp` would report `undefined` regardless of what this
+ * handler actually decided, and would skip calling it at all if an earlier-registered plugin's own
+ * `handleClick` happened to return truthy for the same event first.
+ */
+function dispatchHandleClick(editor: Editor, pos: number, clientY: number): boolean | undefined {
+  const handleClick = seamCaretPluginKey.get(editor.state)?.props.handleClick as
+    | ((view: Editor['view'], pos: number, event: MouseEvent) => boolean | undefined)
+    | undefined;
+  if (!handleClick) {
+    throw new Error('seamCaret plugin has no handleClick prop registered');
+  }
+  return handleClick(editor.view, pos, new MouseEvent('click', { clientY }));
 }
 
 describe('setSeamCaretDownstream', () => {
@@ -518,5 +583,372 @@ describe('handleKeyDown: per-motion affinity at the seam', () => {
 
     editor.destroy();
     mount.remove();
+  });
+});
+
+/**
+ * `handleClick`'s own geometry decision -- `pixelsPerInch`, `incomingSheetTopY` and
+ * `clickedIncomingSheet` together (this file's header comment: none of the three is exported, so
+ * the only way to exercise them without editing `seamCaret.ts` is through the one plugin prop that
+ * calls all three). `resolveSeamDom`'s DOM walk runs first in every case here too, since
+ * `handleClick` only calls the geometry functions once it has found the widget.
+ *
+ * Every expected `sheetTop` below is computed independently from the relationship stated in
+ * `incomingSheetTopY`'s own doc comment -- `spacer.bottom - MARGIN_TOP_IN * pixelsPerInch` -- using
+ * this file's own stubbed rects, not transcribed from the implementation's arithmetic, so a mutation
+ * to that arithmetic has something to disagree with.
+ */
+describe('handleClick: the sheet-edge boundary', () => {
+  it("a click below the incoming sheet's paper edge, at a non-1.0 zoom, records the seam position", () => {
+    const { editor, mount } = buildEditor(speechSplitBlocks());
+    const seam = seamPosition(editor);
+    const widget = mount.querySelector('.page-break-widget') as HTMLElement;
+    const spacer = widget.querySelector('.page-break-spacer') as HTMLElement;
+
+    // pixelsPerInch = 864 / BODY_WIDTH_IN(6) = 144 -- a 1.5x-zoomed page, not the CSS default of 96,
+    // because measuring off the widget rather than reading application zoom state only proves
+    // anything if the scale it measures is not the default.
+    stubRect(widget, new DOMRect(0, 0, 864, 0));
+    stubRect(spacer, new DOMRect(0, 0, 0, 1000));
+    const pixelsPerInch = 864 / BODY_WIDTH_IN;
+    const sheetTop = 1000 - MARGIN_TOP_IN * pixelsPerInch; // 856
+
+    const handled = dispatchHandleClick(editor, seam, sheetTop + 1);
+
+    expect(handled).toBe(false);
+    expect(downstreamOf(editor)).toBe(seam);
+    expect(suppressedBlockIds(mount)).toEqual(['00000000-0000-4000-a000-000000000002']);
+
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('a click exactly at the paper edge is inclusive: it also reads as the incoming sheet', () => {
+    const { editor, mount } = buildEditor(speechSplitBlocks());
+    const seam = seamPosition(editor);
+    const widget = mount.querySelector('.page-break-widget') as HTMLElement;
+    const spacer = widget.querySelector('.page-break-spacer') as HTMLElement;
+
+    stubRect(widget, new DOMRect(0, 0, 864, 0));
+    stubRect(spacer, new DOMRect(0, 0, 0, 1000));
+    const pixelsPerInch = 864 / BODY_WIDTH_IN;
+    const sheetTop = 1000 - MARGIN_TOP_IN * pixelsPerInch; // 856
+
+    const handled = dispatchHandleClick(editor, seam, sheetTop);
+
+    expect(handled).toBe(false);
+    expect(downstreamOf(editor)).toBe(seam);
+    expect(suppressedBlockIds(mount)).toEqual(['00000000-0000-4000-a000-000000000002']);
+
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('a click above the paper edge is page 1: it records nothing', () => {
+    const { editor, mount } = buildEditor(speechSplitBlocks());
+    const seam = seamPosition(editor);
+    const widget = mount.querySelector('.page-break-widget') as HTMLElement;
+    const spacer = widget.querySelector('.page-break-spacer') as HTMLElement;
+
+    stubRect(widget, new DOMRect(0, 0, 864, 0));
+    stubRect(spacer, new DOMRect(0, 0, 0, 1000));
+    const pixelsPerInch = 864 / BODY_WIDTH_IN;
+    const sheetTop = 1000 - MARGIN_TOP_IN * pixelsPerInch; // 856
+
+    const handled = dispatchHandleClick(editor, seam, sheetTop - 1);
+
+    expect(handled).toBe(false);
+    expect(downstreamOf(editor)).toBeUndefined();
+    expect(suppressedBlockIds(mount)).toEqual([]);
+
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * `pixelsPerInch`'s own fallback branch: a widget that has not been laid out yet (width 0, e.g.
+   * the very first paint) still needs a sane answer rather than a division that leaves the edge at
+   * `spacer.bottom - 0`. `CSS_PX_PER_IN` (96) is the specification's fixed px-per-inch, stated in
+   * `seamCaret.ts` rather than sourced from application state, so it is restated independently here
+   * rather than imported.
+   */
+  it('a widget with no measured width falls back to the CSS px-per-inch instead of an infinite edge', () => {
+    const { editor, mount } = buildEditor(speechSplitBlocks());
+    const seam = seamPosition(editor);
+    const widget = mount.querySelector('.page-break-widget') as HTMLElement;
+    const spacer = widget.querySelector('.page-break-spacer') as HTMLElement;
+
+    stubRect(widget, new DOMRect(0, 0, 0, 0));
+    stubRect(spacer, new DOMRect(0, 0, 0, 200));
+    const cssPxPerIn = 96;
+    const sheetTop = 200 - MARGIN_TOP_IN * cssPxPerIn; // 104
+
+    expect(dispatchHandleClick(editor, seam, sheetTop + 1)).toBe(false);
+    expect(downstreamOf(editor)).toBe(seam);
+
+    expect(dispatchHandleClick(editor, seam, sheetTop - 1)).toBe(false);
+    expect(downstreamOf(editor)).toBeUndefined();
+
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * `incomingSheetTopY`'s other guard: a widget whose spacer is missing entirely (not merely
+   * mis-sized) yields no edge to compare against at all, and therefore no decision -- not even for
+   * a `clientY` so large it would read as "below" any edge that could plausibly exist. This is the
+   * fallback the module's own header comment calls "leaving today's behaviour" -- nothing drawn,
+   * nothing suppressed.
+   */
+  it('a widget with no `.page-break-spacer` yields no decision at all, regardless of clientY', () => {
+    const { editor, mount } = buildEditor(speechSplitBlocks());
+    const seam = seamPosition(editor);
+    const widget = mount.querySelector('.page-break-widget') as HTMLElement;
+    widget.querySelector('.page-break-spacer')?.remove();
+
+    const handled = dispatchHandleClick(editor, seam, 999_999);
+
+    expect(handled).toBe(false);
+    expect(downstreamOf(editor)).toBeUndefined();
+    expect(suppressedBlockIds(mount)).toEqual([]);
+
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * `isMidBlockSeam` gates `handleClick`'s whole decision (seamCaret.ts:431): a click at a document
+   * position that is not a mid-block seam -- here, inside the action block's own text, nowhere near
+   * a page break -- must record nothing, and must actively clear a caret an earlier click drew,
+   * since `handleClick` runs unconditionally on every click per its own doc comment.
+   */
+  it('a click at a position that is not a mid-block seam records nothing, clearing an earlier decision', () => {
+    const { editor, mount } = buildEditor(speechSplitBlocks());
+    const seam = seamPosition(editor);
+    selectAt(editor, seam);
+    setSeamCaretDownstream(editor.view, seam);
+    expect(downstreamOf(editor)).toBe(seam);
+
+    const handled = dispatchHandleClick(editor, 1, 0);
+
+    expect(handled).toBe(false);
+    expect(downstreamOf(editor)).toBeUndefined();
+    expect(suppressedBlockIds(mount)).toEqual([]);
+
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * `resolveSeamDom`'s own fallback (seamCaret.ts:176-179): the module's doc comment states the
+   * widget is the break's immediate DOM sibling "in every case observed in a real browser," and
+   * this is what happens when that shape is not there -- the sibling-search loop runs out of
+   * candidates within its budget and resolves to no DOM at all, rather than guessing. Corrupting
+   * the one class the walk keys on (`page-break-widget`) is the narrowest way to break the shape
+   * without breaking `isMidBlockSeam`'s own, unrelated, decoration-based check, so this test isolates
+   * `resolveSeamDom`'s fallback specifically rather than `isMidBlockSeam`'s.
+   */
+  it('a widget whose DOM no longer has the class resolveSeamDom keys on yields no caret', () => {
+    const { editor, mount } = buildEditor(speechSplitBlocks());
+    const seam = seamPosition(editor);
+    const widget = mount.querySelector('.page-break-widget') as HTMLElement;
+    const spacer = widget.querySelector('.page-break-spacer') as HTMLElement;
+    stubRect(widget, new DOMRect(0, 0, 864, 0));
+    stubRect(spacer, new DOMRect(0, 0, 0, 1000));
+    widget.classList.remove('page-break-widget');
+
+    // Comfortably below the edge computed above (856) if the widget had resolved at all.
+    const handled = dispatchHandleClick(editor, seam, 900);
+
+    expect(handled).toBe(false);
+    expect(downstreamOf(editor)).toBeUndefined();
+    expect(suppressedBlockIds(mount)).toEqual([]);
+
+    editor.destroy();
+    mount.remove();
+  });
+});
+
+describe('seam caret degradation: no pagination plugin, non-textblock positions', () => {
+  /**
+   * `isMidBlockSeam`'s own `if (!decorations) return false;` guard (seamCaret.ts:133-134): a
+   * consumer that installs `SeamCaretExtension` without `PaginationExtension` -- not how `App.tsx`
+   * wires them, but nothing in `SeamCaretExtension`'s own definition prevents it -- must not throw
+   * reading a plugin state that was never registered, and must resolve to no decision.
+   */
+  it('degrades to no decision when the pagination plugin is not installed', () => {
+    const { editor, mount } = buildEditorWithoutPagination(speechSplitBlocks());
+
+    const handled = dispatchHandleClick(editor, 1, 0);
+
+    expect(handled).toBe(false);
+    expect(downstreamOf(editor)).toBeUndefined();
+    expect(suppressedBlockIds(mount)).toEqual([]);
+
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * `suppressionDecorations`' own `if (!$seam.parent.isTextblock) return DecorationSet.empty;`
+   * guard (seamCaret.ts:109-111). Position 0's parent is the document's own top node, never a
+   * textblock, and is reachable here only through the exported `setSeamCaretDownstream` --
+   * `handleClick`'s own call site never passes a position outside a validated mid-block seam, so
+   * this is a defensive guard on the state machine's public surface, not a shape a click can
+   * trigger, and is tested as exactly that: the recorded position still updates, but nothing is
+   * drawn or suppressed for it.
+   */
+  it('a recorded position whose parent is not a textblock draws no suppression decoration', () => {
+    const { editor, mount } = buildEditor(speechSplitBlocks());
+
+    setSeamCaretDownstream(editor.view, 0);
+
+    expect(downstreamOf(editor)).toBe(0);
+    expect(suppressedBlockIds(mount)).toEqual([]);
+
+    editor.destroy();
+    mount.remove();
+  });
+});
+
+/**
+ * `SeamCaretView`'s DOM half: the arithmetic `sync` uses to place the drawn caret, the resize
+ * listener that keeps it correct across a window resize with no transaction of its own, and the
+ * lifecycle that tears both down. This file's header comment explains why the other 22 tests in
+ * this file cannot reach any of it: jsdom's `Range` has no `getClientRects` or `getBoundingClientRect`
+ * at all (verified directly against this project's own jsdom, not assumed) -- calling either
+ * unconditionally, the way `downstreamCaretRect` does, would throw. Both are stubbed on `Range.prototype`
+ * for exactly the tests below, the same way `floatingPanel.test.ts` stubs `getBoundingClientRect` on
+ * individual elements, and restored afterward so no other test in this project observes the stub.
+ */
+describe('SeamCaretView: drawing, resync, and lifecycle', () => {
+  const originalGetClientRects = Range.prototype.getClientRects;
+  const originalGetBoundingClientRect = Range.prototype.getBoundingClientRect;
+
+  afterEach(() => {
+    if (originalGetClientRects === undefined) {
+      delete (Range.prototype as { getClientRects?: unknown }).getClientRects;
+    } else {
+      Range.prototype.getClientRects = originalGetClientRects;
+    }
+    if (originalGetBoundingClientRect === undefined) {
+      delete (Range.prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect;
+    } else {
+      Range.prototype.getBoundingClientRect = originalGetBoundingClientRect;
+    }
+  });
+
+  /**
+   * `downstreamCaretRect` takes the browser's own answer for "what would the native caret's rect
+   * have been" (module doc comment) via `range.getClientRects()[0]`, falling back to
+   * `range.getBoundingClientRect()` when that is empty -- the only shape jsdom can produce, since it
+   * implements neither with real layout. Stubbing `getClientRects` to return `[]` therefore exercises
+   * the exact fallback this module depends on, not a shortcut around it.
+   *
+   * The expected `top`/`left` are computed independently from `sync`'s own stated relationship (its
+   * doc comment): region-content coordinates are the viewport rect minus the region's own viewport
+   * origin, plus the region's current scroll offset.
+   */
+  it("draws a caret at the browser's own downstream rect, converted into the region's scroll coordinates", () => {
+    const { editor, region } = buildEditorInRegion(speechSplitBlocks());
+    const seam = seamPosition(editor);
+    const widget = region.querySelector('.page-break-widget') as HTMLElement;
+    stubRect(widget, new DOMRect(0, 0, 864, 0)); // pixelsPerInch = 144
+    stubRect(region, new DOMRect(50, 20, 700, 900));
+    region.scrollTop = 30;
+    region.scrollLeft = 5;
+    Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+    Range.prototype.getBoundingClientRect = () => new DOMRect(120, 260, 0, 16);
+
+    selectAt(editor, seam);
+    setSeamCaretDownstream(editor.view, seam);
+
+    const caret = region.querySelector('.page-seam-caret') as HTMLDivElement | null;
+    expect(caret).not.toBeNull();
+    expect(caret?.getAttribute('aria-hidden')).toBe('true');
+    expect(caret?.style.top).toBe('270px'); // 260 - 20 + 30
+    expect(caret?.style.left).toBe('75px'); // 120 - 50 + 5
+    expect(caret?.style.height).toBe('16px');
+    expect(caret?.style.width).toBe('1.5px'); // (864 / BODY_WIDTH_IN) / 96
+
+    editor.destroy();
+    region.remove();
+  });
+
+  /**
+   * The resize listener (seamCaret.ts:530-531): a window resize moves `.page` -- and this caret --
+   * sideways with no transaction dispatched (module comment on the listener), so nothing in the
+   * plugin state changes; only a fresh `region.getBoundingClientRect()` measurement would notice.
+   * The region's stubbed rect is changed *after* the first draw and *before* the resize fires, so a
+   * mutation that dropped the `window.addEventListener('resize', resync)` registration leaves the
+   * caret at its stale position and this assertion catches it.
+   */
+  it('a window resize re-measures and moves the caret, with no transaction involved', () => {
+    const { editor, region } = buildEditorInRegion(speechSplitBlocks());
+    const seam = seamPosition(editor);
+    const widget = region.querySelector('.page-break-widget') as HTMLElement;
+    stubRect(widget, new DOMRect(0, 0, 576, 0)); // pixelsPerInch = 96
+    let regionRect = new DOMRect(0, 0, 700, 900);
+    region.getBoundingClientRect = () => regionRect;
+    Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+    Range.prototype.getBoundingClientRect = () => new DOMRect(100, 200, 0, 16);
+
+    selectAt(editor, seam);
+    setSeamCaretDownstream(editor.view, seam);
+    const caret = region.querySelector('.page-seam-caret') as HTMLDivElement;
+    expect(caret.style.left).toBe('100px'); // 100 - 0 + 0
+
+    regionRect = new DOMRect(-40, 0, 700, 900);
+    window.dispatchEvent(new Event('resize'));
+
+    expect(caret.style.left).toBe('140px'); // 100 - (-40) + 0
+
+    editor.destroy();
+    region.remove();
+  });
+
+  /**
+   * `sync`'s own removal path, already exercised at the plugin-state level by `describe('what
+   * clears a drawn seam caret'`'s "losing focus" test -- this isolates the DOM half that test
+   * cannot see (the plugin state check there never reached `sync` successfully, for the same reason
+   * this file's header comment gives): the painted element itself must actually leave the DOM, not
+   * merely stop being reflected in plugin state.
+   */
+  it('losing focus removes the drawn element from the DOM, not just the plugin state', () => {
+    const { editor, region } = buildEditorInRegion(speechSplitBlocks());
+    const seam = seamPosition(editor);
+    const widget = region.querySelector('.page-break-widget') as HTMLElement;
+    stubRect(widget, new DOMRect(0, 0, 576, 0));
+    stubRect(region, new DOMRect(0, 0, 700, 900));
+    Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+    Range.prototype.getBoundingClientRect = () => new DOMRect(100, 200, 0, 16);
+
+    selectAt(editor, seam);
+    setSeamCaretDownstream(editor.view, seam);
+    expect(region.querySelector('.page-seam-caret')).not.toBeNull();
+
+    editor.view.dom.dispatchEvent(new FocusEvent('blur'));
+
+    expect(region.querySelector('.page-seam-caret')).toBeNull();
+
+    editor.destroy();
+    region.remove();
+  });
+
+  /**
+   * The other half of the resize listener's lifecycle: `destroy()` (seamCaret.ts:534) must remove
+   * exactly the listener `view()` registered, or every editor this plugin was ever attached to
+   * leaks one `resize` listener referencing a destroyed view for the lifetime of the page.
+   */
+  it('destroying the editor removes its window resize listener', () => {
+    const { editor, region } = buildEditorInRegion(speechSplitBlocks());
+    const removeSpy = vi.spyOn(window, 'removeEventListener');
+
+    editor.destroy();
+
+    expect(removeSpy).toHaveBeenCalledWith('resize', expect.any(Function));
+
+    removeSpy.mockRestore();
+    region.remove();
   });
 });
