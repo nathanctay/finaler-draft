@@ -1375,6 +1375,63 @@ test.describe('page rendering: real editor, real DOM', () => {
     expect(await measurePage(page)).toEqual(withoutSeamCaret);
 
     /*
+     * Behaviour 5: the keyboard-affinity gap the owner found test-driving this branch
+     * (`apps/web/src/seamCaret.ts`'s `handleKeyDown`/`appendTransaction`, added after the click
+     * behaviour above was already verified). The `ArrowLeft` just above landed the real selection
+     * one code unit upstream of the seam -- the end of page 1's last word, immediately before the
+     * cell `packages/layout/src/model.ts`'s `AuthoredLine` doc comment documents as consumed into
+     * `endOffset` but never rendered. A single `ArrowRight` from there is the whole of the defect
+     * as the owner reported it: without this behaviour it arrives at the seam and still renders
+     * upstream (a wasted keystroke, into a cell page 1 does not print); with it, it renders at the
+     * visual start of page 2, matching what a click on the incoming sheet already draws.
+     */
+    await page.keyboard.press('ArrowRight');
+    await expect(seamCaret).toHaveCount(1);
+    await expect(suppressed).toHaveCount(1);
+    await expect(suppressed).toHaveAttribute('data-block-id', seam.blockId);
+    // The real selection is untouched, exactly as a click's own downstream draw leaves it
+    // (behaviour 2): still the end of the upstream text node, at the seam's document position.
+    expect(await domSelection()).toEqual({
+      isText: true,
+      length: seam.offset,
+      offset: seam.offset,
+      collapsed: true,
+    });
+    // Drawn where a click would have drawn it: the downstream DOM position's own collapsed-range
+    // rectangle, re-measured (rather than reusing `geometry` from above) for the same reason
+    // `afterArrow`/`beforeTyping` below re-measure theirs -- nothing has moved here, but nothing
+    // about this assertion should depend on that being true.
+    const afterRightArrow = await measureSeam(page, seam.blockId);
+    const drawnByArrowKey = await page.evaluate(() => {
+      const element = document.querySelector('.page-seam-caret');
+      if (!(element instanceof HTMLElement)) throw new Error('No drawn seam caret.');
+      const rect = element.getBoundingClientRect();
+      return { top: rect.top, left: rect.left, height: rect.height };
+    });
+    expect(drawnByArrowKey.top).toBeCloseTo(afterRightArrow.downstream.top, 1);
+    expect(drawnByArrowKey.left).toBeCloseTo(afterRightArrow.downstream.left, 1);
+    expect(drawnByArrowKey.height).toBeCloseTo(afterRightArrow.downstream.height, 1);
+    expect(await measurePage(page)).toEqual(withoutSeamCaret);
+
+    /*
+     * Behaviour 6: the symmetric return, and the reason this module does not need to track which
+     * direction a keystroke travelled from (module header comment). `ArrowLeft` from here moves
+     * the real, upstream-anchored selection back by one code unit -- off the seam entirely, to
+     * the end of page 1's last word, exactly where behaviour 3 above already left it -- which the
+     * existing selection-moved clearing rule (untouched by this slice) already handles.
+     */
+    await page.keyboard.press('ArrowLeft');
+    await expect(seamCaret).toHaveCount(0);
+    await expect(suppressed).toHaveCount(0);
+    expect(await domSelection()).toEqual({
+      isText: true,
+      length: seam.offset,
+      offset: seam.offset - 1,
+      collapsed: true,
+    });
+    expect(await measurePage(page)).toEqual(withoutSeamCaret);
+
+    /*
      * Drawn again, then cleared by focus leaving the manuscript.
      *
      * The `waitForTimeout` and each click's `delay` here are load-bearing, not courtesy: this

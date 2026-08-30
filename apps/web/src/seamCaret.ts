@@ -340,6 +340,29 @@ class SeamCaretView {
 }
 
 /**
+ * The one kind of caret motion this module draws downstream for, and why the line falls exactly
+ * on horizontal vs. everything else rather than, say, on which side of the seam the writer was
+ * coming from.
+ *
+ * A writer arriving at the seam by `ArrowRight`/`End` from page 1, or by `ArrowLeft`/`Home` from
+ * page 2, wants what a click on the incoming sheet already draws: the visual start of page 2,
+ * not the invisible cell after page 1's last printed character (or the wrap-consumed whitespace
+ * before it -- see `packages/layout/src/model.ts`'s `AuthoredLine` doc comment for why that cell
+ * exists in the document but is never rendered). Both directions land on the SAME document
+ * position (the module header's finding 1), so this is symmetric by construction and needs no
+ * memory of which side the writer started on -- only whether the key that produced the arrival
+ * was one of these four.
+ *
+ * `ArrowUp`/`ArrowDown`/`PageUp`/`PageDown` are excluded on purpose, not by omission: `ArrowUp`
+ * from the right-hand end of page 2's first line also resolves to this same seam position, and
+ * drawing it downstream there would make the caret appear to leap forward to page 2's left
+ * margin instead of moving back to page 1 -- exactly the direction the writer did not press. So
+ * vertical motion -- and every other key besides these four -- leaves the seam exactly where
+ * finding 2 says ProseMirror already renders it: upstream, unchanged.
+ */
+const HORIZONTAL_SEAM_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'Home', 'End']);
+
+/**
  * The seam caret. Installed from `App.tsx` alongside `PaginationExtension`, whose decorations it
  * reads, rather than inside `screenplayExtensions`: like pagination, the ghost, and the element
  * menu, it is a layer over the screenplay editor and not part of what a block is, so every test
@@ -347,12 +370,39 @@ class SeamCaretView {
  */
 export const SeamCaretExtension = Extension.create({
   addProseMirrorPlugins() {
+    /**
+     * The one piece of intent `appendTransaction` below cannot recover from the transaction
+     * itself: whether the keystroke that is about to move the selection was one of the four
+     * horizontal seam keys. There is no ProseMirror keymap binding for plain
+     * arrow/Home/End/PageUp/PageDown navigation in this editor -- the browser's own
+     * contentEditable caret movement handles it, and `prosemirror-view`'s DOM observer converts
+     * the result into an ordinary selection-sync transaction afterward, indistinguishable by then
+     * from a click or a programmatic move. This is scoped inside `addProseMirrorPlugins` (a fresh
+     * closure per editor, the same convention `paginationExtension.ts`'s `pendingFrame` uses one
+     * level down inside `view()`) rather than at module scope, so two open editors -- or two
+     * editors across tests -- never share it.
+     */
+    let pendingKeyMotion = false;
     return [
       new Plugin<SeamCaretState>({
         key: seamCaretPluginKey,
         props: {
           decorations(state) {
             return seamCaretPluginKey.getState(state)?.decorations;
+          },
+          /**
+           * Records whether this keystroke was a horizontal seam key and nothing else -- no
+           * position, no dispatch, no `preventDefault`. `appendTransaction` reads it once the
+           * browser's own key handling has actually produced a selection change; this handler's
+           * only job is to still be correct by the time that happens, which is why every other
+           * key -- Shift-held ones (extending a selection, not moving a caret) included -- sets
+           * it back to `false` rather than leaving it alone: the invariant this module runs on
+           * requires `selection.empty`, and a stale `true` from an earlier, unrelated keystroke
+           * must never survive to be misread against a later, unrelated selection change.
+           */
+          handleKeyDown(_view, event) {
+            pendingKeyMotion = !event.shiftKey && HORIZONTAL_SEAM_KEYS.has(event.key);
+            return false;
           },
           /**
            * Focus loss clears the drawn caret for the same reason the browser stops painting the
@@ -427,6 +477,46 @@ export const SeamCaretExtension = Extension.create({
           init() {
             return EMPTY_STATE;
           },
+        },
+        /**
+         * The other half of the horizontal-motion rule -- `handleKeyDown` above records the
+         * intent; this is where it gets spent. `appendTransaction` is handed every transaction
+         * this view dispatches, `oldState` and `newState` both, which is exactly what
+         * `handleKeyDown` cannot see on its own: whether the selection actually moved, and to
+         * where. Answering it here, rather than in a `view().update()` callback, keeps the
+         * answer atomic with the selection change itself -- no extra render frame where a caret
+         * drawn late could be seen to jump.
+         *
+         * `pendingKeyMotion` is consumed (reset to `false`) on the first transaction that
+         * actually changes the selection, whatever that transaction turns out to be -- a click's
+         * own selection-placing dispatch included, since a click always runs `handleClick`
+         * afterward and that handler decides the click's own outcome unconditionally, overwriting
+         * anything decided here. Consuming on the first change rather than on a matching key
+         * means a keystroke whose motion got intercepted before reaching the DOM cannot leak its
+         * intent onto some later, unrelated selection change. A transaction that leaves the
+         * selection untouched -- the pagination and SmartType no-ops `apply`'s own doc comment
+         * already excludes from clearing the caret -- is invisible to this check for the same
+         * reason it is invisible to that one, so `pendingKeyMotion` survives across any number of
+         * them while it waits for the real one.
+         */
+        appendTransaction(_transactions, oldState, newState) {
+          const motion = pendingKeyMotion;
+          if (!motion || oldState.selection.eq(newState.selection)) {
+            return null;
+          }
+          pendingKeyMotion = false;
+          if (!newState.selection.empty) {
+            return null;
+          }
+          const pos = newState.selection.from;
+          if (!isMidBlockSeam(newState, pos)) {
+            return null;
+          }
+          if (seamCaretPluginKey.getState(newState)?.downstream === pos) {
+            return null;
+          }
+          const meta: SeamCaretMeta = { downstream: pos };
+          return newState.tr.setMeta(seamCaretPluginKey, meta);
         },
         view(editorView) {
           const caret = new SeamCaretView(editorView);

@@ -231,3 +231,80 @@ under a second. Whatever the installer's own unzip step was doing, it was not si
   newly observed, not previously documented, and was not investigated -- it did not reproduce
   standalone or on a repeat full-file run, and `elementMenu.tsx`/`elementMenu.test.ts` were not
   touched by this slice.
+
+## Update: the keyboard-affinity half, implemented
+
+The "Known limitations" bullet above ("The keyboard-affinity half of the owner's decision is not
+implemented") is now stale. A later agent picked up that second, explicitly separate slice and
+implemented it in `apps/web/src/seamCaret.ts`: `handleKeyDown` records whether the key that
+produced the next selection change was horizontal; `appendTransaction` spends that intent on the
+first transaction that actually moves the selection, drawing the caret downstream at the seam
+exactly as a click on the incoming sheet already does.
+
+**The behaviour.** `ArrowLeft`/`ArrowRight`/`Home`/`End` arriving at a mid-block seam draw the
+caret downstream -- the visual start of page 2 -- matching what a click on the incoming sheet
+already draws. `ArrowUp`/`ArrowDown`/`PageUp`/`PageDown` arriving at the same seam position leave
+it exactly where ProseMirror already rendered it before this behaviour existed: upstream, at the
+end of page 1. A `Shift`-held key never draws downstream, whichever key it is, since it produces a
+range selection rather than a moved caret and the module's invariant requires an empty selection
+at the drawn position.
+
+**The owner's per-motion rule, and why "all motion draws downstream" was rejected.** `ArrowUp` from
+the right-hand end of page 2's first line resolves to the identical seam document position (module
+header, finding 1) as `ArrowRight` from the end of page 1. If every arrival at the seam drew
+downstream regardless of key, that `ArrowUp` would render the caret jumping forward to page 2's
+left margin instead of moving back to page 1 -- exactly the opposite of the direction the writer
+pressed. So the rule is not "any motion that lands here draws downstream"; it is specifically
+horizontal motion, because only horizontal motion at this seam is symmetric in the way that makes
+"downstream" the correct rendering irrespective of which side the writer arrived from. Vertical
+motion is not symmetric that way, so it is left alone.
+
+**The Task 1 simplification, and why it is safe.** `handleKeyDown` was originally a three-branch
+conditional (`shiftKey` clears the pending intent; a key in `HORIZONTAL_SEAM_KEYS` sets it to
+`'horizontal'`; a key in a separate `VERTICAL_SEAM_KEYS` set sets it to `'vertical'`; any other key
+left the closure variable untouched) backed by a `SeamMotion` union type. It was replaced with a
+single assignment, `pendingKeyMotion = !event.shiftKey && HORIZONTAL_SEAM_KEYS.has(event.key)`,
+changing `pendingKeyMotion` to a plain boolean and deleting `VERTICAL_SEAM_KEYS` and the
+`SeamMotion` type entirely (`appendTransaction` updated to check the boolean directly instead of
+comparing against the string `'horizontal'`). This is a strict simplification, not a behaviour
+change: the new form clears the flag to `false` on every key that is not an unshifted horizontal
+key -- a strict superset of what the old code cleared (`Shift` only) -- so it can only ever leave
+`pendingKeyMotion` more conservatively `false`, never `true` in a case where the old code would
+have left it `false` or `'vertical'`. `'vertical'` and `false` were always handled identically by
+`appendTransaction` (neither is `'horizontal'`), so collapsing that distinction changes nothing
+observable. All 22 pre-existing unit tests, including the per-motion `it.each` tables for both the
+four horizontal and four vertical keys and the two Shift tests, passed unchanged after the
+simplification -- no test needed editing to compile or to pass. Two mutations were re-run by hand
+to confirm the simplified line is still meaningfully tested: forcing `pendingKeyMotion` to always
+`false` (killed six tests, all built on `pressKeyTo`/`downstreamOf` expecting a horizontal key to
+draw the caret); and inverting the `HORIZONTAL_SEAM_KEYS.has(...)` check to its negation (killed
+ten tests -- the six above plus the four `it.each` cases that expect a _vertical_ key to leave the
+seam upstream, which the inversion now drew downstream instead).
+
+**Known limitation, stated plainly.** `fourPageMixedAnchorFixture()`
+(`apps/web/e2e/page-rendering-persistence.spec.ts`) is built from `'x'.repeat(...)` with no spaces,
+so its mid-block seam is a hard character-budget cut, not the whitespace-consuming wrap described
+in `packages/layout/src/model.ts:44-56`. The mechanism implemented here does not distinguish the
+two -- it branches on document position and key horizontality, never on why the seam fell where it
+did -- so the e2e test (Behaviours 5 and 6) is faithful to the code as written. But it does not
+reproduce the exact case the owner reported by hand, where the caret lands after a consumed
+wrap-space rather than after a hard character cutoff. A real word-wrap fixture -- one built from
+actual prose that wraps at a space, not a synthetic `'x'` run -- would close that gap and is not in
+this slice.
+
+## Gate results, this pass
+
+All from the worktree, repo root unless noted; `apps/web/src/seamCaret.ts` was the only file
+changed in this pass (the Task 1 simplification above).
+
+1. `pnpm lint` -- clean, exit 0.
+2. `pnpm format:check` -- clean, "All matched files use Prettier code style!".
+3. `pnpm typecheck` -- clean across every package and both apps.
+4. `pnpm test` -- clean; `apps/web` 464 tests passing (36 files), including `seamCaret.test.ts`'s
+   22; every other package unchanged from its own baseline.
+5. `pnpm check:bundle-budget` -- clean: entry chunk 111.40 kB / 120.00 kB, lazy editor chunk
+   113.34 kB / 200.00 kB, CSS 5.74 kB / 20.00 kB budget.
+6. `TEST_DATABASE_URL=... pnpm test:system:persistence` -- clean, 15/15 passed on the first run of
+   this pass, including Behaviours 5 and 6 (inside the seam-caret e2e test at line 1158, "a caret
+   drawn at a mid-block page seam...") and the known-flaky `elementMenu` test (which also passed
+   this run and was not touched).
