@@ -3,7 +3,7 @@ import { createAuth } from './auth.js';
 import { buildApp } from './app.js';
 import { cachedProbe } from './cachedProbe.js';
 import { loadRootEnvironment, shouldLoadRootEnvironment } from './environment.js';
-import { createLoggingMailPort, createResendMailPort, type MailMessage } from './mail.js';
+import { selectMailPort, type MailMessage } from './mail.js';
 import { createPostgresProjectStore } from './projects.js';
 
 try {
@@ -45,10 +45,15 @@ async function buildPersistentApp(
     rateLimit: { max: number; timeWindowMs: number };
   },
 ) {
-  // `RESEND_API_KEY`/`MAIL_FROM_ADDRESS` unset selects the logging port -- always true outside
-  // production (server-config's `requirePersistenceEnvironment` refuses to start a production
-  // process without both), and also true here in every Playwright/system-test run, none of which
-  // set a real key.
+  // `selectMailPort` (mail.ts) is what actually enforces the safety property this comment used
+  // to only assert: in system-test mode the logging port is selected regardless of whether
+  // Resend credentials are present, so a real `RESEND_API_KEY` sitting in a developer's
+  // environment or `.env` -- which legitimately belongs there for normal local runs -- can never
+  // reach a live send during a system-test process (`scripts/test-system-persistence.mjs` and
+  // `playwright.config.ts`'s `webServer` both spawn this process by inheriting the ambient
+  // environment). Outside system-test mode, unset credentials still select the logging port,
+  // which is always true outside production -- `server-config`'s `requirePersistenceEnvironment`
+  // refuses to start a production process without both.
   //
   // `testMailbox` and the `onSend` hook below exist only so a Playwright spec -- which has no way
   // to inject a fake `MailPort` the way a Vitest test does -- can still complete the real
@@ -57,17 +62,12 @@ async function buildPersistentApp(
   // unexercised by the browser-driven suites. It is only ever populated, and only ever served
   // (see app.ts's `testMail` option), when `FINALER_SYSTEM_TEST` is set.
   const testMailbox = new Map<string, MailMessage>();
-  const mail =
-    persistence.RESEND_API_KEY && persistence.MAIL_FROM_ADDRESS
-      ? createResendMailPort({
-          apiKey: persistence.RESEND_API_KEY,
-          from: persistence.MAIL_FROM_ADDRESS,
-        })
-      : createLoggingMailPort({
-          onSend: options.systemTestMode
-            ? (message) => testMailbox.set(message.to, message)
-            : undefined,
-        });
+  const mail = selectMailPort({
+    systemTestMode: options.systemTestMode,
+    resendApiKey: persistence.RESEND_API_KEY,
+    mailFromAddress: persistence.MAIL_FROM_ADDRESS,
+    onSend: options.systemTestMode ? (message) => testMailbox.set(message.to, message) : undefined,
+  });
   // The browser system suite runs several Playwright workers in parallel, and every one of them
   // signs up a fresh writer from the same loopback address -- so Better Auth's own limit (3
   // requests per 10 seconds on `/sign-up` and `/sign-in`, hardcoded in 1.6.25) throttles the

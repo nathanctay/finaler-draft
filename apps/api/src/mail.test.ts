@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createLoggingMailPort, createResendMailPort } from './mail.js';
+import { createLoggingMailPort, createResendMailPort, selectMailPort } from './mail.js';
 
 describe('createResendMailPort', () => {
   it('POSTs the message to Resend with the API key and from address, never touching the real network', async () => {
@@ -147,5 +147,143 @@ describe('createLoggingMailPort', () => {
     await expect(
       createLoggingMailPort({}).send({ to: 'writer@example.test', subject: 'S', text: 'T' }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('selectMailPort', () => {
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+  });
+
+  it('in system-test mode with both Resend variables set, selects the logging port and never touches fetch', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    try {
+      const port = selectMailPort({
+        systemTestMode: true,
+        resendApiKey: 'test-key',
+        mailFromAddress: 'noreply@example.test',
+      });
+
+      await port.send({ to: 'writer@example.test', subject: 'Subject', text: 'Text' });
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      // The logging port's own unambiguous event name, not Resend's request shape -- confirms
+      // which port was actually returned, not just that fetch happened to go untouched.
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining('mail_delivery_skipped_no_provider_configured'),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('in system-test mode with both variables set, still wires the onSend mailbox hook', async () => {
+    const onSend = vi.fn();
+    const message = { to: 'writer@example.test', subject: 'Subject', text: 'Text' };
+    const port = selectMailPort({
+      systemTestMode: true,
+      resendApiKey: 'test-key',
+      mailFromAddress: 'noreply@example.test',
+      onSend,
+    });
+
+    await port.send(message);
+
+    expect(onSend).toHaveBeenCalledWith(message);
+  });
+
+  it('outside system-test mode with both variables set, still selects the Resend port', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true } as Response);
+    vi.stubGlobal('fetch', fetchSpy);
+    try {
+      const port = selectMailPort({
+        systemTestMode: false,
+        resendApiKey: 'test-key',
+        mailFromAddress: 'noreply@example.test',
+      });
+
+      await port.send({ to: 'writer@example.test', subject: 'Subject', text: 'Text' });
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchSpy.mock.calls[0]!;
+      expect(url).toBe('https://api.resend.com/emails');
+      expect(init?.headers).toMatchObject({ Authorization: 'Bearer test-key' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('with credentials absent, in either mode, selects the logging port', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    try {
+      const systemTestPort = selectMailPort({
+        systemTestMode: true,
+        resendApiKey: undefined,
+        mailFromAddress: undefined,
+      });
+      const productionPort = selectMailPort({
+        systemTestMode: false,
+        resendApiKey: undefined,
+        mailFromAddress: undefined,
+      });
+
+      await systemTestPort.send({ to: 'writer@example.test', subject: 'Subject', text: 'Text' });
+      await productionPort.send({ to: 'writer@example.test', subject: 'Subject', text: 'Text' });
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(logSpy).toHaveBeenCalledTimes(2);
+      for (const call of logSpy.mock.calls) {
+        expect(JSON.parse(call[0] as string)).toMatchObject({
+          event: 'mail_delivery_skipped_no_provider_configured',
+        });
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('logs the suppression only when system-test mode discards usable credentials, and never logs the key value', () => {
+    selectMailPort({
+      systemTestMode: true,
+      resendApiKey: 'super-secret-key',
+      mailFromAddress: 'noreply@example.test',
+    });
+
+    const suppressionCall = logSpy.mock.calls.find((call) =>
+      (call[0] as string).includes('mail_credentials_suppressed_system_test_mode'),
+    );
+    expect(suppressionCall).toBeDefined();
+    const logged = JSON.parse(suppressionCall![0] as string);
+    expect(logged).toEqual({
+      event: 'mail_credentials_suppressed_system_test_mode',
+      variables: ['RESEND_API_KEY', 'MAIL_FROM_ADDRESS'],
+    });
+    expect(suppressionCall![0] as string).not.toContain('super-secret-key');
+    logSpy.mockClear();
+
+    // Not system-test mode: real credentials are used, nothing suppressed.
+    selectMailPort({
+      systemTestMode: false,
+      resendApiKey: 'super-secret-key',
+      mailFromAddress: 'noreply@example.test',
+    });
+    expect(logSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('mail_credentials_suppressed_system_test_mode'),
+    );
+    logSpy.mockClear();
+
+    // System-test mode, but no credentials to suppress in the first place.
+    selectMailPort({ systemTestMode: true, resendApiKey: undefined, mailFromAddress: undefined });
+    expect(logSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('mail_credentials_suppressed_system_test_mode'),
+    );
   });
 });
