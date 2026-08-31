@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Editor } from '@tiptap/core';
 import { Fragment, type Node as ProseMirrorNode } from '@tiptap/pm/model';
+import { TextSelection } from '@tiptap/pm/state';
 import { DEFAULT_DOCUMENT_SETTINGS, type ScreenplayBlock } from '@finaler-draft/screenplay';
 import { screenplayExtensions } from './screenplayEditor.js';
 import {
@@ -171,6 +172,22 @@ function rectAt(
   bottom: number,
 ): { top: number; bottom: number; left: number; right: number } {
   return { top, bottom, left: 0, right: 0 };
+}
+
+/**
+ * Dispatches a transaction that actually moves the selection to `pos`. The jump scroll's own
+ * `update()` guard (paginationExtension.ts) only runs `maybeJumpScrollCaretIntoView` when the
+ * document or the selection genuinely changed (`Node.eq`/`Selection.eq`) -- added to stop a
+ * ProseMirror state update with neither (a plugin reconfigure forced by `useEditor`'s own options
+ * changing identity, without changing value, is the real case this guards against; see
+ * progress/zoom-scroll-drift.md) from running this caret-visibility heuristic for no reason. A
+ * bare `editor.state.tr` (no change at all) therefore no longer triggers it, so the jump-scroll
+ * tests below use this instead, standing in for "the first keystroke or selection change" the
+ * module comment above already describes -- the same real-world event `editor.view.dispatch
+ * (editor.state.tr)` used to model before that guard existed.
+ */
+function dispatchSelectionMove(editor: Editor, pos: number): void {
+  editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, pos)));
 }
 
 /** A stubbed `coordsAtPos` result. Only `top`/`bottom` are read by the compensation, but the real
@@ -839,7 +856,7 @@ describe('jump scroll', () => {
     vi.spyOn(editor.view, 'coordsAtPos').mockReturnValueOnce(rectAt(300, 316));
     region.scrollTop = 50;
 
-    editor.view.dispatch(editor.state.tr);
+    dispatchSelectionMove(editor, 2);
 
     expect(region.scrollTop).toBe(50);
   });
@@ -869,10 +886,10 @@ describe('jump scroll', () => {
       .mockReturnValueOnce(rectAt(584, 600));
     region.scrollTop = 50;
 
-    editor.view.dispatch(editor.state.tr);
+    dispatchSelectionMove(editor, 2);
     expect(region.scrollTop).toBe(50);
 
-    editor.view.dispatch(editor.state.tr);
+    dispatchSelectionMove(editor, 4);
     expect(region.scrollTop).toBe(134);
     expect(coordsSpy).toHaveBeenCalledTimes(2);
   });
@@ -893,7 +910,7 @@ describe('jump scroll', () => {
     vi.spyOn(editor.view, 'coordsAtPos').mockReturnValueOnce(rectAt(590, 606));
     region.scrollTop = 10;
 
-    editor.view.dispatch(editor.state.tr);
+    dispatchSelectionMove(editor, 2);
 
     expect(region.scrollTop).toBe(50);
   });
@@ -921,7 +938,7 @@ describe('jump scroll', () => {
     vi.spyOn(editor.view, 'coordsAtPos').mockReturnValueOnce(rectAt(100, 650));
     region.scrollTop = 50;
 
-    editor.view.dispatch(editor.state.tr);
+    dispatchSelectionMove(editor, 2);
 
     expect(region.scrollTop).toBe(50);
   });
@@ -946,7 +963,7 @@ describe('jump scroll', () => {
       vi.spyOn(editor.view, 'coordsAtPos').mockReturnValueOnce(rectAt(600, 616));
       region.scrollTop = 0;
 
-      editor.view.dispatch(editor.state.tr);
+      dispatchSelectionMove(editor, 2);
 
       expect(region.scrollTop).toBe(expectedScrollTop);
       editor.destroy();
@@ -972,7 +989,7 @@ describe('jump scroll', () => {
     vi.spyOn(editor.view, 'coordsAtPos').mockReturnValueOnce(rectAt(600, 616));
     region.scrollTop = 0;
 
-    editor.view.dispatch(editor.state.tr);
+    dispatchSelectionMove(editor, 2);
 
     expect(region.scrollTop).toBe(80);
   });
@@ -1041,5 +1058,65 @@ describe('jump scroll', () => {
     // screen position. Jump scroll, evaluated against that restored position: desired caret top
     // is 600 - 100 = 500, so the target is 210 + (590 - 500) = 300.
     expect(region.scrollTop).toBe(300);
+  });
+
+  /**
+   * The `update(view, previousState)` guard added for the zoom-scroll-drift diagnosis
+   * (progress/zoom-scroll-drift.md): a view update where neither the document nor the selection
+   * actually changed (`Node.eq`/`Selection.eq`) must not run `maybeJumpScrollCaretIntoView` at
+   * all, even when the caret's own stubbed geometry is sitting well past the trigger edge -- a
+   * caret that never moved has no business being "jumped" into view by an update caused by
+   * something else entirely (the concrete case: `@tiptap/react`'s `useEditor` calling
+   * `editor.setOptions(...)` on an unrelated `<App>` re-render, reconfiguring every plugin without
+   * moving the document or the selection). `editor.state.tr`, dispatched with no modification at
+   * all, is exactly this: the same doc, the same selection, a state update in name only.
+   */
+  it('does not run the jump scroll for a view update that changes neither the document nor the selection', () => {
+    const { editor, mount, page, region } = buildEditorInPageRegion(
+      plainTwoPageBlocks().slice(0, 1),
+      { regionTop: 0, regionHeight: 600, scrollHeight: 2000, pageWidthPx: 1020 },
+    );
+    cleanups.push(() => {
+      editor.destroy();
+      mount.remove();
+      page.remove();
+      region.remove();
+    });
+    // Past the trigger edge on every call, so a jump -- if the guard let one through -- would be
+    // unmistakable, not merely a coincidence of a comfortable caret.
+    vi.spyOn(editor.view, 'coordsAtPos').mockReturnValue(rectAt(584, 600));
+    region.scrollTop = 50;
+
+    editor.view.dispatch(editor.state.tr);
+
+    expect(region.scrollTop).toBe(50);
+  });
+
+  /**
+   * The other half of the same guard: a real selection move that lands the caret at the bottom
+   * edge must still jump, exactly as before this guard existed -- the module comment above this
+   * `describe` block's own requirement ("a plain selection move ... can just as well land the
+   * caret at the bottom edge as an edit can") is not weakened by the guard added for the
+   * zoom-scroll-drift fix, only a no-op update is newly excluded.
+   */
+  it('still runs the jump scroll for a real selection move that lands the caret at the bottom edge', () => {
+    const { editor, mount, page, region } = buildEditorInPageRegion(
+      plainTwoPageBlocks().slice(0, 1),
+      { regionTop: 0, regionHeight: 600, scrollHeight: 2000, pageWidthPx: 1020 },
+    );
+    cleanups.push(() => {
+      editor.destroy();
+      mount.remove();
+      page.remove();
+      region.remove();
+    });
+    vi.spyOn(editor.view, 'coordsAtPos').mockReturnValue(rectAt(584, 600));
+    region.scrollTop = 50;
+
+    dispatchSelectionMove(editor, 2);
+
+    // Same formula as "stays still until the caret's bottom reaches the edge...": desired caret
+    // top 600 - 100 = 500, target 50 + (584 - 500) = 134.
+    expect(region.scrollTop).toBe(134);
   });
 });
