@@ -1183,6 +1183,63 @@ select:focus-visible,
   line-height: 1.35;
 }
 
+/*
+ * The caret at a mid-block page seam (apps/web/src/seamCaret.ts). Removing that layer means
+ * deleting its file, its one line in `App.tsx`, and these two rules; nothing above depends on
+ * them.
+ *
+ * `.page-seam-caret` is drawn by the plugin, not by ProseMirror, and is appended to
+ * `.editor-region` rather than anywhere inside `.page` -- see the module's own comment for why
+ * that is a requirement and not a preference. `position: absolute` against `.editor-region`'s
+ * padding box is what makes it scroll with the manuscript and clip to the region without a scroll
+ * listener; `top`, `left`, `height` and `width` are all written by the plugin from a measured
+ * collapsed-range rectangle, so none of them appears here.
+ *
+ * `z-index: 1` puts it over the manuscript it stands on and under everything else this
+ * application floats -- the panels (2), `.overflow-menu-list` (5), `.smarttype-list` and
+ * `.element-menu` (8), `.dialog-overlay` (10), `.toast` (20). A caret is the lowest form of
+ * overlay there is.
+ *
+ * The colour is the manuscript's own ink rather than an accent: a caret is where the next
+ * character will be, so it should be that character's colour. `--text-19` and the `--dark-text-09`
+ * that `.dark .page` switches the manuscript to are the same value, so there is no dark variant to
+ * write -- a second rule here would be two names for one colour, not a theme.
+ *
+ * The blink is Chrome's own: 500ms visible, 500ms hidden, which is a 1s `step-end` cycle. Under
+ * `prefers-reduced-motion` it holds steady instead, matching how `.toast` drops its own animation
+ * -- the caret is still exactly where it was, it simply does not flash to say so.
+ */
+.page-seam-caret {
+  position: absolute;
+  z-index: 1;
+  background: var(--text-19);
+  pointer-events: none;
+  animation: page-seam-caret-blink 1s step-end infinite;
+}
+
+@keyframes page-seam-caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-seam-caret {
+    animation: none;
+  }
+}
+
+/*
+ * The native caret's suppression, applied by seamCaret.ts as a node decoration to the single block
+ * whose seam is currently being drawn at, and present only while it is. Scoped to that one block
+ * rather than to `.ProseMirror` deliberately: the real selection is inside this block whenever
+ * this class exists (the module's invariant), so this is the only element whose caret could be
+ * painted, and a broader rule would be a standing suppression waiting for a bug to expose it.
+ */
+.script-body [data-screenplay-block].page-seam-caret-host {
+  caret-color: transparent;
+}
+
 .inspector-section {
   padding: 13px;
   border-bottom: 1px solid var(--border-02);

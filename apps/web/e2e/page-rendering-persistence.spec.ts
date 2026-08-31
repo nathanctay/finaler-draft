@@ -1,7 +1,8 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page, type Request } from '@playwright/test';
 import { paginateScreenplay, type AuthoredLine, type LayoutResult } from '@finaler-draft/layout';
 import type { ScreenplayBlock } from '@finaler-draft/screenplay';
 import {
+  BODY_WIDTH_IN,
   LINES_PER_INCH,
   MARGIN_TOP_IN,
   PAGE_HEIGHT_IN,
@@ -227,6 +228,69 @@ function measurePage(page: Page) {
       scrollWidth: region.scrollWidth,
     };
   });
+}
+
+/**
+ * Scrolls the mid-block break inside `blockId` into view and measures the seam's two DOM
+ * realizations, plus the incoming sheet's own top paper edge.
+ *
+ * Re-measured before every click rather than captured once, because the editor scrolls: moving
+ * the caret makes ProseMirror bring the selection into view, which slides the whole manuscript
+ * under any viewport coordinate taken before it.
+ *
+ * `sheetTop` is rebuilt here from the model's own formula -- `.page-break-spacer`'s bottom is the
+ * incoming page's first line position (`computePageBreaks`'s `spacerHeightIn`), so one top margin
+ * above it is where that page's paper starts -- rather than read out of `seamCaret.ts`, so the
+ * boundary this test holds the click handler to is derived independently of the code under test.
+ */
+async function measureSeam(page: Page, blockId: string) {
+  return page.evaluate(
+    ({
+      blockId: id,
+      bodyWidthIn,
+      marginTopIn,
+    }: {
+      blockId: string;
+      bodyWidthIn: number;
+      marginTopIn: number;
+    }) => {
+      const block = document.querySelector(`[data-block-id="${id}"]`);
+      if (!block) throw new Error(`Missing block element for ${id}.`);
+      const widgets = block.querySelectorAll(':scope > .page-break-widget');
+      if (widgets.length !== 1) {
+        throw new Error(`Expected one nested break widget, found ${widgets.length}.`);
+      }
+      const widget = widgets[0] as HTMLElement;
+      widget.scrollIntoView({ block: 'center' });
+      const upstreamText = widget.previousSibling;
+      const downstreamText = widget.nextSibling;
+      if (
+        upstreamText?.nodeType !== Node.TEXT_NODE ||
+        downstreamText?.nodeType !== Node.TEXT_NODE
+      ) {
+        throw new Error('The seam is not text-widget-text in the DOM.');
+      }
+      const collapsedRect = (node: Node, offset: number) => {
+        const range = document.createRange();
+        range.setStart(node, offset);
+        range.setEnd(node, offset);
+        const rects = Array.from(range.getClientRects());
+        const rect = rects[0] ?? range.getBoundingClientRect();
+        return { top: rect.top, left: rect.left, height: rect.height };
+      };
+      const spacer = widget.querySelector('.page-break-spacer');
+      if (!spacer) throw new Error('The break widget has no spacer.');
+      return {
+        upstreamLength: upstreamText.textContent?.length ?? -1,
+        upstream: collapsedRect(upstreamText, upstreamText.textContent?.length ?? 0),
+        downstream: collapsedRect(downstreamText, 0),
+        sheetTop:
+          spacer.getBoundingClientRect().bottom -
+          (widget.getBoundingClientRect().width / bodyWidthIn) * marginTopIn,
+      };
+    },
+    { blockId, bodyWidthIn: BODY_WIDTH_IN, marginTopIn: MARGIN_TOP_IN },
+  );
 }
 
 test.describe('page rendering: real editor, real DOM', () => {
@@ -1391,5 +1455,320 @@ test.describe('page rendering: real editor, real DOM', () => {
     // correction.
     const second = await verifyJumpAndSubsequentHold(first.scrollTopBeforeNextJump);
     expect(second.heldStillFor).toBeGreaterThan(1);
+  });
+
+  /*
+   * The caret at a mid-block page seam (apps/web/src/seamCaret.ts).
+   *
+   * A mid-block break is one document position with two DOM realizations, and ProseMirror renders
+   * the selection at the upstream one whichever side of the seam the writer clicked. This test
+   * holds the whole of the replacement to account: that the drawn caret appears only for a click
+   * on the incoming sheet, that it lands exactly where the browser itself would have painted a
+   * caret at the downstream DOM position, that it displaces nothing, that it never touches the
+   * real selection, and -- the property the owner refused to trade -- that a click at the end of
+   * page 1 behaves precisely as it did before any of this existed.
+   */
+  test('a caret drawn at a mid-block page seam moves no line and no page, leaves the real selection alone, and leaves the end of page 1 alone', async ({
+    page,
+  }) => {
+    test.setTimeout(90_000);
+    const { canvas } = await createAndOpenScreenplay(page);
+    await requireCourierPrime(page);
+
+    const blocks = fourPageMixedAnchorFixture();
+    await canvas.click();
+    for (let index = 0; index < blocks.length; index += 1) {
+      const block = blocks[index];
+      if (!block || !('text' in block)) continue;
+      await page.keyboard.insertText(block.text);
+      if (index < blocks.length - 1) {
+        await page.keyboard.press('Enter');
+      }
+    }
+    await page.waitForResponse(
+      (response) =>
+        response.request().method() === 'PUT' &&
+        response.url().includes('/api/screenplays/') &&
+        response.status() === 200,
+    );
+    await page.waitForTimeout(400);
+
+    const screenplayId = /\/screenplays\/([0-9a-f-]+)/u.exec(page.url())?.[1];
+    if (!screenplayId) {
+      throw new Error(`Could not find a screenplay id in ${page.url()}.`);
+    }
+    const persisted = await page.request.get(`/api/screenplays/${screenplayId}`);
+    expect(persisted.ok()).toBe(true);
+    const { screenplay } = (await persisted.json()) as {
+      screenplay: { blocks: ScreenplayBlock[] };
+    };
+    const blocksById = new Map(screenplay.blocks.map((block) => [block.id, block]));
+    const layout = paginateScreenplay(screenplay.blocks);
+
+    // The seam this test is about, taken from the real model rather than from the DOM: the first
+    // break whose last authored line does NOT end its block, which is exactly the branch
+    // `computePageBreaks` anchors inside the block (`blockStart + 1 + last.endOffset`).
+    const seam = layout.pages.slice(0, -1).flatMap((pageEntry) => {
+      const last = lastAuthoredLine(pageEntry.lines);
+      if (!last) return [];
+      const block = blocksById.get(last.blockId);
+      if (!block || !('text' in block) || last.endOffset >= block.text.length) return [];
+      return [{ blockId: last.blockId, offset: last.endOffset, text: block.text }];
+    })[0];
+    if (!seam) {
+      throw new Error('The fixture produced no mid-block page break to place a caret at.');
+    }
+
+    // The DOM realization of that model seam, and the proof the two are the same thing: the text
+    // node ending the outgoing page holds exactly the code units the model says landed there.
+    const geometry = await measureSeam(page, seam.blockId);
+    expect(geometry.upstreamLength).toBe(seam.offset);
+    expect(geometry.downstream.top).toBeGreaterThan(geometry.upstream.top);
+    // The dead zone the intent test divides: page 1's bottom margin and the canvas gap above the
+    // sheet edge, page 2's top margin below it.
+    expect(geometry.sheetTop).toBeGreaterThan(geometry.upstream.top);
+    expect(geometry.sheetTop).toBeLessThan(geometry.downstream.top);
+
+    const seamCaret = page.locator('.page-seam-caret');
+    const suppressed = page.locator('[data-screenplay-block].page-seam-caret-host');
+    const domSelection = () =>
+      page.evaluate(() => {
+        const selection = window.getSelection();
+        const node = selection?.anchorNode ?? null;
+        return {
+          isText: node?.nodeType === Node.TEXT_NODE,
+          length: node?.textContent?.length ?? -1,
+          offset: selection?.anchorOffset ?? -1,
+          collapsed: selection?.isCollapsed ?? false,
+        };
+      });
+
+    /*
+     * Behaviour 1, the one that must not change: a click at the end of page 1. It lands on the
+     * upstream half's last line, draws nothing, suppresses nothing, and leaves the DOM selection
+     * at the end of the upstream text node -- which is precisely where it was before this feature
+     * existed.
+     */
+    await page.mouse.click(geometry.upstream.left - 2, geometry.upstream.top + 4);
+    await page.waitForTimeout(120);
+    await expect(seamCaret).toHaveCount(0);
+    await expect(suppressed).toHaveCount(0);
+    expect(await domSelection()).toEqual({
+      isText: true,
+      length: seam.offset,
+      offset: seam.offset,
+      collapsed: true,
+    });
+
+    // The baseline: this exact document, at this scroll position, with no caret drawn.
+    const withoutSeamCaret = await measurePage(page);
+    expect(withoutSeamCaret.spacerBottoms.length).toBeGreaterThanOrEqual(1);
+
+    /*
+     * Behaviour 2: a click on the incoming sheet -- the visual start of page 2. The real selection
+     * does not move (it is the same document position either way, and ProseMirror still renders it
+     * upstream); a caret is drawn at the downstream DOM position instead, and the native one is
+     * suppressed for that block and no other.
+     */
+    let sawSave = false;
+    const watchSaves = (request: Request) => {
+      if (request.method() === 'PUT' && request.url().includes('/api/screenplays/')) {
+        sawSave = true;
+      }
+    };
+    page.on('request', watchSaves);
+
+    await page.mouse.click(geometry.downstream.left + 2, geometry.downstream.top + 4);
+    await expect(seamCaret).toHaveCount(1);
+    await expect(suppressed).toHaveCount(1);
+    await expect(suppressed).toHaveAttribute('data-block-id', seam.blockId);
+
+    // The real selection is untouched: still an empty selection rendered at the end of the
+    // upstream text node, exactly as in behaviour 1.
+    expect(await domSelection()).toEqual({
+      isText: true,
+      length: seam.offset,
+      offset: seam.offset,
+      collapsed: true,
+    });
+
+    /*
+     * The drawn caret matches the native one it stands in for. `top`, `left` and `height` are
+     * compared against the rectangle the browser itself reports for a collapsed range at the
+     * downstream DOM position -- the rectangle it would have painted a native caret into -- so
+     * this is an equality against the browser's own answer, not against a reconstruction of it.
+     */
+    const drawn = await page.evaluate(() => {
+      const element = document.querySelector('.page-seam-caret');
+      if (!(element instanceof HTMLElement)) throw new Error('No drawn seam caret.');
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      const host = document.querySelector('[data-screenplay-block].page-seam-caret-host');
+      return {
+        top: rect.top,
+        left: rect.left,
+        height: rect.height,
+        width: rect.width,
+        insideEditor: document.querySelector('.ProseMirror')?.contains(element) ?? true,
+        insidePage: document.querySelector('.page')?.contains(element) ?? true,
+        insideRegion: document.querySelector('.editor-region')?.contains(element) ?? false,
+        animationName: style.animationName,
+        animationDuration: style.animationDuration,
+        animationTimingFunction: style.animationTimingFunction,
+        hostCaretColor: host ? getComputedStyle(host).caretColor : undefined,
+        editorCaretColor: getComputedStyle(document.querySelector('.ProseMirror') as HTMLElement)
+          .caretColor,
+      };
+    });
+    expect(drawn.top).toBeCloseTo(geometry.downstream.top, 1);
+    expect(drawn.left).toBeCloseTo(geometry.downstream.left, 1);
+    expect(drawn.height).toBeCloseTo(geometry.downstream.height, 1);
+    expect(drawn.width).toBeCloseTo(1, 1);
+    // Never inside the document's own DOM: a node injected into ProseMirror's contentDOM is read
+    // back as an edit, and a node inside `.page` is in the manuscript's box tree.
+    expect(drawn.insideEditor).toBe(false);
+    expect(drawn.insidePage).toBe(false);
+    expect(drawn.insideRegion).toBe(true);
+    // The blink is Chrome's own cycle, and it is the drawn caret that carries it.
+    expect(drawn.animationName).toBe('page-seam-caret-blink');
+    expect(drawn.animationDuration).toBe('1s');
+    // Chrome serializes `step-end` back as its `steps()` equivalent, which is what the computed
+    // style reports; the two are the same function.
+    expect(drawn.animationTimingFunction).toBe('steps(1)');
+    // The suppression reaches the block holding the selection, and stops there: the editor itself
+    // still paints carets normally everywhere else.
+    expect(drawn.hostCaretColor).toBe('rgba(0, 0, 0, 0)');
+    expect(drawn.editorCaretColor).not.toBe('rgba(0, 0, 0, 0)');
+
+    // The constraint: nothing on the page moved, and the region's scrolled extent did not grow.
+    expect(await measurePage(page)).toEqual(withoutSeamCaret);
+
+    /*
+     * Behaviour 3: what clears it. A caret move is not a click, so it exercises the selection
+     * invariant rather than the click handler.
+     */
+    await page.keyboard.press('ArrowLeft');
+    await expect(seamCaret).toHaveCount(0);
+    await expect(suppressed).toHaveCount(0);
+    expect(await measurePage(page)).toEqual(withoutSeamCaret);
+
+    /*
+     * Behaviour 5: the keyboard-affinity gap the owner found test-driving this branch
+     * (`apps/web/src/seamCaret.ts`'s `handleKeyDown`/`appendTransaction`, added after the click
+     * behaviour above was already verified). The `ArrowLeft` just above landed the real selection
+     * one code unit upstream of the seam -- the end of page 1's last word, immediately before the
+     * cell `packages/layout/src/model.ts`'s `AuthoredLine` doc comment documents as consumed into
+     * `endOffset` but never rendered. A single `ArrowRight` from there is the whole of the defect
+     * as the owner reported it: without this behaviour it arrives at the seam and still renders
+     * upstream (a wasted keystroke, into a cell page 1 does not print); with it, it renders at the
+     * visual start of page 2, matching what a click on the incoming sheet already draws.
+     */
+    await page.keyboard.press('ArrowRight');
+    await expect(seamCaret).toHaveCount(1);
+    await expect(suppressed).toHaveCount(1);
+    await expect(suppressed).toHaveAttribute('data-block-id', seam.blockId);
+    // The real selection is untouched, exactly as a click's own downstream draw leaves it
+    // (behaviour 2): still the end of the upstream text node, at the seam's document position.
+    expect(await domSelection()).toEqual({
+      isText: true,
+      length: seam.offset,
+      offset: seam.offset,
+      collapsed: true,
+    });
+    // Drawn where a click would have drawn it: the downstream DOM position's own collapsed-range
+    // rectangle, re-measured (rather than reusing `geometry` from above) for the same reason
+    // `afterArrow`/`beforeTyping` below re-measure theirs -- nothing has moved here, but nothing
+    // about this assertion should depend on that being true.
+    const afterRightArrow = await measureSeam(page, seam.blockId);
+    const drawnByArrowKey = await page.evaluate(() => {
+      const element = document.querySelector('.page-seam-caret');
+      if (!(element instanceof HTMLElement)) throw new Error('No drawn seam caret.');
+      const rect = element.getBoundingClientRect();
+      return { top: rect.top, left: rect.left, height: rect.height };
+    });
+    expect(drawnByArrowKey.top).toBeCloseTo(afterRightArrow.downstream.top, 1);
+    expect(drawnByArrowKey.left).toBeCloseTo(afterRightArrow.downstream.left, 1);
+    expect(drawnByArrowKey.height).toBeCloseTo(afterRightArrow.downstream.height, 1);
+    expect(await measurePage(page)).toEqual(withoutSeamCaret);
+
+    /*
+     * Behaviour 6: the symmetric return, and the reason this module does not need to track which
+     * direction a keystroke travelled from (module header comment). `ArrowLeft` from here moves
+     * the real, upstream-anchored selection back by one code unit -- off the seam entirely, to
+     * the end of page 1's last word, exactly where behaviour 3 above already left it -- which the
+     * existing selection-moved clearing rule (untouched by this slice) already handles.
+     */
+    await page.keyboard.press('ArrowLeft');
+    await expect(seamCaret).toHaveCount(0);
+    await expect(suppressed).toHaveCount(0);
+    expect(await domSelection()).toEqual({
+      isText: true,
+      length: seam.offset,
+      offset: seam.offset - 1,
+      collapsed: true,
+    });
+    expect(await measurePage(page)).toEqual(withoutSeamCaret);
+
+    /*
+     * Drawn again, then cleared by focus leaving the manuscript.
+     *
+     * The `waitForTimeout` and each click's `delay` here are load-bearing, not courtesy: this
+     * click lands on the same physical pixel as behaviour 2's click above, immediately after the
+     * widget it is downstream of. Two things about a real mouse click this test's default,
+     * instantaneous `page.mouse.click` does not reproduce turned out to matter for the browser's
+     * *native* caret placement at that exact position (measured, not assumed, against this exact
+     * test): a real click has non-zero duration between mousedown and mouseup, and a real writer's
+     * two clicks at the same spot are seconds apart, not milliseconds -- well past
+     * prosemirror-view's own 500ms same-pixel double-click window (`isNear`/`handlers.mousedown`),
+     * which otherwise intercepts the second click as a double click and never reaches this
+     * module's `handleClick` prop at all. Neither gap is a product concern: `seamCaret.ts` itself
+     * is unchanged by either finding, and every click below now carries both.
+     */
+    await page.waitForTimeout(600);
+    const afterArrow = await measureSeam(page, seam.blockId);
+    await page.mouse.click(afterArrow.downstream.left + 2, afterArrow.downstream.top + 4, {
+      delay: 80,
+    });
+    await expect(seamCaret).toHaveCount(1);
+    await page.getByLabel('Active screenplay element').focus();
+    await expect(seamCaret).toHaveCount(0);
+    await expect(suppressed).toHaveCount(0);
+
+    /*
+     * Behaviour 4, the functional claim the whole approach rests on: the drawn caret is cosmetic.
+     * Typing while it is drawn inserts at the seam -- the same document position the upstream
+     * caret names -- which the model puts at exactly `seam.offset` code units into the block.
+     */
+    // Same reasoning as the wait and delay above: this click lands on the same pixel again.
+    await page.waitForTimeout(600);
+    const beforeTyping = await measureSeam(page, seam.blockId);
+    await page.mouse.click(beforeTyping.downstream.left + 2, beforeTyping.downstream.top + 4, {
+      delay: 80,
+    });
+    await expect(seamCaret).toHaveCount(1);
+    expect(sawSave).toBe(false);
+    page.off('request', watchSaves);
+
+    const typed = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'PUT' &&
+        response.url().includes('/api/screenplays/') &&
+        response.status() === 200,
+    );
+    await page.keyboard.insertText('Z');
+    // An edit clears the drawn caret: the seam is a consequence of where the text falls, and the
+    // text just moved.
+    await expect(seamCaret).toHaveCount(0);
+    await expect(suppressed).toHaveCount(0);
+    await typed;
+
+    const afterTyping = await page.request.get(`/api/screenplays/${screenplayId}`);
+    expect(afterTyping.ok()).toBe(true);
+    const { screenplay: edited } = (await afterTyping.json()) as {
+      screenplay: { blocks: ScreenplayBlock[] };
+    };
+    const editedBlock = edited.blocks.find((block) => block.id === seam.blockId);
+    const editedText = editedBlock && 'text' in editedBlock ? editedBlock.text : '';
+    expect(editedText).toBe(`${seam.text.slice(0, seam.offset)}Z${seam.text.slice(seam.offset)}`);
   });
 });
