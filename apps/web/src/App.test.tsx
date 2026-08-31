@@ -1301,7 +1301,7 @@ describe('local semantic screenplay editor', () => {
     }
   });
 
-  it('moves zoom into the toolbar, keeping the same range and the output element', async () => {
+  it('moves zoom into the toolbar, keeping the ceiling and the output element, with a floor lowered to 50 in this slice', async () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
@@ -1309,14 +1309,209 @@ describe('local semantic screenplay editor', () => {
     const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
     expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('100%');
 
+    // The floor moved from 70 to 50 in this slice (zoom.ts's `ZOOM_MIN_PERCENT`, plan.md's "Zoom
+    // controls": at 100% the page is roughly 816px, so fit-width lands around 60-85% on ordinary
+    // windows and 50% only binds where 12pt Courier is already at the edge of legibility). Six
+    // clicks of -10 from 100 is the first one that actually clamps (100, 90, 80, 70, 60, 50, then
+    // clamped at 50 rather than reaching 40) -- mirroring this test's own pre-existing shape of
+    // "reach the floor, then click once more and confirm it holds."
     const zoomOut = within(toolbar).getByRole('button', { name: 'Zoom out' });
-    for (let i = 0; i < 4; i += 1) {
+    for (let i = 0; i < 6; i += 1) {
       await user.click(zoomOut);
     }
-    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('70%');
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('50%');
     await user.click(zoomOut);
-    // Clamped at 70, the existing floor -- a relocation must preserve the original range.
-    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('70%');
+    // Clamped at 50, the new floor -- a relocation must preserve the (updated) range.
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('50%');
+  });
+});
+
+describe('zoom modes', () => {
+  /**
+   * jsdom lays nothing out, so `.editor-region`'s `clientWidth`/`clientHeight` (what
+   * `measureAvailableArea`, zoom.ts, reads to resolve a fit mode) default to 0. Stated directly,
+   * matching this suite's own precedent (`getBoundingClientRect` stubs elsewhere in this file) and
+   * `floatingPanel.test.ts`'s house rule for anything jsdom cannot lay out for real. 816px is
+   * `PAGE_WIDTH_IN` (8.5in) times the CSS specification's fixed 96px/in, i.e. the page's real
+   * natural width -- every test below picks its stubbed width as a clean fraction of that number
+   * so each assertion is an exact arithmetic claim, not a bound.
+   */
+  function stubEditorRegionSize(container: HTMLElement, widthPx: number, heightPx: number): void {
+    const region = container.querySelector('.editor-region');
+    if (!region) {
+      throw new Error('Missing .editor-region.');
+    }
+    Object.defineProperty(region, 'clientWidth', { configurable: true, value: widthPx });
+    Object.defineProperty(region, 'clientHeight', { configurable: true, value: heightPx });
+  }
+
+  /** `.editor-region`'s `scrollTop`/`scrollHeight`/`clientHeight` -- unlike `clientWidth` above,
+   * `scrollTop` is left as jsdom's own plain writable property (no `defineProperty` override
+   * needed, and none possible while keeping it settable the way `zoom.ts`'s `restoreCentredScroll`
+   * needs to), so reading it back after a zoom click is exactly what the app wrote, nothing more. */
+  function stubEditorRegionScroll(
+    container: HTMLElement,
+    options: { clientHeight: number; scrollHeight: number; scrollTop: number },
+  ): HTMLElement {
+    const region = container.querySelector<HTMLElement>('.editor-region');
+    if (!region) {
+      throw new Error('Missing .editor-region.');
+    }
+    Object.defineProperty(region, 'clientHeight', {
+      configurable: true,
+      value: options.clientHeight,
+    });
+    Object.defineProperty(region, 'scrollHeight', {
+      configurable: true,
+      value: options.scrollHeight,
+    });
+    region.scrollTop = options.scrollTop;
+    return region;
+  }
+
+  it("centres zoom on .editor-region's current vertical middle, per the owner's own formula, when the toolbar's Zoom in is clicked", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+
+    // clientHeight 200, scrollHeight 1000 (scrollableExtent 800), scrollTop 300: the viewport's
+    // vertical centre sits 300 + 100 = 400px into the document at 100%.
+    const region = stubEditorRegionScroll(container, {
+      clientHeight: 200,
+      scrollHeight: 1000,
+      scrollTop: 300,
+    });
+
+    await user.click(within(toolbar).getByRole('button', { name: 'Zoom in' }));
+    await waitFor(() => {
+      expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('110%');
+    });
+
+    // ratio 1.1 (100% -> 110%): centre moves to 400 * 1.1 = 440, then the viewport is re-centred
+    // on it: 440 - 100 = 340. jsdom never changes scrollHeight/clientHeight on their own (no real
+    // layout), so this also proves `restoreCentredScroll` reads them rather than some other,
+    // possibly-stale source -- an unchanged, correctly-read 1000/200 is what makes 340 the right
+    // answer here.
+    expect(region.scrollTop).toBeCloseTo(340, 9);
+  });
+
+  it('resolves "Fit width" against the real available width, and recomputes when the window resizes -- the exact failure plan.md names', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+
+    // 612 / 816 = 75%.
+    stubEditorRegionSize(container, 612, 100000);
+    await user.selectOptions(
+      within(toolbar).getByRole('combobox', { name: 'Zoom preset' }),
+      'fit-width',
+    );
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('75%');
+
+    // The window grows to exactly the page's natural width -- fit-width must now resolve to
+    // 100%. A version of this that instead kept showing 75% (fit computed once, then frozen) is
+    // the precise regression plan.md's "Zoom controls" warns about, and is what this assertion
+    // exists to catch.
+    stubEditorRegionSize(container, 816, 100000);
+    fireEvent(window, new Event('resize'));
+
+    await waitFor(() => {
+      expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('100%');
+    });
+  });
+
+  it('recomputes a fit mode when a panel opens or closes, not only on window resize', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+
+    // 408 / 816 = 50%, the floor exactly -- chosen so the first reading is unambiguous.
+    stubEditorRegionSize(container, 408, 100000);
+    await user.selectOptions(
+      within(toolbar).getByRole('combobox', { name: 'Zoom preset' }),
+      'fit-width',
+    );
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('50%');
+
+    // Closing the navigator widens `.editor-region` in a real browser; jsdom does not lay that
+    // out, so the wider box is stated directly here, the same as the resize test above. What this
+    // proves is that the panel-toggle *event* itself triggers a recompute, independent of resize.
+    stubEditorRegionSize(container, 816, 100000);
+    await user.click(screen.getByRole('button', { name: 'Close navigator' }));
+
+    await waitFor(() => {
+      expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('100%');
+    });
+  });
+
+  it('the preset dropdown jumps straight to a fixed percentage', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+
+    await user.selectOptions(within(toolbar).getByRole('combobox', { name: 'Zoom preset' }), '125');
+
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('125%');
+  });
+
+  it('stepping zoom in or out from a fit mode switches to a fixed percentage anchored on the current resolved value, and stops recomputing on resize', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+
+    stubEditorRegionSize(container, 408, 100000); // -> 50%
+    await user.selectOptions(
+      within(toolbar).getByRole('combobox', { name: 'Zoom preset' }),
+      'fit-width',
+    );
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('50%');
+
+    await user.click(within(toolbar).getByRole('button', { name: 'Zoom in' }));
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('60%');
+
+    // Now fixed, not fit: growing the window must not silently jump back to a fit computation.
+    stubEditorRegionSize(container, 816, 100000);
+    fireEvent(window, new Event('resize'));
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('60%');
+  });
+
+  it('supports keyboard equivalents for zoom in, zoom out, and reset to 100 percent', async () => {
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+
+    fireEvent.keyDown(window, { ctrlKey: true, key: '=' });
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('110%');
+
+    fireEvent.keyDown(window, { ctrlKey: true, key: '-' });
+    fireEvent.keyDown(window, { ctrlKey: true, key: '-' });
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('90%');
+
+    fireEvent.keyDown(window, { ctrlKey: true, key: '0' });
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('100%');
+  });
+
+  it('ignores the zoom shortcut keys with no modifier held, so ordinary typing never zooms', async () => {
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+    const zoomLevel = within(toolbar).getByLabelText('Zoom level');
+
+    // Asserted after each key individually, not only once at the end: '=' then '-' would cancel
+    // back to 100% even if the modifier guard were missing entirely and both keys were wrongly
+    // acted on, which is exactly the kind of pass-for-the-wrong-reason result a single assertion
+    // after all three keys cannot tell apart from the guard actually working.
+    fireEvent.keyDown(window, { key: '=' });
+    expect(zoomLevel).toHaveTextContent('100%');
+    fireEvent.keyDown(window, { key: '-' });
+    expect(zoomLevel).toHaveTextContent('100%');
+    fireEvent.keyDown(window, { key: '0' });
+    expect(zoomLevel).toHaveTextContent('100%');
   });
 });
 

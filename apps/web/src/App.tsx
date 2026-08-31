@@ -1,5 +1,7 @@
 import {
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -18,6 +20,7 @@ import {
   type Screenplay,
   type ScreenplayBlock,
 } from '@finaler-draft/screenplay';
+import { PAGE_HEIGHT_IN, PAGE_WIDTH_IN } from '@finaler-draft/screenplay/pageFormat';
 import type { Editor } from '@tiptap/core';
 import { EditorContent, useEditor } from '@tiptap/react';
 import {
@@ -53,6 +56,18 @@ import {
 import { DocumentSettingsDialog } from './documentSettingsDialog.js';
 import { OverflowMenu } from './components/OverflowMenu.js';
 import { Toast } from './components/Toast.js';
+import {
+  captureCentredScroll,
+  clampZoomPercent,
+  measureAvailableArea,
+  resolveZoomPercent,
+  restoreCentredScroll,
+  ZOOM_DEFAULT_PERCENT,
+  ZOOM_PRESET_PERCENTS,
+  ZOOM_STEP_PERCENT,
+  type ZoomMode,
+  type ZoomScrollCapture,
+} from './zoom.js';
 
 type Panel = 'navigator' | 'inspector';
 
@@ -202,7 +217,33 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   // Which Navigator tab is showing -- view state, not document state, same category as `zoom` and
   // `showLabels` below: it never travels with the canonical screenplay.
   const [navigatorTab, setNavigatorTab] = useState<NavigatorTabId>('scenes');
-  const [zoom, setZoom] = useState(100);
+  // The writer's actual zoom request -- a fixed percentage, or one of the two fit modes (zoom.ts's
+  // own top-of-file comment explains why this, not a bare percentage, is the state that survives:
+  // storing only the computed number is what makes fit silently stop fitting after the next
+  // resize). `zoomPercent` below is the number this currently *resolves* to; it is derived, not
+  // stored independently, and is recomputed by the effect beside it whenever `zoomMode` or the
+  // available area changes.
+  const [zoomMode, setZoomMode] = useState<ZoomMode>({
+    kind: 'fixed',
+    percent: ZOOM_DEFAULT_PERCENT,
+  });
+  const [zoomPercent, setZoomPercent] = useState(ZOOM_DEFAULT_PERCENT);
+  // `.editor-region`'s own element -- measured by `measureAvailableArea` (zoom.ts) whenever a fit
+  // mode needs to know how much room it has. A ref, not state: the element itself never needs to
+  // trigger a re-render on its own account, only the recompute effect below does.
+  const editorRegionRef = useRef<HTMLElement>(null);
+  // Set synchronously by `requestZoomMode` just before it calls `setZoomMode`, and consumed (and
+  // cleared) by the centred-scroll effect once the new zoom has actually rendered -- see
+  // `requestZoomMode`'s own comment for why a zoom change (a React state update, not a
+  // synchronous ProseMirror dispatch) needs a ref to carry this across the render boundary rather
+  // than the single synchronous wrap `paginationExtension.ts`'s
+  // `compensateScrollForRepagination` uses for the analogous repagination case. `zoom.ts`'s
+  // `captureCentredScroll`/`restoreCentredScroll` are pure DOM (`.editor-region`'s own
+  // `scrollTop`/`scrollHeight`/`clientHeight`), never `Editor`/`EditorView` -- a zoom change is
+  // not an edit and not a repagination, so it must never reach `compensateScrollForRepagination`
+  // or `maybeJumpScrollCaretIntoView` (paginationExtension.ts), and not touching ProseMirror at
+  // all is what makes that true by construction rather than by a guard that could later rot.
+  const pendingZoomScrollCaptureRef = useRef<ZoomScrollCapture | undefined>(undefined);
   const [dark, setDark] = useState(false);
   // View state, not document state: never travels with the canonical screenplay, and defaults
   // off. The label itself renders as a zero-layout-space overlay (see .script-body
@@ -322,8 +363,6 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   useEffect(() => {
     applyPageGeometryCssVariables(documentSettings);
   }, [documentSettings]);
-  const updateZoom = (amount: number) =>
-    setZoom((current) => Math.min(150, Math.max(70, current + amount)));
   const togglePanel = (panel: Panel) =>
     setPanels((current) => ({ ...current, [panel]: !current[panel] }));
 
@@ -473,6 +512,154 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     onUpdate: ({ editor: editorInstance }) => syncEditorState(editorInstance, true),
     onTransaction: ({ editor: editorInstance }) => syncPageCount(editorInstance),
   });
+
+  // Recomputes `zoomPercent` (the number actually applied to `.pages`'s CSS `zoom` below) from
+  // `zoomMode` and `.editor-region`'s current available area. Takes `mode` as a parameter rather
+  // than closing over `zoomMode` so it has no dependency of its own beyond the two stable refs
+  // -- `editorRegionRef` and `setZoomPercent` -- letting every effect below list it as a
+  // dependency without re-running on every render the way a freshly defined plain function would
+  // force them to.
+  const recomputeZoomPercent = useCallback((mode: ZoomMode) => {
+    setZoomPercent(
+      resolveZoomPercent(
+        mode,
+        measureAvailableArea(editorRegionRef.current),
+        PAGE_WIDTH_IN,
+        PAGE_HEIGHT_IN,
+      ),
+    );
+  }, []);
+
+  // The two recompute triggers plan.md's "Zoom controls" names that this codebase actually has:
+  // `zoomMode` itself changing (a fresh request) and a panel opening or closing
+  // (`panels.navigator`/`panels.inspector` resize `.editor-region` in the same React commit that
+  // toggles them). `useLayoutEffect`, not `useEffect`: it must resolve before the browser paints,
+  // or a fit mode would visibly flash at its stale percentage for one frame after a panel toggle.
+  // There is no third, `overlay`-breakpoint trigger to add a dependency for -- see zoom.ts's own
+  // top-of-file comment for why that one is scoped out rather than invented.
+  useLayoutEffect(() => {
+    recomputeZoomPercent(zoomMode);
+  }, [zoomMode, panels.navigator, panels.inspector, recomputeZoomPercent]);
+
+  // The third trigger, window resize, is not a React-driven layout change -- nothing else in this
+  // component re-renders just because the window resized -- so it needs its own listener rather
+  // than a dependency any effect above could key on. Re-subscribed whenever `zoomMode` changes so
+  // the handler always closes over the current request, matching `recomputeZoomPercent`'s own
+  // signature rather than reading a second, possibly-stale copy of `zoomMode` out of a ref.
+  useEffect(() => {
+    const handleResize = () => recomputeZoomPercent(zoomMode);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [zoomMode, recomputeZoomPercent]);
+
+  // Every entry point that changes what the writer is *asking* zoom to do -- the stepper buttons,
+  // the preset dropdown, and the keyboard equivalents, all below -- routes through this rather
+  // than calling `setZoomMode` directly, so the centred-scroll capture (zoom.ts) never gets
+  // forgotten at a new call site. Deliberately NOT used by the resize/panel-toggle recompute
+  // above: those are not the writer asking for a new zoom, they are the window or the workspace
+  // changing shape around an unchanged request -- see progress/zoom-modes.md for why anchoring
+  // scroll through that class of change was scoped out rather than attempted.
+  const requestZoomMode = (mode: ZoomMode) => {
+    pendingZoomScrollCaptureRef.current = captureCentredScroll(
+      editorRegionRef.current,
+      zoomPercent,
+    );
+    setZoomMode(mode);
+  };
+
+  // Applies the centred-scroll capture above once the new zoom has actually rendered. Keyed on
+  // `zoomPercent` -- the value that actually drives `.pages`'s CSS `zoom` below -- rather than
+  // `zoomMode`, since that is the number `restoreCentredScroll`'s own ratio needs.
+  // `useLayoutEffect` runs after the DOM commit but before the browser paints, so the writer never
+  // sees an intermediate frame at the wrong scroll position -- `restoreCentredScroll` also depends
+  // on this: it reads `.editor-region`'s
+  // `scrollHeight`/`clientHeight` fresh, which only reflect the new scale once this commit has
+  // landed. A resize/panel-toggle recompute never populates `pendingZoomScrollCaptureRef` (only
+  // `requestZoomMode` does), so this is naturally a no-op for that class of change, with no extra
+  // branch needed to keep it that way.
+  //
+  // The `requestAnimationFrame` re-application is load-bearing, not defensive padding. Measured
+  // directly while building this (a real Chrome, via `page-rendering-persistence.spec.ts`'s
+  // "zooming keeps the viewport centred" test): the synchronous call above computes and writes
+  // the exact right value -- confirmed by reading `.editor-region.scrollTop` back immediately,
+  // inside this same effect, before returning -- and then, once, between this effect finishing
+  // and the browser's very next animation frame, something outside this component's own code
+  // moves it again, converging on a different, wrong value. `overflow-anchor: none` on
+  // `.editor-region` (and on every element under `.pages`) was tried and made no measurable
+  // difference, ruling out CSS Scroll Anchoring specifically; a `scrollTop` property override
+  // that logs every script-driven write saw nothing between the two frames, meaning whatever
+  // moves it does so beneath the JS-visible property setter, not through it. The exact browser
+  // mechanism is therefore undiagnosed, but the shape of it is well-pinned: it is a one-time
+  // event, it always lands between the synchronous commit and the first `requestAnimationFrame`
+  // callback, and every real-browser measurement taken in that same callback (and in a second,
+  // chained one after it) shows it already settled and staying there. Re-running the identical,
+  // idempotent computation once inside that callback reliably wins, because nothing further
+  // disturbs it afterward. See progress/zoom-modes.md for the full investigation.
+  //
+  // **Re-verified, not assumed, after this slice moved the scaling mechanism from `transform:
+  // scale()` to CSS `zoom` on `.pages`.** The hypothesis going in was that this reapplication was
+  // only ever compensating for `scrollHeight` failing to track the new scale before layout
+  // settled -- which `zoom` fixes exactly, per the measurements in the comment above the
+  // `.pages` element -- so it might now be dead weight. Tested directly by removing it and rerunning
+  // this same real-browser test: the drift is still there. Smaller than it was under `transform`
+  // (roughly 60px against a <5px tolerance, versus roughly 600px before this slice), but still
+  // real and still failing the test without the reapplication in place. The mitigation is kept.
+  useLayoutEffect(() => {
+    const capture = pendingZoomScrollCaptureRef.current;
+    pendingZoomScrollCaptureRef.current = undefined;
+    restoreCentredScroll(editorRegionRef.current, capture, zoomPercent);
+    requestAnimationFrame(() => {
+      restoreCentredScroll(editorRegionRef.current, capture, zoomPercent);
+    });
+  }, [zoomPercent]);
+
+  const updateZoom = (amount: number) => {
+    requestZoomMode({ kind: 'fixed', percent: clampZoomPercent(zoomPercent + amount) });
+  };
+
+  // The preset dropdown's onChange: a fixed percentage's option value is the bare number
+  // (`ZOOM_PRESET_PERCENTS`, zoom.ts), the two fit modes are their own `kind` strings -- see the
+  // `<select>` below for the matching `<option value>`s.
+  const chooseZoomPreset = (value: string) => {
+    if (value === 'fit-page' || value === 'fit-width') {
+      requestZoomMode({ kind: value });
+      return;
+    }
+    const percent = Number(value);
+    if (Number.isFinite(percent)) {
+      requestZoomMode({ kind: 'fixed', percent });
+    }
+  };
+
+  // Keyboard equivalents for zoom in, zoom out, and reset to 100 percent (plan.md's "Zoom
+  // controls"). `event.metaKey || event.ctrlKey` rather than sniffing the platform: both are
+  // conventional zoom modifiers depending on OS, and accepting either is simpler and more robust
+  // than a `navigator.platform`/`userAgent` check that jsdom's own default does not model
+  // consistently with any real browser anyway. Assigned to a ref and read through a
+  // stable-identity listener, the same pattern `flushPendingSaveRef` above uses, so the listener
+  // is registered exactly once (an empty dependency array) while still calling the *current*
+  // render's `updateZoom`/`requestZoomMode` closures rather than a stale first-render copy.
+  const handleZoomKeydownRef = useRef<(event: KeyboardEvent) => void>(() => {});
+  handleZoomKeydownRef.current = (event: KeyboardEvent) => {
+    if (!(event.metaKey || event.ctrlKey) || event.altKey) {
+      return;
+    }
+    if (event.key === '=' || event.key === '+') {
+      event.preventDefault();
+      updateZoom(ZOOM_STEP_PERCENT);
+    } else if (event.key === '-' || event.key === '_') {
+      event.preventDefault();
+      updateZoom(-ZOOM_STEP_PERCENT);
+    } else if (event.key === '0') {
+      event.preventDefault();
+      requestZoomMode({ kind: 'fixed', percent: ZOOM_DEFAULT_PERCENT });
+    }
+  };
+  useEffect(() => {
+    const handleKeydown = (event: KeyboardEvent) => handleZoomKeydownRef.current(event);
+    window.addEventListener('keydown', handleKeydown);
+    return () => window.removeEventListener('keydown', handleKeydown);
+  }, []);
 
   // A pending debounced save (`scheduleSave`'s 600 ms `setTimeout`) is the last line of defence
   // against losing an edit that never got the chance to autosave (requirement 5,
@@ -630,11 +817,18 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   // `applyPageGeometryCssVariables` genuinely has a second authority (the effect above): calling it
   // here too is purely so the writer sees the geometry change the instant they make it, rather than
   // waiting a render for the effect to catch up -- see that effect's own comment.
+  //
+  // `applyPageGeometryCssVariables` is passed to `updatePaginationDocumentSettings` as its
+  // `runBeforeDispatch` argument rather than called as a separate statement after it -- previously
+  // it ran as a bare second statement here, which under-compensated the writer's scroll position
+  // for a `parentheticalWidthIn` change specifically (progress/repagination-scroll-anchor.md's
+  // "known limitations", fixed in this slice; see `updatePaginationDocumentSettings`'s own comment
+  // in paginationExtension.ts for why passing it in, not merely reordering the two calls, is what
+  // actually fixes it).
   const updateDocumentSettings = (next: DocumentSettings) => {
     setDocumentSettings(next);
     if (!editor) return;
-    updatePaginationDocumentSettings(editor, next);
-    applyPageGeometryCssVariables(next);
+    updatePaginationDocumentSettings(editor, next, () => applyPageGeometryCssVariables(next));
     const nextProjection = projectLocalScreenplay(editor, {
       documentSettings: next,
       id: initial.id,
@@ -923,14 +1117,57 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
         <div className="zoom-controls">
           <button
             aria-label="Zoom out"
-            onClick={() => updateZoom(-10)}
+            onClick={() => updateZoom(-ZOOM_STEP_PERCENT)}
             title="Zoom out"
             type="button"
           >
             −
           </button>
-          <output aria-label="Zoom level">{zoom}%</output>
-          <button aria-label="Zoom in" onClick={() => updateZoom(10)} title="Zoom in" type="button">
+          {/* One control, not two (the owner's explicit request, superseding the previous
+              side-by-side stepper box and preset box): the current percentage stays the visible,
+              announced content in the middle -- the `<output>` below, aria-label and text content
+              both unchanged from before this slice -- while clicking anywhere on that number opens
+              the same preset `<select>` plan.md's "Zoom controls" asks for ("a preset dropdown ...
+              a set of fixed percentages plus 'Fit page' and 'Fit width'. Use a real select, or a
+              listbox that behaves like one"). The select is a real, fully keyboard- and
+              screen-reader-operable native control, stacked exactly on top of the `<output>` via
+              `.zoom-level`'s CSS (styles.css) and made visually transparent rather than removed --
+              `opacity: 0`, not `display: none` or `visibility: hidden`, so it stays focusable and
+              clickable. Its own value only ever matches one of its own options when `zoomMode` is a
+              fit mode or an exact preset percentage -- a percentage reached via the stepper buttons
+              or a keyboard shortcut that lands off-preset (e.g. 85%) leaves the select showing no
+              option selected, which is honest: it is a jump-to control, not a second display of the
+              live percentage (the `<output>` is that, and stays visible underneath regardless of
+              which option the select currently considers selected). Because `opacity: 0` also hides
+              a focused element's own native focus ring, `.zoom-level:focus-within` (styles.css)
+              draws the focus indicator on the visible wrapper instead, so a keyboard user tabbing to
+              this control still sees exactly where focus is. */}
+          <div className="zoom-level">
+            <output aria-label="Zoom level">{Math.round(zoomPercent)}%</output>
+            <select
+              aria-label="Zoom preset"
+              onChange={(event) => chooseZoomPreset(event.target.value)}
+              value={zoomMode.kind === 'fixed' ? String(zoomMode.percent) : zoomMode.kind}
+            >
+              <optgroup label="Fit">
+                <option value="fit-width">Fit width</option>
+                <option value="fit-page">Fit page</option>
+              </optgroup>
+              <optgroup label="Percent">
+                {ZOOM_PRESET_PERCENTS.map((percent) => (
+                  <option key={percent} value={percent}>
+                    {percent}%
+                  </option>
+                ))}
+              </optgroup>
+            </select>
+          </div>
+          <button
+            aria-label="Zoom in"
+            onClick={() => updateZoom(ZOOM_STEP_PERCENT)}
+            title="Zoom in"
+            type="button"
+          >
             +
           </button>
         </div>
@@ -1083,7 +1320,7 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
             </div>
           </aside>
         )}
-        <section className="editor-region" aria-label="Screenplay editor">
+        <section className="editor-region" aria-label="Screenplay editor" ref={editorRegionRef}>
           <div className="ruler" aria-hidden="true">
             <span>1</span>
             <span>2</span>
@@ -1092,27 +1329,30 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
             <span>5</span>
             <span>6</span>
           </div>
-          <div className="pages">
+          <div className="pages" style={{ zoom: zoomPercent / 100 } as CSSProperties}>
+            {/* CSS `zoom` on `.pages`, not `transform: scale()` on `.page`/`TitlePageView`
+                individually (this slice's departure from plan.md:683, which names
+                `transform-origin: top center` as evidence "scale was the original intent" -- see
+                progress/zoom-modes.md for the measurements that justified overriding it).
+                `transform` does not affect layout: it repaints a scaled box in place without ever
+                telling layout the box got bigger or smaller, so `.pages > * + *`'s `margin-top`
+                (styles.css, the title-page-to-content-page gap) stayed a fixed number of unscaled
+                pixels regardless of zoom -- shrinking, relative to a zoomed-in page, until the
+                title page's scaled rendering overlapped the first content page. CSS `zoom`, applied
+                once here to the shared parent rather than to each page individually, scales layout
+                itself: every descendant's box -- including the title page's own height and the
+                `margin-top` gap between it and `.page` -- grows or shrinks by the same factor
+                `.pages`'s `scrollHeight` already reports, so the gap keeps its proportion at every
+                zoom level with no separate compensation. Measured directly (a bare zoomed div, not
+                argued from spec): at zoom 0.5/1.0/1.5 a fixed 48px `margin-top` rendered as
+                24/48/72px and `scrollHeight` scaled exactly in step. */}
             {titlePageState && (
-              // The title page is manuscript content (plan.md's "Title page"), so it scales with
-              // zoom the same way `.page` does below -- the one crossing plan.md's "Manuscript and
-              // interface are separate type systems" allows. The zoom style is passed directly
-              // rather than lifted onto a shared wrapper: `.page`'s own inline style already
-              // carries `--fd-page-stack-min-height` (read directly off `.page` by
-              // App.test.tsx/page-rendering-persistence.spec.ts), which a wrapper would have had to
-              // keep carrying anyway, so nothing is gained by moving it and something would be put
-              // at risk.
-              <TitlePageView
-                onChange={updateTitlePageState}
-                state={titlePageState}
-                style={{ transform: `scale(${zoom / 100})` } as CSSProperties}
-              />
+              <TitlePageView onChange={updateTitlePageState} state={titlePageState} />
             )}
             <article
               className={continuousScroll ? 'page continuous' : 'page'}
               style={
                 {
-                  transform: `scale(${zoom / 100})`,
                   '--fd-page-gap': `${PAGE_GAP_IN}in`,
                   '--fd-page-stack-min-height': `${pageStackMinHeightIn(pageCount)}in`,
                 } as CSSProperties

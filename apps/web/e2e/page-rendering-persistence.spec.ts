@@ -1772,3 +1772,365 @@ test.describe('page rendering: real editor, real DOM', () => {
     expect(editedText).toBe(`${seam.text.slice(0, seam.offset)}Z${seam.text.slice(seam.offset)}`);
   });
 });
+
+/**
+ * Zoom modes (progress/zoom-modes.md): "Fit page" and "Fit width" are computed from
+ * `.editor-region`'s real available area against the page's real physical dimensions
+ * (App.tsx/zoom.ts), and the character grid -- where lines break, where pages break -- must stay
+ * invariant across every zoom mode (plan.md's "Zoom controls"; the invariant
+ * `page-geometry.spec.ts`'s own "zoom scales the page visually without changing the character
+ * grid" test asserts on a synthetic `.page`, extended here against the real editor and a real
+ * multi-page document).
+ *
+ * A two-block, two-page fixture (block 0 fills page 1 exactly, block 1 spills to page 2) gives
+ * both tests below a real page break to check, not just a single page's own box.
+ */
+test.describe('zoom modes: real editor, real DOM', () => {
+  /**
+   * One test, one sign-up: every test in this describe block that needs a real signed-in writer
+   * pays for a fresh account, project, and screenplay (`createAndOpenScreenplay`) against a real,
+   * rate-limited API (`DEFAULT_API_RATE_LIMIT_MAX`, `packages/server-config`) -- a second test
+   * here that repeated that setup pushed the full persistence suite over the limit and the next
+   * test's own project list failed to load with "Projects could not be loaded.", confirmed by
+   * reproducing it twice before folding this back into one test. The centred-scroll check below
+   * therefore runs as an additional phase of the same session the fit-mode checks already open,
+   * rather than as its own test.
+   */
+  test("Fit width and Fit page actually resize the page to the real available area, the grid never moves between zoom modes, zooming keeps the viewport centred on the same content, the title-page gap scales with zoom without ever going negative, and the zoom control's visible number opens its preset picker on click", async ({
+    page,
+  }) => {
+    test.setTimeout(75_000);
+    const { canvas } = await createAndOpenScreenplay(page);
+    await requireCourierPrime(page);
+
+    /**
+     * Task A of this slice (progress/zoom-modes.md): one zoom control, not two -- `-`, the current
+     * percentage, `+`, with the percentage itself doubling as the opener for the preset `<select>`
+     * that used to sit in its own separate box. The `<select>` is stacked exactly on top of the
+     * visible `<output>` (`.zoom-level`, styles.css: `position: absolute; inset: 0`), made
+     * invisible with `opacity: 0` rather than removed so it stays a real, focusable, clickable
+     * native control, while the `<output>` beneath it is `pointer-events: none` so it never steals
+     * the click meant for the control on top of it.
+     *
+     * This is exactly the kind of wiring a unit test cannot prove: jsdom does no layout, so neither
+     * the CSS stacking nor which element a real click at a given screen coordinate actually hits is
+     * observable there. Proved here instead, in a real browser, by clicking at the visible number's
+     * own screen position (`getByLabelText('Zoom level')`, unchanged aria-label and text content
+     * from before this slice) and asserting focus landed on the preset `<select>` underneath it --
+     * the real, load-bearing effect of "click the number opens the dropdown": a native `<select>`
+     * that has received a genuine click event opens its own picker and takes focus, both by
+     * platform behaviour outside this app's control, so proving focus landed there is the furthest
+     * this app's own code can be checked without depending on OS chrome Playwright cannot see into.
+     *
+     * `force: true`: Playwright's default `.click()` refuses to click a locator when a *different*
+     * element would receive the event at that point ("intercepts pointer events"), which is
+     * exactly what this deliberately overlaid `<select>` does by design -- the same design a real
+     * mouse click resolves correctly by ordinary browser hit-testing, with no special handling. The
+     * click is still a real mouse action dispatched at the `<output>`'s own screen coordinates, so
+     * this is Playwright's own actionability guard being overridden, not the interaction faked.
+     */
+    await page.getByLabel('Zoom level').click({ force: true });
+    await expect(page.getByRole('combobox', { name: 'Zoom preset' })).toBeFocused();
+
+    await canvas.click();
+    await page.keyboard.insertText(linesOfLength(ACTION_BUDGET, 55));
+    await page.keyboard.press('Enter');
+    const savedUpdate = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'PUT' &&
+        response.url().includes('/api/screenplays/') &&
+        response.status() === 200,
+    );
+    await page.keyboard.insertText(linesOfLength(ACTION_BUDGET, 5));
+    await savedUpdate;
+    await expect(page.locator('.page-break-widget')).toHaveCount(1);
+
+    /**
+     * Zoom preserves scroll position by keeping the viewport's vertical *centre* anchored to the
+     * same content across a scale change -- the owner's own decision and formula (requirement 7,
+     * progress/zoom-modes.md): `newScrollTop = clamp((oldScrollTop + clientHeight/2) * ratio -
+     * clientHeight/2, 0, scrollHeight - clientHeight)`, `ratio` being the new scale over the old.
+     * Not the caret (an earlier version of this slice anchored on it; the owner rejected that:
+     * scroll position, not the caret, is what he wants preserved) and not a preserved scroll
+     * *fraction* (a second alternative he considered and also rejected once shown the two formulas
+     * side by side).
+     *
+     * This is real-browser, not jsdom -- unlike the pure `restoreCentredScroll` unit tests in
+     * `zoom.test.ts` (which stub `scrollHeight`/`clientHeight` directly), the actual `scrollHeight`
+     * a zoom change produces here depends on real font metrics and real CSS the implementation
+     * itself reads fresh, not a number this test can assume in advance -- so it is measured on
+     * both sides and the three candidate answers (centred, "proportional" `oldScrollTop * ratio`,
+     * and untouched) are computed from those real numbers, not guessed.
+     *
+     * **Choosing values that discriminate all three, not just two**: centred and "proportional"
+     * differ by exactly `(ratio - 1) * clientHeight / 2` (the owner's own identity) -- a `ratio`
+     * near 1 would make that gap negligible and prove nothing. `ratio = 0.5` (100% -> 50%, the
+     * floor) is as far from 1 as this app's range allows in one step, and `.editor-region`'s real
+     * `clientHeight` here is roughly 570-600px, so the gap is on the order of 140-150px --
+     * comfortably clear of any real sub-pixel rendering noise. Untouched (leaving `scrollTop`'s
+     * raw pixel value alone) diverges from both by an even wider margin: halving `scrollHeight`
+     * while leaving a mid-document `scrollTop` unchanged overshoots the new maximum entirely, so a
+     * real browser clamps it to the new bottom -- nowhere near either formula's answer. A 55%
+     * starting position (not deliberately near either scroll extreme) keeps this discrimination
+     * argument from depending on which edge the writer happened to be reading near.
+     */
+    const measureScrollState = () =>
+      page.evaluate(() => {
+        const region = document.querySelector('.editor-region');
+        if (!region) throw new Error('Missing .editor-region.');
+        return {
+          clientHeight: region.clientHeight,
+          scrollHeight: region.scrollHeight,
+          scrollTop: region.scrollTop,
+        };
+      });
+
+    const beforeZoomExtent = await measureScrollState();
+    const maxScrollBefore = beforeZoomExtent.scrollHeight - beforeZoomExtent.clientHeight;
+    expect(maxScrollBefore).toBeGreaterThan(200); // Precondition: there is real room to scroll.
+    await page.evaluate((target) => {
+      const region = document.querySelector('.editor-region');
+      if (region) region.scrollTop = target;
+    }, 0.55 * maxScrollBefore);
+    const before = await measureScrollState();
+    // Confirms the 55% target actually landed (no clamp interfered at a mid-range position).
+    expect(Math.abs(before.scrollTop - 0.55 * maxScrollBefore)).toBeLessThan(1);
+
+    await page.getByRole('combobox', { name: 'Zoom preset' }).selectOption('50');
+    await expect(page.getByLabel('Zoom level')).toHaveText('50%');
+    // App.tsx's own centred-scroll effect re-applies itself once more on the next animation
+    // frame after its synchronous write (see that effect's own comment for the real-browser
+    // finding that makes the second application necessary); this wait is comfortably longer than
+    // one frame so `after` below reads the settled value, not a transient one.
+    await page.waitForTimeout(300);
+    const after = await measureScrollState();
+
+    const ratio = 0.5;
+    const clientHeight = before.clientHeight;
+    const maxScrollAfter = after.scrollHeight - after.clientHeight;
+    const centred = Math.min(
+      Math.max((before.scrollTop + clientHeight / 2) * ratio - clientHeight / 2, 0),
+      maxScrollAfter,
+    );
+    const proportional = before.scrollTop * ratio;
+    const untouched = Math.min(before.scrollTop, maxScrollAfter);
+
+    // The two wrong answers are still far apart from the right one, in this real browser, with
+    // these real numbers -- proving the chosen values actually discriminate, not just asserting
+    // the implementation matches itself.
+    expect(Math.abs(centred - proportional)).toBeGreaterThan(50);
+    expect(Math.abs(centred - untouched)).toBeGreaterThan(50);
+
+    expect(Math.abs(after.scrollTop - centred)).toBeLessThan(5);
+
+    // Back to 100% before the fit-mode checks below, which assume a clean starting scale and
+    // scroll position.
+    await page.evaluate(() => {
+      const region = document.querySelector('.editor-region');
+      if (region) region.scrollTop = 0;
+    });
+    await page.getByRole('combobox', { name: 'Zoom preset' }).selectOption('100');
+    await expect(page.getByLabel('Zoom level')).toHaveText('100%');
+
+    /** The natural (unscaled) layout box of every `[data-block-id]` element and every
+     * `.page-break-widget`'s spacer, in CSS pixels. A zoom-mode change now scales the rendered
+     * document with CSS `zoom` on `.pages` (App.tsx/styles.css; see progress/zoom-modes.md for why
+     * this slice moved off `transform: scale()`), not `transform`, but `offsetWidth`/`offsetTop`/
+     * `offsetLeft` are unaffected by *either* mechanism: both are properties an element reports in
+     * its own local layout frame, and `zoom`, like `transform`, changes how a subtree paints into
+     * its ancestor's coordinate space without changing any element's own declared CSS lengths --
+     * verified directly against this real page rather than assumed from how `transform` behaved,
+     * since `getBoundingClientRect()`, which *does* cross into the ancestor's coordinate space,
+     * demonstrably does scale with `zoom` (see `measureFit` below, which relies on exactly that
+     * difference to derive the real scale factor). The same distinction `page-geometry.spec.ts`'s
+     * own zoom test draws between `offsetWidth` (natural) and `getBoundingClientRect().width`
+     * (visual) still holds under `zoom`, just for a different underlying reason than it did under
+     * `transform`. */
+    const measureGrid = () =>
+      page.evaluate(() => {
+        const blocks = Array.from(document.querySelectorAll<HTMLElement>('[data-block-id]')).map(
+          (el) => ({ left: el.offsetLeft, top: el.offsetTop, width: el.offsetWidth }),
+        );
+        const widgets = Array.from(
+          document.querySelectorAll<HTMLElement>('.page-break-widget .page-break-spacer'),
+        ).map((el) => ({ height: el.offsetHeight, top: el.offsetTop }));
+        return { blocks, widgets };
+      });
+
+    const gridAt100 = await measureGrid();
+    expect(gridAt100.blocks.length).toBeGreaterThanOrEqual(2);
+    expect(gridAt100.widgets.length).toBe(1);
+
+    /** `.editor-region`'s real content box, and `.page`'s real rendered box -- both measured
+     * fresh after each zoom-mode change, exactly what `App.tsx`'s recompute effect and
+     * `zoom.ts`'s `measureAvailableArea` do, but read here independently through Playwright
+     * rather than trusted from the implementation. */
+    const measureFit = () =>
+      page.evaluate(() => {
+        const region = document.querySelector('.editor-region');
+        const pageEl = document.querySelector<HTMLElement>('.page');
+        if (!region || !pageEl) throw new Error('Missing .editor-region or .page.');
+        const style = getComputedStyle(region);
+        const paddingX = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+        const paddingY = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+        const available = {
+          heightPx: region.clientHeight - paddingY,
+          widthPx: region.clientWidth - paddingX,
+        };
+        const pageRect = pageEl.getBoundingClientRect();
+        return {
+          available,
+          // offsetWidth/offsetHeight: `.page`'s own real, unscaled (local-frame) layout box --
+          // see measureGrid's own comment on why CSS `zoom` never changes what these report. Used
+          // below to derive the real scale factor directly (pageRect / offset), rather than assuming
+          // `.page`'s natural height is a single page's `PAGE_HEIGHT_IN`: this fixture is
+          // two pages, so `.page`'s own natural height is the full multi-page stack
+          // (`pageStackMinHeightIn`), not one page alone -- only its *width* stays fixed at
+          // `PAGE_WIDTH_IN` regardless of page count.
+          pageOffset: { height: pageEl.offsetHeight, width: pageEl.offsetWidth },
+          pageRect: { height: pageRect.height, width: pageRect.width },
+        };
+      });
+
+    const zoomPreset = page.getByRole('combobox', { name: 'Zoom preset' });
+    const zoomLevel = page.getByLabel('Zoom level');
+
+    /**
+     * Grid invariance against the *real* zoom mechanism, not a synthetic stand-in
+     * (progress/zoom-modes.md, "grid invariance against the real render path"). `page-geometry
+     * .spec.ts`'s own "zoom scales the page visually without changing the character grid" test
+     * builds a bare `<article class="page">` in a blank document and applies `pageEl.style
+     * .transform = scale(...)` directly -- true to the mechanism when it was written, false since
+     * this slice moved the real app to CSS `zoom` on `.pages` (App.tsx). That test still passes,
+     * unmodified, but it now proves the invariant only for a mechanism nothing ships with. This
+     * block is the real-render-path replacement plan.md:668 asks for -- the exact same range of
+     * scale factors that test uses (0.5, "a deliberately non-round fraction standing in for an
+     * ordinary fit-width/fit-page result", 0.7, 1.5), driven through the real preset `<select>`,
+     * measured on the real `.page` inside the real `.pages` with CSS `zoom` applied by the
+     * application itself -- not hand-set on a detached element.
+     *
+     * The non-round-fraction case does not need a stand-in here the way the synthetic test needed
+     * one: `fit-width`/`fit-page`, below, already resolve to whatever real, non-round percentage
+     * this fixture's real viewport produces (real window dimensions divided by the page's natural
+     * size essentially never land on a clean tenth, the same reasoning that motivated inventing
+     * 0.6125 in the first place) -- so the real fit result is used directly, rather than
+     * engineering the viewport to hit that exact number.
+     */
+    await zoomPreset.selectOption('fit-width');
+    await expect(zoomLevel).not.toHaveText('100%');
+    const fitWidth = await measureFit();
+    // `.page`'s real rendered width matches the real available width to well under a pixel of
+    // rounding -- the direct "actually fits" claim, from real browser measurements on both sides,
+    // not a re-derivation of zoom.ts's own formula.
+    expect(Math.abs(fitWidth.pageRect.width - fitWidth.available.widthPx)).toBeLessThan(1);
+    expect(await measureGrid()).toEqual(gridAt100);
+
+    await zoomPreset.selectOption('fit-page');
+    await expect(zoomLevel).not.toHaveText('100%');
+    const fitPage = await measureFit();
+    // The real, measured scale factor on each axis -- rendered box over `.page`'s own real
+    // unscaled layout box (`pageOffset`, immune to the multi-page stack's own height, unlike a
+    // hardcoded `PAGE_HEIGHT_IN` would be for this two-page fixture).
+    const scaleX = fitPage.pageRect.width / fitPage.pageOffset.width;
+    const scaleY = fitPage.pageRect.height / fitPage.pageOffset.height;
+    // A uniform CSS scale: both axes move by the same factor, whichever one is the binding
+    // constraint.
+    expect(Math.abs(scaleX - scaleY)).toBeLessThan(0.002);
+    // 8.5in and 11in at 96 CSS px/in -- the page's own natural, single-page dimensions
+    // (PAGE_WIDTH_IN / PAGE_HEIGHT_IN), independent of how many pages this document actually
+    // paginates to (see zoom.ts's own comment on why "Fit page" always fits exactly one page's
+    // height, not the whole multi-page stack).
+    const naturalWidthPx = PAGE_WIDTH_IN * 96;
+    const naturalHeightPx = PAGE_HEIGHT_IN * 96;
+    const expectedScale = Math.min(
+      fitPage.available.widthPx / naturalWidthPx,
+      fitPage.available.heightPx / naturalHeightPx,
+    );
+    // Clamped to the 50-150 range exactly as zoom.ts's own resolveZoomPercent does -- this window
+    // is comfortably capable of landing either side of a clamp depending on its real dimensions,
+    // so the expectation has to apply the same clamp rather than assume one branch.
+    const expectedScaleClamped = Math.min(1.5, Math.max(0.5, expectedScale));
+    expect(Math.abs(scaleX - expectedScaleClamped)).toBeLessThan(0.01);
+    expect(await measureGrid()).toEqual(gridAt100);
+
+    // Back to a fixed 100%: the grid is still exactly where it started, through three real
+    // zoom-mode changes.
+    await zoomPreset.selectOption('100');
+    await expect(zoomLevel).toHaveText('100%');
+    expect(await measureGrid()).toEqual(gridAt100);
+
+    /**
+     * The owner's own bug report, and the reason this slice moved `.pages`'s zoom mechanism from
+     * `transform: scale()` (individually, on `.page` and `TitlePageView`) to CSS `zoom` (once, on
+     * their shared parent `.pages`) -- see progress/zoom-modes.md for the full diagnosis and the
+     * measurements that decided it. "The gap between the title page and the content pages... when
+     * I zoom out, it grows, and when I zoom in it shrinks to the point of the pages overlapping."
+     *
+     * The root cause was `.pages > * + *`'s `margin-top` (styles.css): a layout property, sitting
+     * outside whatever mechanism scales the rendered pages. Under the old per-element `transform`,
+     * that mechanism never touched layout at all, so the margin stayed a fixed number of unscaled
+     * pixels regardless of zoom while the title page's own *painted* size grew or shrank around
+     * it -- shrinking the visible gap as zoom increased, and inverting it into a visible overlap
+     * once the title page's zoomed-in rendering outgrew the unchanged, unscaled space reserved for
+     * it. CSS `zoom`, applied once to the shared parent, scales layout itself, so the margin scales
+     * by the same factor as everything else and the gap keeps its proportion at every zoom level.
+     *
+     * Measured here directly, in the real app, at the real title page's visible bottom edge and
+     * the real content page's visible top edge -- `getBoundingClientRect()`, not `offsetTop` (the
+     * local-frame property `measureGrid` above deliberately uses instead, for the opposite reason:
+     * this check is specifically about what a writer *sees*, which is exactly what crossing into
+     * the viewport's coordinate space captures and a local-frame measurement would miss entirely).
+     */
+    const measureTitlePageGap = () =>
+      page.evaluate(() => {
+        const titlePage = document.querySelector('.title-page');
+        const contentPage = document.querySelector('.page');
+        if (!titlePage || !contentPage) throw new Error('Missing .title-page or .page.');
+        return contentPage.getBoundingClientRect().top - titlePage.getBoundingClientRect().bottom;
+      });
+
+    // The original range's mid-point (0.7), covered here purely for the grid-invariance check --
+    // the gap check below has no reason to visit 70% on its own, but this range is the one
+    // page-geometry.spec.ts's synthetic test used, and the real-mechanism replacement above keeps
+    // the same range rather than a different one.
+    await zoomPreset.selectOption('70');
+    await expect(zoomLevel).toHaveText('70%');
+    expect(await measureGrid()).toEqual(gridAt100);
+
+    // The floor: grid invariance and the gap check share this zoom-mode change rather than each
+    // triggering their own.
+    await zoomPreset.selectOption('50');
+    await expect(zoomLevel).toHaveText('50%');
+    expect(await measureGrid()).toEqual(gridAt100);
+    const gapAt50 = await measureTitlePageGap();
+
+    await zoomPreset.selectOption('100');
+    await expect(zoomLevel).toHaveText('100%');
+    const gapAt100 = await measureTitlePageGap();
+
+    // The ceiling: the exact zoom level at which the owner saw the pages overlap under the old
+    // mechanism, and the case the "never negative" gap assertion below exists specifically to
+    // catch. Also the last of the four scale factors page-geometry.spec.ts's synthetic test used --
+    // grid invariance and the gap check again share this one zoom-mode change.
+    await zoomPreset.selectOption('150');
+    await expect(zoomLevel).toHaveText('150%');
+    expect(await measureGrid()).toEqual(gridAt100);
+    const gapAt150 = await measureTitlePageGap();
+
+    // Never negative at any zoom level. A negative gap *is* the overlap the owner reported; under
+    // the old `transform`-per-element mechanism this specific assertion fails at 150% with a gap
+    // of roughly -500px (the title page's zoomed-in visible height overrunning its unchanged,
+    // unscaled layout allotment by that much), which is how this test was confirmed to fail
+    // against the pre-fix code before the fix landed.
+    expect(gapAt50).toBeGreaterThanOrEqual(0);
+    expect(gapAt100).toBeGreaterThanOrEqual(0);
+    expect(gapAt150).toBeGreaterThanOrEqual(0);
+
+    // Proportional to zoom: `PAGE_GAP_IN` (0.25in = 24 CSS px at 96 px/in) scaled by each zoom
+    // fraction, to well under a pixel of real-browser rounding.
+    const naturalGapPx = PAGE_GAP_IN * 96;
+    expect(Math.abs(gapAt50 - naturalGapPx * 0.5)).toBeLessThan(1);
+    expect(Math.abs(gapAt100 - naturalGapPx * 1.0)).toBeLessThan(1);
+    expect(Math.abs(gapAt150 - naturalGapPx * 1.5)).toBeLessThan(1);
+  });
+});

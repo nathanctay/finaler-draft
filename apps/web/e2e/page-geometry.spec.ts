@@ -216,34 +216,51 @@ test('the page number sits 0.5 in from the top and 0.75 in from the right', asyn
   expect(Math.abs(result.rightIn - 0.75)).toBeLessThan(TOLERANCE_IN);
 });
 
-test('zoom scales the page visually without changing the character grid', async ({ page }) => {
-  const result = await page.evaluate(() => {
-    const pageEl = document.createElement('article');
-    pageEl.className = 'page';
-    pageEl.style.transform = 'scale(0.7)';
-    const body = document.createElement('div');
-    body.className = 'script-body';
-    const action = document.createElement('div');
-    action.setAttribute('data-screenplay-block', '');
-    action.setAttribute('data-screenplay-element', 'action');
-    action.textContent = 'X'.repeat(60);
-    body.appendChild(action);
-    pageEl.appendChild(body);
-    document.body.appendChild(pageEl);
+// Zoom modes (progress/zoom-modes.md): this test used to check a single scale factor (0.7, the
+// midpoint of the old 70-150 range). Extended per plan.md's own instruction ("extend it to the
+// new paths rather than trusting that a new mechanism preserves the property") to cover every
+// scale factor the new mode machinery can actually produce: 0.5, the new floor a clamped fit mode
+// can land on (zoom.ts's `ZOOM_MIN_PERCENT`); 1.5, the unchanged ceiling; and 0.6125, a
+// deliberately non-round fraction standing in for an ordinary fit-width/fit-page result (real
+// window dimensions divided by the page's natural size essentially never land on a clean tenth) --
+// proving the invariant holds for whatever arbitrary fraction a fit computation happens to produce,
+// not only the round percentages a fixed-percent zoom offers. The mechanism under test is still
+// exactly `transform: scale()` on `.page` -- new zoom *modes* only changed how the scale factor
+// passed to it gets chosen (App.tsx/zoom.ts), never how `.page` itself renders that factor -- so
+// this loop extends the existing proof to the new range and the new kind of value, rather than
+// hypothesising a new mechanism.
+for (const scale of [0.5, 0.6125, 0.7, 1.5]) {
+  test(`zoom scales the page visually without changing the character grid, at ${scale}x`, async ({
+    page,
+  }) => {
+    const result = await page.evaluate((scaleFactor) => {
+      const pageEl = document.createElement('article');
+      pageEl.className = 'page';
+      pageEl.style.transform = `scale(${scaleFactor})`;
+      const body = document.createElement('div');
+      body.className = 'script-body';
+      const action = document.createElement('div');
+      action.setAttribute('data-screenplay-block', '');
+      action.setAttribute('data-screenplay-element', 'action');
+      action.textContent = 'X'.repeat(60);
+      body.appendChild(action);
+      pageEl.appendChild(body);
+      document.body.appendChild(pageEl);
 
-    // offsetWidth is the layout (pre-transform) box, which is what a character-count line
-    // break would be computed against; getBoundingClientRect().width is the painted, scaled
-    // size a user actually sees.
-    const naturalWidthIn = action.offsetWidth / 96;
-    const visualWidthIn = action.getBoundingClientRect().width / 96;
+      // offsetWidth is the layout (pre-transform) box, which is what a character-count line
+      // break would be computed against; getBoundingClientRect().width is the painted, scaled
+      // size a user actually sees.
+      const naturalWidthIn = action.offsetWidth / 96;
+      const visualWidthIn = action.getBoundingClientRect().width / 96;
 
-    document.body.removeChild(pageEl);
-    return { naturalWidthIn, visualWidthIn };
+      document.body.removeChild(pageEl);
+      return { naturalWidthIn, visualWidthIn };
+    }, scale);
+
+    expect(Math.abs(result.naturalWidthIn - 6.0)).toBeLessThan(TOLERANCE_IN);
+    expect(Math.abs(result.visualWidthIn - 6.0 * scale)).toBeLessThan(TOLERANCE_IN);
   });
-
-  expect(Math.abs(result.naturalWidthIn - 6.0)).toBeLessThan(TOLERANCE_IN);
-  expect(Math.abs(result.visualWidthIn - 6.0 * 0.7)).toBeLessThan(TOLERANCE_IN);
-});
+}
 
 // A pixel tolerance for the line-grid tests below, distinct from TOLERANCE_IN. These measure
 // getBoundingClientRect() top-edge deltas between sibling blocks, which -- unlike the margin and
