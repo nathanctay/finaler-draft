@@ -457,6 +457,80 @@ describe('updatePaginationDocumentSettings', () => {
     editor.destroy();
     mount.remove();
   });
+
+  /**
+   * `runBeforeDispatch` (the third, optional parameter): `App.tsx`'s `updateDocumentSettings`
+   * passes `applyPageGeometryCssVariables` here so that its own visual effect -- the native text
+   * rewrap `parentheticalWidthIn` and similar settings drive -- lands inside
+   * `compensateScrollForRepagination`'s own before/after measurement window, not before or after
+   * it. See this function's own comment for the full reasoning, and
+   * `progress/zoom-modes.md` for why the originally diagnosed fix ("just swap the two statements
+   * in App.tsx") was tried and found not to work: `coordsAtPos` forces a layout flush, so either
+   * bare ordering leaves the rewrap on the wrong side of *both* measurements, not inside them.
+   */
+  it('runs runBeforeDispatch before the pagination transaction commits, not after', () => {
+    const { editor, mount } = buildEditor(plainTwoPageBlocks());
+    expect(mount.querySelector('.page-break-number')?.textContent).toBe('2.');
+
+    let sawStaleDecorationInsideCallback = false;
+    updatePaginationDocumentSettings(
+      editor,
+      { ...DEFAULT_DOCUMENT_SETTINGS, pageNumberStyle: 'roman' },
+      () => {
+        // Read at the moment the callback runs: if this ran after the decoration dispatch, the
+        // page number would already read "II." here. Capturing the value into a variable rather
+        // than asserting inline keeps the interesting assertion in the test body below, where a
+        // failure reads as "callback did not run early enough" rather than an opaque mismatch
+        // buried inside the production call site's own callback.
+        sawStaleDecorationInsideCallback =
+          mount.querySelector('.page-break-number')?.textContent === '2.';
+      },
+    );
+
+    expect(sawStaleDecorationInsideCallback).toBe(true);
+    // The dispatch itself still happened, immediately afterward.
+    expect(mount.querySelector('.page-break-number')?.textContent).toBe('II.');
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('compensates the writer for the combined shift of runBeforeDispatch and the decoration dispatch, as one amount', () => {
+    const { editor, mount, region } = buildEditorInRegion(plainTwoPageBlocks(), {
+      top: 0,
+      height: 600,
+    });
+    cleanups.push(() => {
+      editor.destroy();
+      mount.remove();
+      region.remove();
+    });
+    // Three coordsAtPos calls: compensateScrollForRepagination's own "before" (300), its "after"
+    // once runBeforeDispatch AND the decoration dispatch have both already run (950 -- a bigger
+    // shift than any single-cause test in this file, standing in for "CSS rewrap plus new page
+    // break, added together"), then the trailing jump-scroll check's own read (300, the caret's
+    // now-restored position, comfortably in view).
+    const coordsSpy = vi
+      .spyOn(editor.view, 'coordsAtPos')
+      .mockReturnValueOnce(coordsAt(300))
+      .mockReturnValueOnce(coordsAt(950))
+      .mockReturnValueOnce(coordsAt(300));
+    region.scrollTop = 50;
+
+    let cssVariableApplied = false;
+    updatePaginationDocumentSettings(
+      editor,
+      { ...DEFAULT_DOCUMENT_SETTINGS, pageNumberStyle: 'roman' },
+      () => {
+        cssVariableApplied = true;
+      },
+    );
+
+    expect(cssVariableApplied).toBe(true);
+    expect(coordsSpy).toHaveBeenCalledTimes(3);
+    // 50 (where the writer had scrolled to) + 650 (950 - 300, the combined shift): the entire
+    // amount is compensated as a single delta, whichever of the two causes contributed it.
+    expect(region.scrollTop).toBe(700);
+  });
 });
 
 describe('scene numbers (live)', () => {

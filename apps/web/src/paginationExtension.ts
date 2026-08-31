@@ -379,13 +379,36 @@ function compensateScrollForRepagination(view: EditorView, dispatch: () => void)
  * `view()` handler's own repagination reading it back, are the only two places that still need to
  * know the current value; `addOptions()`'s `documentSettings` remains only the value the plugin is
  * seeded with when the editor first mounts.
+ *
+ * `runBeforeDispatch`, if given, runs *inside* `compensateScrollForRepagination`'s wrapped
+ * `dispatch()` -- between its "before" measurement and the decoration transaction, not before or
+ * after the whole function -- so that its own visual effect is inside the same compensated window
+ * as the decorations. `App.tsx`'s `updateDocumentSettings` passes `applyPageGeometryCssVariables`
+ * here for exactly one reason: `parentheticalWidthIn` is the one document setting that changes a
+ * block's rendered *wrap width*, and the browser's native text wrap doesn't re-flow to a new width
+ * until that CSS custom property is written -- a distinct, second source of on-screen shift from
+ * the page-break decorations this function already accounts for.
+ *
+ * Originally diagnosed as "call `applyPageGeometryCssVariables` one line earlier, before this
+ * function instead of after it" (progress/repagination-scroll-anchor.md's "known limitations").
+ * That specific reordering was tried first and found NOT to fix it: `readCaretRect`'s
+ * `coordsAtPos` call forces a synchronous layout flush to return accurate coordinates, so simply
+ * moving the CSS write earlier only moves *which* measurement absorbs the rewrap silently --
+ * `compensateScrollForRepagination`'s own "before" reading would itself force the flush and end up
+ * taken *after* the rewrap had already shifted the caret, instead of "after" being taken *before*
+ * it as happens today. Either bare ordering leaves the rewrap's contribution outside the
+ * before/after window entirely, uncompensated either way -- only running it *inside* the window,
+ * as a parameter to the wrapped `dispatch`, puts both sources of shift on the same side of both
+ * measurements. See progress/zoom-modes.md for the full reasoning and the test that proves it.
  */
 export function updatePaginationDocumentSettings(
   editor: Editor,
   documentSettings: DocumentSettings,
+  runBeforeDispatch?: () => void,
 ): void {
   const paginationState = computePaginationState(editor.state.doc, documentSettings);
   compensateScrollForRepagination(editor.view, () => {
+    runBeforeDispatch?.();
     editor.view.dispatch(editor.state.tr.setMeta(paginationPluginKey, paginationState));
   });
 }

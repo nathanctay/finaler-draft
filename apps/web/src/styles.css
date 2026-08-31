@@ -327,10 +327,57 @@ select:focus-visible,
   color: var(--text-12);
 }
 
-.zoom-controls output {
+/* One control (Task A of this slice, consolidating the previous separate stepper box and preset
+   box): `.zoom-level` is the middle segment between the two buttons -- the visible, announced
+   `<output>` (unchanged aria-label and text content from before this slice) with the preset
+   `<select>` stacked exactly on top of it via `position: absolute; inset: 0`, so a click anywhere
+   on the number opens the same dropdown plan.md's "Zoom controls" asks for. `position: relative`
+   is what makes the select's `inset: 0` resolve against this box rather than some further-out
+   ancestor. */
+.zoom-level {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   min-width: 40px;
+  height: 29px;
+  border-left: 1px solid var(--border-03);
+  border-right: 1px solid var(--border-03);
+}
+
+.zoom-level output {
   text-align: center;
   font-size: 12px;
+  /* The select stacked on top already receives every click; this just keeps the number itself
+     out of the way rather than relying on paint order alone. */
+  pointer-events: none;
+}
+
+/* Visually transparent, not removed: `opacity: 0` (never `display: none` / `visibility: hidden`)
+   keeps this a real, focusable, clickable native `<select>` -- Tab still reaches it, a click still
+   opens its native picker, and every keyboard interaction a `<select>` normally supports still
+   works, all while the `<output>` beneath supplies what is actually seen and announced as the
+   current zoom level. */
+.zoom-level select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* `opacity: 0` on the select also hides its own native `:focus-visible` outline (styles.css's
+   generic `select:focus-visible` rule above), so the focus ring is drawn on this visible wrapper
+   instead -- a keyboard user tabbing to the zoom preset control still sees exactly where focus
+   landed. */
+.zoom-level:focus-within {
+  outline: 2px solid var(--border-11);
+  outline-offset: -2px;
 }
 
 .visually-hidden {
@@ -524,7 +571,6 @@ select:focus-visible,
      than silently inheriting an arbitrary value. The three decorations below (page number,
      title, meta) are not manuscript content and set their own looser leading explicitly. */
   line-height: var(--fd-line-height);
-  transform-origin: top center;
 }
 
 /*
@@ -594,7 +640,6 @@ select:focus-visible,
   font-family: var(--fd-typeface);
   font-size: var(--fd-type-size);
   line-height: var(--fd-line-height);
-  transform-origin: top center;
 }
 
 .title-page-center {
@@ -1912,6 +1957,10 @@ select:focus-visible,
 
 .dark .element-selector select {
   color: var(--dark-text-07);
+}
+
+.dark .zoom-level {
+  border-color: var(--dark-border-06);
 }
 
 .dark .ruler {
