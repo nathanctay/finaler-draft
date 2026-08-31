@@ -1515,6 +1515,42 @@ describe('zoom modes', () => {
   });
 });
 
+/**
+ * The root cause behind the real-browser scroll drift diagnosed in progress/zoom-scroll-drift.md:
+ * `@tiptap/react`'s `useEditor` calls `editor.setOptions(...)` -- reconfiguring every ProseMirror
+ * plugin, `paginationExtension.ts`'s pagination plugin included -- on any render of `<App>` whose
+ * `useEditor` options differ from the previous render by *object identity*, `extensions` checked
+ * per-element and everything else (including `editorProps`) checked by `!==`. An inline object
+ * literal or a freshly `.configure()`d extension is a new identity on *every* render, so this used
+ * to fire on every single re-render of `<App>` regardless of whether anything relevant changed --
+ * including a zoom change, which is how this was found, but the bug is not zoom-specific: any
+ * re-render (a panel toggle, a save-state change, an active-block update) triggered it too. Fixed
+ * by hoisting `editorProps` to a module-level constant and memoizing `extensions` with an empty
+ * dependency array (App.tsx, above `useEditor`).
+ */
+describe('useEditor options stability (zoom-scroll-drift.md)', () => {
+  it('does not call editor.setOptions again for an App re-render that changes neither the document nor the selection', async () => {
+    // `spyOn` wraps the real implementation (calls through), so this only observes call counts --
+    // the editor keeps working normally for the rest of the test.
+    const setOptionsSpy = vi.spyOn(Editor.prototype, 'setOptions');
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    // Constructing the editor itself calls `setOptions` once, internally (`@tiptap/core`'s own
+    // `Editor` constructor) -- expected, and not what this test is about. Cleared here so the
+    // assertion below is purely about what happens *after* the editor already exists.
+    setOptionsSpy.mockClear();
+
+    // Toggling a panel changes `panels.navigator` -- App re-renders, but neither the ProseMirror
+    // document nor its selection moved at all. Chosen over a zoom action specifically because
+    // zoom is the symptom this bug was found through, not its cause: any unrelated re-render must
+    // be just as harmless.
+    await user.click(screen.getByRole('button', { name: 'Toggle navigator' }));
+
+    expect(setOptionsSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('title page editing', () => {
   const titlePageId = '00000000-0000-4000-8000-0000000000f1';
 

@@ -209,6 +209,22 @@ const unavailableEditorContent = {
   type: 'screenplayDocument' as const,
 };
 
+// `useEditor`'s own React binding (`@tiptap/react`'s `EditorInstanceManager.onRender`) compares
+// every option's *object identity* on every render of `<App>` and calls `editor.setOptions(...)`
+// whenever any of them differ -- `extensions` specifically by per-element identity, everything
+// else (including `editorProps`) by `!==`. An inline object literal here would therefore fail
+// that comparison on every single render, not only ones that actually changed anything, forcing a
+// full ProseMirror plugin reconfigure each time. Hoisted to a module-level constant so its
+// identity never changes: it is fully static (no per-screenplay or per-render data), so there is
+// nothing for it to ever need to vary with.
+const editorProps = {
+  attributes: {
+    'aria-label': 'Screenplay editing canvas',
+    'aria-multiline': 'true',
+    role: 'textbox',
+  },
+};
+
 export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay }) {
   const [panels, setPanels] = useState<Record<Panel, boolean>>({
     navigator: true,
@@ -470,17 +486,20 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     }
   };
 
-  const editor = useEditor({
-    content: editorContent ?? unavailableEditorContent,
-    editable: initialContent !== undefined,
-    editorProps: {
-      attributes: {
-        'aria-label': 'Screenplay editing canvas',
-        'aria-multiline': 'true',
-        role: 'textbox',
-      },
-    },
-    extensions: [
+  // Same reasoning as `editorProps` above: an inline array literal here is a fresh identity on
+  // every render, and `PaginationExtension.configure(...)` in particular returns a brand-new
+  // extension instance on every call -- Tiptap's `.configure()` never memoizes -- so this array
+  // would fail `useEditor`'s per-element identity comparison every single render regardless of
+  // whether anything about it actually changed. Memoized with an empty dependency array
+  // deliberately: `PaginationExtension.configure({ documentSettings: ... })` only ever *seeds*
+  // the plugin's own `init()` the one time the extension is constructed -- a runtime
+  // `documentSettings` change reaches the plugin entirely through `updatePaginationDocumentSettings`'s
+  // meta-carrying dispatch (paginationExtension.ts), never by reconfiguring this extension, so
+  // `initial.screenplay.documentSettings` is only ever the *initial* value and this array never
+  // legitimately needs to be rebuilt after mount. Every other member is already a module-level
+  // singleton, so nothing here loses the ability to change for a reason that matters.
+  const extensions = useMemo(
+    () => [
       ...screenplayExtensions,
       PaginationExtension.configure({ documentSettings: initial.screenplay.documentSettings }),
       // The caret at a mid-block page seam (seamCaret.ts). Mounted directly after the plugin whose
@@ -504,6 +523,17 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
       // in this array decides nothing about which layer sees Enter first.
       ElementMenuExtension,
     ],
+    // `initial.screenplay.documentSettings` deliberately omitted: see the comment above this
+    // array for why it is a one-time seed, not a live dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  const editor = useEditor({
+    content: editorContent ?? unavailableEditorContent,
+    editable: initialContent !== undefined,
+    editorProps,
+    extensions,
     onCreate: ({ editor: editorInstance }) => {
       syncEditorState(editorInstance);
       syncPageCount(editorInstance);
@@ -578,39 +608,26 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   // `requestZoomMode` does), so this is naturally a no-op for that class of change, with no extra
   // branch needed to keep it that way.
   //
-  // The `requestAnimationFrame` re-application is load-bearing, not defensive padding. Measured
-  // directly while building this (a real Chrome, via `page-rendering-persistence.spec.ts`'s
-  // "zooming keeps the viewport centred" test): the synchronous call above computes and writes
-  // the exact right value -- confirmed by reading `.editor-region.scrollTop` back immediately,
-  // inside this same effect, before returning -- and then, once, between this effect finishing
-  // and the browser's very next animation frame, something outside this component's own code
-  // moves it again, converging on a different, wrong value. `overflow-anchor: none` on
-  // `.editor-region` (and on every element under `.pages`) was tried and made no measurable
-  // difference, ruling out CSS Scroll Anchoring specifically; a `scrollTop` property override
-  // that logs every script-driven write saw nothing between the two frames, meaning whatever
-  // moves it does so beneath the JS-visible property setter, not through it. The exact browser
-  // mechanism is therefore undiagnosed, but the shape of it is well-pinned: it is a one-time
-  // event, it always lands between the synchronous commit and the first `requestAnimationFrame`
-  // callback, and every real-browser measurement taken in that same callback (and in a second,
-  // chained one after it) shows it already settled and staying there. Re-running the identical,
-  // idempotent computation once inside that callback reliably wins, because nothing further
-  // disturbs it afterward. See progress/zoom-modes.md for the full investigation.
-  //
-  // **Re-verified, not assumed, after this slice moved the scaling mechanism from `transform:
-  // scale()` to CSS `zoom` on `.pages`.** The hypothesis going in was that this reapplication was
-  // only ever compensating for `scrollHeight` failing to track the new scale before layout
-  // settled -- which `zoom` fixes exactly, per the measurements in the comment above the
-  // `.pages` element -- so it might now be dead weight. Tested directly by removing it and rerunning
-  // this same real-browser test: the drift is still there. Smaller than it was under `transform`
-  // (roughly 60px against a <5px tolerance, versus roughly 600px before this slice), but still
-  // real and still failing the test without the reapplication in place. The mitigation is kept.
+  // This used to reapply the same computation a second time inside a `requestAnimationFrame`
+  // callback, to win against a real-browser drift that landed between this effect returning and
+  // the browser's next paint. That drift is now root-caused and fixed at its source
+  // (progress/zoom-scroll-drift.md): `useEditor`'s own extensions/`editorProps` used to be fresh
+  // object identities on every render, which made `@tiptap/react` call `editor.setOptions(...)`
+  // on every render (including a zoom-triggered one) and reconfigure ProseMirror's plugins;
+  // `paginationExtension.ts`'s pagination plugin unconditionally re-ran its caret-visibility
+  // heuristic (`maybeJumpScrollCaretIntoView`) on that spurious update and overwrote `scrollTop`
+  // with a value that had nothing to do with zoom. Fixed by memoizing `extensions`/`editorProps`
+  // (App.tsx, above) so that reconfigure stops happening for a render that changed neither, and,
+  // as defence in depth, by guarding `maybeJumpScrollCaretIntoView`'s call site on the document or
+  // the selection having actually changed (paginationExtension.ts). With both in place, removing
+  // the `requestAnimationFrame` reapplication and rerunning the real-browser "zooming keeps the
+  // viewport centred" test (page-rendering-persistence.spec.ts) five times in a row was reliably
+  // green -- the drift is gone, not merely smaller, so the reapplication is dead weight and has
+  // been removed rather than kept out of caution.
   useLayoutEffect(() => {
     const capture = pendingZoomScrollCaptureRef.current;
     pendingZoomScrollCaptureRef.current = undefined;
     restoreCentredScroll(editorRegionRef.current, capture, zoomPercent);
-    requestAnimationFrame(() => {
-      restoreCentredScroll(editorRegionRef.current, capture, zoomPercent);
-    });
   }, [zoomPercent]);
 
   const updateZoom = (amount: number) => {

@@ -500,15 +500,36 @@ export const PaginationExtension = Extension.create<PaginationExtensionOptions>(
               }
             },
             update(view, previousState) {
-              // Every transaction, not only doc-changing ones: a plain selection move (arrow-key
-              // navigation, a click) can just as well land the caret at the bottom edge as an
-              // edit can. Skipped for a transaction `compensateScrollForRepagination` is already
-              // handling itself (`viewsCompensatingForRepagination`) -- see that function's own
-              // comment for why running both here would corrupt its own before/after measurement.
-              if (!viewsCompensatingForRepagination.has(view)) {
+              // Every transaction that actually moved the document or the selection, not only
+              // doc-changing ones: a plain selection move (arrow-key navigation, a click) can
+              // just as well land the caret at the bottom edge as an edit can, so both are
+              // checked (`Node.eq`/`Selection.eq` -- value equality, not `state !==`, which would
+              // also be true for a state that is merely a *new object* carrying the same doc and
+              // selection).
+              //
+              // The guard itself -- neither changed -- exists for a real, observed case, not a
+              // hypothetical one: `@tiptap/react`'s `useEditor` calls `editor.setOptions(...)` on
+              // any render where its own options object differs by *identity*, which forces a
+              // full ProseMirror plugin reconfigure and this `update` hook to run again, even
+              // when neither the document nor the selection moved at all -- App.tsx's `extensions`
+              // array used to be exactly this before it was memoized (progress/zoom-scroll-drift.md).
+              // `maybeJumpScrollCaretIntoView` is a caret-*visibility* heuristic; running it for an
+              // update that did not move the caret can still move `.editor-region.scrollTop` for a
+              // reason that has nothing to do with the caret, fighting whatever the rest of the
+              // app just did to that same scroll position. This guard makes any future path that
+              // triggers a spurious, no-op-for-the-document update harmless without weakening the
+              // real trigger this hook exists for.
+              //
+              // Skipped entirely (regardless of the guard) for a transaction
+              // `compensateScrollForRepagination` is already handling itself
+              // (`viewsCompensatingForRepagination`) -- see that function's own comment for why
+              // running both here would corrupt its own before/after measurement.
+              const docChanged = !view.state.doc.eq(previousState.doc);
+              const selectionChanged = !view.state.selection.eq(previousState.selection);
+              if (!viewsCompensatingForRepagination.has(view) && (docChanged || selectionChanged)) {
                 maybeJumpScrollCaretIntoView(view);
               }
-              if (!view.state.doc.eq(previousState.doc)) {
+              if (docChanged) {
                 scheduleRepagination();
               }
             },
