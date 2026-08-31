@@ -255,6 +255,15 @@ function splitScreenplayBlock(
   const insertionPosition = activeBlock.position + preservedBlock.nodeSize;
   transaction.insert(insertionPosition, newBlock);
   transaction.setSelection(TextSelection.create(transaction.doc, insertionPosition + 1));
+  // Every command in `prosemirror-commands` (`splitBlock` included) marks its own transaction with
+  // `.scrollIntoView()`; this hand-rolled split never did. ProseMirror only scrolls a transaction
+  // that asks for it (`EditorView.updateStateInner` reads `state.scrollToSelection`, incremented
+  // only by this call) -- so at the bottom of the document, Enter moved the selection into a block
+  // that had just been created below the fold and left the view exactly where it was. The very
+  // next keystroke scrolled correctly only because ordinary typed-text input goes through
+  // ProseMirror's own `readDOMChange`, which always calls `tr.scrollIntoView()` on its own
+  // transaction -- a different code path this command never shared.
+  transaction.scrollIntoView();
   editor.view.dispatch(transaction);
   return true;
 }
