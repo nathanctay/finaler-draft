@@ -57,14 +57,18 @@ import { DocumentSettingsDialog } from './documentSettingsDialog.js';
 import { OverflowMenu } from './components/OverflowMenu.js';
 import { Toast } from './components/Toast.js';
 import {
+  applyPinchWheelDelta,
   captureCentredScroll,
+  capturePointerAnchoredScroll,
   clampZoomPercent,
   measureAvailableArea,
   resolveZoomPercent,
   restoreCentredScroll,
+  restorePointerAnchoredScroll,
   ZOOM_DEFAULT_PERCENT,
   ZOOM_PRESET_PERCENTS,
   ZOOM_STEP_PERCENT,
+  type PointerZoomCapture,
   type ZoomMode,
   type ZoomScrollCapture,
 } from './zoom.js';
@@ -248,6 +252,11 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   // mode needs to know how much room it has. A ref, not state: the element itself never needs to
   // trigger a re-render on its own account, only the recompute effect below does.
   const editorRegionRef = useRef<HTMLElement>(null);
+  // `.pages` itself -- the element CSS `zoom` actually scales, and the element
+  // `capturePointerAnchoredScroll` (zoom.ts) measures the pointer against instead of
+  // `.editor-region`, so pinch's anchor formula never needs to know about `.editor-region`'s own
+  // padding or centring rule. See that function's own top-of-section comment in zoom.ts.
+  const pagesRef = useRef<HTMLDivElement>(null);
   // Set synchronously by `requestZoomMode` just before it calls `setZoomMode`, and consumed (and
   // cleared) by the centred-scroll effect once the new zoom has actually rendered -- see
   // `requestZoomMode`'s own comment for why a zoom change (a React state update, not a
@@ -260,6 +269,22 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   // or `maybeJumpScrollCaretIntoView` (paginationExtension.ts), and not touching ProseMirror at
   // all is what makes that true by construction rather than by a guard that could later rot.
   const pendingZoomScrollCaptureRef = useRef<ZoomScrollCapture | undefined>(undefined);
+  // Pinch-to-zoom's own capture, populated only by `commitPinchZoom` below and never by
+  // `requestZoomMode` -- the two are mutually exclusive by construction (every ordinary zoom
+  // entry point routes through `requestZoomMode`, and pinch never does), so at most one of this
+  // ref and `pendingZoomScrollCaptureRef` above is ever populated at a time, and each is consumed
+  // and cleared only by its own matching `useLayoutEffect` below. This is what keeps the two
+  // anchoring strategies -- centred for a clicked control, pointer-anchored for a pinch gesture --
+  // from ever fighting over the same write; see `restorePointerAnchoredScroll` (zoom.ts) for why
+  // they are deliberately different formulas, not a bug to unify.
+  const pendingPinchAnchorRef = useRef<PointerZoomCapture | undefined>(undefined);
+  // The last `zoomPercent` actually committed, readable synchronously from inside a `wheel`/
+  // `pointermove` handler without closing over a stale first-render value the way a plain
+  // variable would. Kept current by the `useLayoutEffect` immediately below (before the browser's
+  // next paint, and therefore before the next animation frame a pinch gesture's own coalesced
+  // handler runs in), the same freshness guarantee `paginationExtension.ts`'s own frame-coalesced
+  // recompute relies on for its `documentSettings` read.
+  const zoomPercentRef = useRef(ZOOM_DEFAULT_PERCENT);
   const [dark, setDark] = useState(false);
   // View state, not document state: never travels with the canonical screenplay, and defaults
   // off. The label itself renders as a zero-layout-space overlay (see .script-body
@@ -629,6 +654,213 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     pendingZoomScrollCaptureRef.current = undefined;
     restoreCentredScroll(editorRegionRef.current, capture, zoomPercent);
   }, [zoomPercent]);
+
+  // Keeps `zoomPercentRef` current for the pinch handlers below, which read it synchronously from
+  // inside a native event listener rather than a React closure -- see that ref's own comment.
+  useLayoutEffect(() => {
+    zoomPercentRef.current = zoomPercent;
+  }, [zoomPercent]);
+
+  // Pinch's own scroll restoration, the pointer-anchored counterpart to the centred-scroll effect
+  // above -- run from the identical `useLayoutEffect` timing (after the DOM commit, before paint)
+  // for the identical reason: `restorePointerAnchoredScroll` (zoom.ts) reads `.editor-region`'s
+  // `scrollHeight`/`scrollWidth`/`clientHeight`/`clientWidth` fresh, which only reflect the new
+  // scale once this commit has landed. A no-op whenever `pendingPinchAnchorRef` is empty -- every
+  // non-pinch zoom change only ever populates `pendingZoomScrollCaptureRef` above, never this one.
+  useLayoutEffect(() => {
+    const capture = pendingPinchAnchorRef.current;
+    pendingPinchAnchorRef.current = undefined;
+    restorePointerAnchoredScroll(editorRegionRef.current, capture, zoomPercent);
+  }, [zoomPercent]);
+
+  // The one place a pinch gesture (wheel-with-ctrlKey below, or the two-touch handler further
+  // down) actually changes zoom: captures the pointer-anchored scroll state the layout effect
+  // above needs, then sets a fixed zoom mode -- "pinch sets a fixed percentage, leaving any fit
+  // mode" (plan.md:662), exactly like every other zoom entry point that calls `requestZoomMode`,
+  // except this one deliberately does NOT call `requestZoomMode` itself: that function populates
+  // `pendingZoomScrollCaptureRef` for centred anchoring, which is the wrong anchor for a gesture
+  // whose whole point is to keep the pointer's own position fixed instead (zoom.ts's own comment
+  // on `restorePointerAnchoredScroll` explains why the two are intentionally different formulas).
+  // A stable identity (`useCallback`, refs and `setZoomMode` only) so both the wheel effect and
+  // the touch effect below can list it as their one dependency without re-subscribing their
+  // listeners on every render.
+  //
+  // `prefers-reduced-motion` (plan.md:662, "no animated transition between zoom levels"): already
+  // true here by construction, not a special case this needs to add -- `.pages`'s CSS `zoom`
+  // (App.tsx's JSX below) has never had a `transition` declared on it for any zoom path, pinch
+  // included, so every percent this produces is applied as an instant, un-eased snap exactly like
+  // a stepper click or a preset selection already is. There is nothing to gate behind the media
+  // query because there is no animation to begin with.
+  const commitPinchZoom = useCallback((newPercent: number, clientX: number, clientY: number) => {
+    pendingPinchAnchorRef.current = capturePointerAnchoredScroll(
+      editorRegionRef.current,
+      pagesRef.current,
+      zoomPercentRef.current,
+      clientX,
+      clientY,
+    );
+    setZoomMode({ kind: 'fixed', percent: newPercent });
+  }, []);
+
+  // Trackpad pinch (plan.md:662): "Trackpad pinch arrives as a `wheel` event with `ctrlKey` set."
+  // Registered manually via `addEventListener(..., { passive: false })` on `.editor-region`
+  // itself, not React's `onWheel` -- React always attaches its own synthetic wheel listener as
+  // passive, so `event.preventDefault()` inside an `onWheel` handler is silently ignored by the
+  // browser and the page would zoom (or, depending on the browser, simply scroll) underneath this
+  // handler regardless of what it does. Scoped to this one element, not `window` or `document`:
+  // "so the writer keeps the browser's own zoom on the surrounding interface... Intercepting it
+  // globally would take away a control the operating system gives them" (plan.md:662).
+  useEffect(() => {
+    const region = editorRegionRef.current;
+    if (!region) {
+      return;
+    }
+    // A `wheel` event fires far faster than the browser paints -- coalesced to at most one
+    // percent update per animation frame, the same pattern `paginationExtension.ts`'s own
+    // `scheduleRepagination` uses for the identical reason (see that function's own comment).
+    // Every `deltaY` seen before the queued frame runs is summed into one call to
+    // `applyPinchWheelDelta`, and the pointer position used is whichever event's was most recent
+    // -- both match what a writer perceives as "one continuous gesture", not a sequence of
+    // independent small zooms each anchored on a slightly different, already-stale pointer
+    // reading.
+    let pendingDeltaY = 0;
+    let pendingClientX = 0;
+    let pendingClientY = 0;
+    let frame: number | undefined;
+    const flush = () => {
+      frame = undefined;
+      const deltaY = pendingDeltaY;
+      pendingDeltaY = 0;
+      const nextPercent = applyPinchWheelDelta(zoomPercentRef.current, deltaY);
+      commitPinchZoom(nextPercent, pendingClientX, pendingClientY);
+    };
+    const handleWheel = (event: WheelEvent) => {
+      // Ordinary wheel scrolling (no `ctrlKey`) is deliberately left completely alone here --
+      // no `preventDefault()`, no state read, no branch taken at all -- so the browser's own
+      // native scroll of `.editor-region` (`overflow: auto`, styles.css) keeps working exactly
+      // as it did before this handler existed.
+      if (!event.ctrlKey) {
+        return;
+      }
+      event.preventDefault();
+      pendingDeltaY += event.deltaY;
+      pendingClientX = event.clientX;
+      pendingClientY = event.clientY;
+      if (frame === undefined) {
+        frame = window.requestAnimationFrame(flush);
+      }
+    };
+    region.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      region.removeEventListener('wheel', handleWheel);
+      if (frame !== undefined) {
+        window.cancelAnimationFrame(frame);
+      }
+    };
+  }, [commitPinchZoom]);
+
+  // Touch's own two-finger pinch (plan.md:662: "touch devices need their own handling"). Pointer
+  // Events, not `TouchEvent`, so the same handler naturally ignores mouse/pen input
+  // (`event.pointerType !== 'touch'`) without a separate code path -- `.editor-region`'s own
+  // `touch-action: pan-x pan-y` (styles.css) is what stops the browser from also trying to
+  // recognize this same two-finger gesture as its own native pinch-zoom before these handlers see
+  // it, while leaving one-finger touch panning (ordinary scrolling) natively handled and
+  // untouched, exactly like the wheel handler above leaves an unmodified wheel event untouched.
+  //
+  // Tracks every active touch pointer in a plain `Map`, not React state -- this is per-gesture,
+  // transient bookkeeping with no reason to trigger a render on its own, the same reasoning
+  // `paginationExtension.ts`'s `pendingFrame` local variable already follows for its own
+  // per-view, non-rendering state. `previousDistance` is reset to `undefined` by `clearPointer`
+  // below on every pointer that goes away (`pointerup`/`pointercancel`/`pointerleave`) --
+  // unconditionally, regardless of how many pointers remain afterward -- so any gesture that
+  // returns to exactly two active pointers always re-establishes a fresh baseline on its first
+  // `pointermove` rather than being zoomed against a stale distance that belonged to a different
+  // pair of fingers. A third finger touching down needs no reset of its own: `handlePointerMove`'s
+  // own `pointers.size !== 2` guard already withholds every zoom computation for as long as three
+  // (or more) pointers are active, so `previousDistance` is simply never read until the count is
+  // back to two -- which, since the only way to decrease it is a removal, only ever happens
+  // through `clearPointer`'s own reset. (An earlier version of this effect also reset
+  // `previousDistance` from `handlePointerDown` whenever the count left two; mutation-testing that
+  // branch found no test could distinguish its presence from its absence, and this reasoning is
+  // why -- it was dead by construction, not merely untested, and has been removed rather than kept
+  // for a defensiveness it never actually added. See progress/pinch-zoom.md.)
+  useEffect(() => {
+    const region = editorRegionRef.current;
+    if (!region) {
+      return;
+    }
+    const pointers = new Map<number, { x: number; y: number }>();
+    let previousDistance: number | undefined;
+    let pendingRatio = 1;
+    let pendingMidX = 0;
+    let pendingMidY = 0;
+    let frame: number | undefined;
+    const flush = () => {
+      frame = undefined;
+      const ratio = pendingRatio;
+      pendingRatio = 1;
+      const nextPercent = clampZoomPercent(zoomPercentRef.current * ratio);
+      commitPinchZoom(nextPercent, pendingMidX, pendingMidY);
+    };
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch') {
+        return;
+      }
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    };
+    const handlePointerMove = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || !pointers.has(event.pointerId)) {
+        return;
+      }
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pointers.size !== 2) {
+        return;
+      }
+      event.preventDefault();
+      const [first, second] = Array.from(pointers.values());
+      if (!first || !second) {
+        return;
+      }
+      const distance = Math.hypot(first.x - second.x, first.y - second.y);
+      const midX = (first.x + second.x) / 2;
+      const midY = (first.y + second.y) / 2;
+      // The first sample of a fresh two-finger gesture has nothing to compare against yet -- it
+      // only establishes the baseline `previousDistance` a second sample can compute a ratio
+      // from, exactly the same "nothing to do yet, wait for the next one" shape the wheel
+      // handler's own coalescing has no need for (a `wheel` event already carries its own delta).
+      if (previousDistance !== undefined && previousDistance > 0) {
+        pendingRatio *= distance / previousDistance;
+        pendingMidX = midX;
+        pendingMidY = midY;
+        if (frame === undefined) {
+          frame = window.requestAnimationFrame(flush);
+        }
+      }
+      previousDistance = distance;
+    };
+    const clearPointer = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch') {
+        return;
+      }
+      pointers.delete(event.pointerId);
+      previousDistance = undefined;
+    };
+    region.addEventListener('pointerdown', handlePointerDown);
+    region.addEventListener('pointermove', handlePointerMove, { passive: false });
+    region.addEventListener('pointerup', clearPointer);
+    region.addEventListener('pointercancel', clearPointer);
+    region.addEventListener('pointerleave', clearPointer);
+    return () => {
+      region.removeEventListener('pointerdown', handlePointerDown);
+      region.removeEventListener('pointermove', handlePointerMove);
+      region.removeEventListener('pointerup', clearPointer);
+      region.removeEventListener('pointercancel', clearPointer);
+      region.removeEventListener('pointerleave', clearPointer);
+      if (frame !== undefined) {
+        window.cancelAnimationFrame(frame);
+      }
+    };
+  }, [commitPinchZoom]);
 
   const updateZoom = (amount: number) => {
     requestZoomMode({ kind: 'fixed', percent: clampZoomPercent(zoomPercent + amount) });
@@ -1346,7 +1578,11 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
             <span>5</span>
             <span>6</span>
           </div>
-          <div className="pages" style={{ zoom: zoomPercent / 100 } as CSSProperties}>
+          <div
+            className="pages"
+            ref={pagesRef}
+            style={{ zoom: zoomPercent / 100 } as CSSProperties}
+          >
             {/* CSS `zoom` on `.pages`, not `transform: scale()` on `.page`/`TitlePageView`
                 individually (this slice's departure from plan.md:683, which names
                 `transform-origin: top center` as evidence "scale was the original intent" -- see

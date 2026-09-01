@@ -1,13 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyPinchWheelDelta,
   captureCentredScroll,
+  capturePointerAnchoredScroll,
   clampZoomPercent,
   computeFitPercent,
   measureAvailableArea,
   resolveZoomPercent,
   restoreCentredScroll,
+  restorePointerAnchoredScroll,
+  zoomRatioFromWheelDelta,
   ZOOM_MAX_PERCENT,
   ZOOM_MIN_PERCENT,
+  type PointerZoomCapture,
   type ZoomMode,
   type ZoomScrollCapture,
 } from './zoom.js';
@@ -263,5 +268,387 @@ describe('restoreCentredScroll', () => {
     restoreCentredScroll(region, capture, 300);
     // Centre was 190 + 50 = 240; ratio 3 -> 720; centred: 720 - 50 = 670, inside [0, 1100].
     expect(region.scrollTop).toBe(670);
+  });
+});
+
+describe('zoomRatioFromWheelDelta', () => {
+  it('deltaY = 0 is the identity -- no wheel movement means no zoom change', () => {
+    expect(zoomRatioFromWheelDelta(0)).toBe(1);
+  });
+
+  it('a negative deltaY (pinch-out / zoom in, per the browsers’ own de facto sign convention) yields a ratio above 1', () => {
+    expect(zoomRatioFromWheelDelta(-40)).toBeGreaterThan(1);
+  });
+
+  it('a positive deltaY (pinch-in / zoom out) yields a ratio below 1', () => {
+    expect(zoomRatioFromWheelDelta(40)).toBeLessThan(1);
+  });
+
+  it('is multiplicatively symmetric under a sign flip: ratio(d) * ratio(-d) = 1 exactly', () => {
+    // The exponential-response property the module comment claims: two opposite deltas of the
+    // same magnitude exactly undo one another, regardless of which magnitude is chosen -- a
+    // linear response could not make this hold exactly for every d.
+    for (const d of [1, 17, 100, 250]) {
+      expect(zoomRatioFromWheelDelta(d) * zoomRatioFromWheelDelta(-d)).toBeCloseTo(1, 10);
+    }
+  });
+
+  it('a larger magnitude moves the ratio further from 1 than a smaller one, in the same direction', () => {
+    const small = zoomRatioFromWheelDelta(-10);
+    const large = zoomRatioFromWheelDelta(-100);
+    expect(large).toBeGreaterThan(small);
+    expect(small).toBeGreaterThan(1);
+  });
+});
+
+describe('applyPinchWheelDelta', () => {
+  it('deltaY = 0 leaves the current percent unchanged', () => {
+    expect(applyPinchWheelDelta(80, 0)).toBe(80);
+  });
+
+  it('a zoom-in delta increases the percent, a zoom-out delta decreases it', () => {
+    expect(applyPinchWheelDelta(100, -40)).toBeGreaterThan(100);
+    expect(applyPinchWheelDelta(100, 40)).toBeLessThan(100);
+  });
+
+  it('clamps at the 150 ceiling for a large enough zoom-in gesture', () => {
+    expect(applyPinchWheelDelta(149, -100000)).toBe(ZOOM_MAX_PERCENT);
+  });
+
+  it('clamps at the 50 floor for a large enough zoom-out gesture', () => {
+    expect(applyPinchWheelDelta(51, 100000)).toBe(ZOOM_MIN_PERCENT);
+  });
+
+  it('stores a fractional result rather than rounding -- pinch is continuous, per plan.md:662', () => {
+    const result = applyPinchWheelDelta(100, -3);
+    expect(Number.isInteger(result)).toBe(false);
+  });
+});
+
+/** A `.editor-region` stand-in carrying both axes of scroll state -- the state
+ * `restorePointerAnchoredScroll` needs to compute a target and clamp it. Its own
+ * `getBoundingClientRect` is deliberately not stubbed here, unlike an earlier version of this
+ * helper: neither `capturePointerAnchoredScroll` nor `restorePointerAnchoredScroll` reads the
+ * region's own rect any more (progress/pinch-zoom.md) -- only `.pages`'s rect matters, via
+ * `pagesElementWithRect` below. */
+function regionWithBothAxesScroll(options: {
+  scrollTop: number;
+  scrollLeft: number;
+  scrollHeight: number;
+  scrollWidth: number;
+  clientHeight: number;
+  clientWidth: number;
+}): HTMLElement {
+  const region = document.createElement('div');
+  region.scrollTop = options.scrollTop;
+  region.scrollLeft = options.scrollLeft;
+  Object.defineProperty(region, 'scrollHeight', {
+    configurable: true,
+    value: options.scrollHeight,
+  });
+  Object.defineProperty(region, 'scrollWidth', { configurable: true, value: options.scrollWidth });
+  Object.defineProperty(region, 'clientHeight', {
+    configurable: true,
+    value: options.clientHeight,
+  });
+  Object.defineProperty(region, 'clientWidth', { configurable: true, value: options.clientWidth });
+  return region;
+}
+
+/** A `.pages` stand-in carrying only a stubbed `getBoundingClientRect` -- the one thing
+ * `capturePointerAnchoredScroll` reads off it. Measuring the pointer's offset against `.pages`
+ * itself, rather than `.editor-region`, is the fix for both the vertical and horizontal
+ * pointer-anchor defects progress/pinch-zoom.md documents; see zoom.ts's own top-of-section
+ * comment on `capturePointerAnchoredScroll`/`restorePointerAnchoredScroll` for the full
+ * derivation. */
+function pagesElementWithRect(rectTop: number, rectLeft: number): HTMLElement {
+  const pages = document.createElement('div');
+  pages.getBoundingClientRect = () =>
+    ({
+      bottom: rectTop,
+      height: 0,
+      left: rectLeft,
+      right: rectLeft,
+      top: rectTop,
+      width: 0,
+      x: rectLeft,
+      y: rectTop,
+      toJSON: () => ({}),
+    }) as DOMRect;
+  return pages;
+}
+
+describe('capturePointerAnchoredScroll', () => {
+  it('returns undefined for a null region', () => {
+    const pages = pagesElementWithRect(0, 0);
+    expect(capturePointerAnchoredScroll(null, pages, 100, 50, 50)).toBeUndefined();
+  });
+
+  it('returns undefined for a null pages element', () => {
+    const region = regionWithBothAxesScroll({
+      clientHeight: 200,
+      clientWidth: 300,
+      scrollHeight: 1000,
+      scrollLeft: 60,
+      scrollTop: 137,
+      scrollWidth: 500,
+    });
+    expect(capturePointerAnchoredScroll(region, null, 100, 50, 50)).toBeUndefined();
+  });
+
+  it("captures both scroll axes and the pointer's offset from .pages's own top-left corner -- never .editor-region's", () => {
+    const region = regionWithBothAxesScroll({
+      clientHeight: 200,
+      clientWidth: 300,
+      scrollHeight: 1000,
+      scrollLeft: 60,
+      scrollTop: 137,
+      scrollWidth: 500,
+    });
+    // .pages sits at viewport (40, 20) here -- an arbitrary point, deliberately not derived from
+    // `region` at all, to prove this function never consults the region's own rect (only its
+    // scrollTop/scrollLeft).
+    const pages = pagesElementWithRect(20, 40);
+    // Pointer at viewport (140, 220): 140 - 40 = 100 from .pages's left edge, 220 - 20 = 200 from
+    // its top edge -- the offsets restorePointerAnchoredScroll must hold fixed.
+    expect(capturePointerAnchoredScroll(region, pages, 80, 140, 220)).toEqual({
+      anchorOffsetX: 100,
+      anchorOffsetY: 200,
+      oldPercent: 80,
+      scrollLeft: 60,
+      scrollTop: 137,
+    });
+  });
+});
+
+/**
+ * `restorePointerAnchoredScroll`'s formula (progress/pinch-zoom.md: "the vertical imprecision"
+ * and "the horizontal anchor defect", both fixed together): `newScroll = oldScroll +
+ * anchorOffset * (ratio - 1)`, not the earlier `(oldScroll + anchorOffset) * ratio - anchorOffset`
+ * -- see zoom.ts's own comment on the pair for the full derivation. The two forms are not always
+ * numerically distinguishable: they agree exactly whenever `oldScroll` is `0` (the earlier form
+ * reduces algebraically to the current one in that case), so several of the tests below that
+ * happen to start at `scrollTop`/`scrollLeft` `0` -- or that clamp to the same boundary either
+ * way -- keep the same expected numbers as before this rewrite; the ones that do not start at `0`
+ * and do not clamp (marked below) have different, updated expected values, and are the ones that
+ * actually distinguish the two formulas.
+ */
+describe('restorePointerAnchoredScroll', () => {
+  it('is a no-op for a null region', () => {
+    const capture: PointerZoomCapture = {
+      anchorOffsetX: 10,
+      anchorOffsetY: 10,
+      oldPercent: 100,
+      scrollLeft: 0,
+      scrollTop: 50,
+    };
+    expect(() => restorePointerAnchoredScroll(null, capture, 150)).not.toThrow();
+  });
+
+  it('is a no-op when there is nothing captured', () => {
+    const region = regionWithBothAxesScroll({
+      clientHeight: 200,
+      clientWidth: 300,
+      scrollHeight: 1000,
+      scrollLeft: 20,
+      scrollTop: 55,
+      scrollWidth: 500,
+    });
+    restorePointerAnchoredScroll(region, undefined, 150);
+    expect(region.scrollTop).toBe(55);
+    expect(region.scrollLeft).toBe(20);
+  });
+
+  it('leaves both axes alone in the degenerate case -- neither axis actually scrolls', () => {
+    const region = regionWithBothAxesScroll({
+      clientHeight: 600,
+      clientWidth: 800,
+      scrollHeight: 600,
+      scrollLeft: 0,
+      scrollTop: 0,
+      scrollWidth: 800,
+    });
+    const capture: PointerZoomCapture = {
+      anchorOffsetX: 100,
+      anchorOffsetY: 100,
+      oldPercent: 100,
+      scrollLeft: 0,
+      scrollTop: 0,
+    };
+    restorePointerAnchoredScroll(region, capture, 150);
+    expect(region.scrollTop).toBe(0);
+    expect(region.scrollLeft).toBe(0);
+  });
+
+  it('anchors the vertical axis on the pointer, not the viewport centre', () => {
+    // scrollTop 100, anchorOffsetY 30 (the pointer sits 30px below .pages's own top edge, not
+    // the viewport's centre) -> newScrollTop = 100 + 30 * (ratio - 1). Ratio 200/100 = 2 ->
+    // 100 + 30 * 1 = 130.
+    const region = regionWithBothAxesScroll({
+      clientHeight: 200,
+      clientWidth: 100,
+      scrollHeight: 1000,
+      scrollLeft: 0,
+      scrollTop: 100,
+      scrollWidth: 100,
+    });
+    const capture: PointerZoomCapture = {
+      anchorOffsetX: 0,
+      anchorOffsetY: 30,
+      oldPercent: 100,
+      scrollLeft: 0,
+      scrollTop: 100,
+    };
+    restorePointerAnchoredScroll(region, capture, 200);
+    expect(region.scrollTop).toBe(130);
+    // No horizontal overflow (scrollWidth === clientWidth) -- must stay untouched.
+    expect(region.scrollLeft).toBe(0);
+  });
+
+  it('anchors the horizontal axis independently, the same formula applied to scrollLeft/scrollWidth', () => {
+    // scrollLeft 40, anchorOffsetX 60 -> newScrollLeft = 40 + 60 * (ratio - 1). Ratio 150/100 =
+    // 1.5 -> 40 + 60 * 0.5 = 70.
+    const region = regionWithBothAxesScroll({
+      clientHeight: 100,
+      clientWidth: 200,
+      scrollHeight: 100,
+      scrollLeft: 40,
+      scrollTop: 0,
+      scrollWidth: 800,
+    });
+    const capture: PointerZoomCapture = {
+      anchorOffsetX: 60,
+      anchorOffsetY: 0,
+      oldPercent: 100,
+      scrollLeft: 40,
+      scrollTop: 0,
+    };
+    restorePointerAnchoredScroll(region, capture, 150);
+    expect(region.scrollLeft).toBe(70);
+    // No vertical overflow (scrollHeight === clientHeight) -- must stay untouched.
+    expect(region.scrollTop).toBe(0);
+  });
+
+  it('clamps the vertical axis to 0 rather than going negative', () => {
+    const region = regionWithBothAxesScroll({
+      clientHeight: 200,
+      clientWidth: 100,
+      scrollHeight: 1000,
+      scrollLeft: 0,
+      scrollTop: 0,
+      scrollWidth: 100,
+    });
+    const capture: PointerZoomCapture = {
+      anchorOffsetX: 0,
+      anchorOffsetY: 100,
+      oldPercent: 100,
+      scrollLeft: 0,
+      scrollTop: 0,
+    };
+    // 0 + 100 * (0.5 - 1) = 0 + 100 * -0.5 = -50, must clamp to 0.
+    restorePointerAnchoredScroll(region, capture, 50);
+    expect(region.scrollTop).toBe(0);
+  });
+
+  it('clamps the vertical axis to the maximum scrollTop rather than overshooting', () => {
+    const region = regionWithBothAxesScroll({
+      clientHeight: 200,
+      clientWidth: 100,
+      scrollHeight: 1000,
+      scrollLeft: 0,
+      scrollTop: 790,
+      scrollWidth: 100,
+    });
+    const capture: PointerZoomCapture = {
+      anchorOffsetX: 0,
+      anchorOffsetY: 100,
+      oldPercent: 100,
+      scrollLeft: 0,
+      scrollTop: 790,
+    };
+    // scrollableExtent = 800. 790 + 100 * (2 - 1) = 890, far past 800 -- must clamp to exactly
+    // 800 (the same clamped result the earlier formula also produced here, from a different
+    // pre-clamp target -- this case does not by itself distinguish the two formulas, only the
+    // clamp).
+    restorePointerAnchoredScroll(region, capture, 200);
+    expect(region.scrollTop).toBe(800);
+  });
+
+  it('clamps the horizontal axis to 0 and to the maximum scrollLeft the same way', () => {
+    const clampedLow = regionWithBothAxesScroll({
+      clientHeight: 100,
+      clientWidth: 100,
+      scrollHeight: 100,
+      scrollLeft: 0,
+      scrollTop: 0,
+      scrollWidth: 900,
+    });
+    restorePointerAnchoredScroll(
+      clampedLow,
+      { anchorOffsetX: 100, anchorOffsetY: 0, oldPercent: 100, scrollLeft: 0, scrollTop: 0 },
+      50,
+    );
+    expect(clampedLow.scrollLeft).toBe(0);
+
+    const clampedHigh = regionWithBothAxesScroll({
+      clientHeight: 100,
+      clientWidth: 100,
+      scrollHeight: 100,
+      scrollLeft: 790,
+      scrollTop: 0,
+      scrollWidth: 900,
+    });
+    restorePointerAnchoredScroll(
+      clampedHigh,
+      { anchorOffsetX: 100, anchorOffsetY: 0, oldPercent: 100, scrollLeft: 790, scrollTop: 0 },
+      200,
+    );
+    // scrollableExtent (horizontal) = 900 - 100 = 800. 790 + 100 * (2 - 1) = 890, clamps to 800.
+    expect(clampedHigh.scrollLeft).toBe(800);
+  });
+
+  it('reads scrollHeight/scrollWidth/clientHeight/clientWidth fresh -- the post-layout clamp bound, not anything captured earlier', () => {
+    const region = regionWithBothAxesScroll({
+      clientHeight: 100,
+      clientWidth: 100,
+      scrollHeight: 1200,
+      scrollLeft: 0,
+      scrollTop: 190,
+      scrollWidth: 100,
+    });
+    const capture: PointerZoomCapture = {
+      anchorOffsetX: 0,
+      anchorOffsetY: 50,
+      oldPercent: 100,
+      scrollLeft: 0,
+      scrollTop: 190,
+    };
+    restorePointerAnchoredScroll(region, capture, 300);
+    // 190 + 50 * (3 - 1) = 190 + 100 = 290, inside [0, 1100] (scrollHeight 1200 - clientHeight
+    // 100) -- distinguishes the two formulas (the earlier one gave 670 here).
+    expect(region.scrollTop).toBe(290);
+  });
+
+  it('both axes move together, independently, in the same call', () => {
+    const region = regionWithBothAxesScroll({
+      clientHeight: 200,
+      clientWidth: 200,
+      scrollHeight: 1000,
+      scrollLeft: 100,
+      scrollTop: 100,
+      scrollWidth: 1000,
+    });
+    const capture: PointerZoomCapture = {
+      anchorOffsetX: 50,
+      anchorOffsetY: 50,
+      oldPercent: 100,
+      scrollLeft: 100,
+      scrollTop: 100,
+    };
+    // Both axes share the identical formula and inputs here (symmetric fixture): 100 + 50 *
+    // (2 - 1) = 150, on each axis independently (the earlier formula gave 250 here).
+    restorePointerAnchoredScroll(region, capture, 200);
+    expect(region.scrollTop).toBe(150);
+    expect(region.scrollLeft).toBe(150);
   });
 });
