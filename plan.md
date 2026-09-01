@@ -200,15 +200,23 @@ Requirements:
 
 **The free tier is one fully editable screenplay.** Not a read-only preview, not a time-limited trial: a real, writable screenplay with the complete authoring feature set, so a writer can evaluate the actual product by using it for actual work.
 
-A free account can: create and edit one screenplay, use every element, keyboard flow, and Navigator feature, and export to PDF, FDX, and DOCX. It cannot: create a second screenplay, or use collaboration and sharing.
+A free account can: create and edit one screenplay, use every element, keyboard flow, and Navigator feature, export to PDF, FDX, and DOCX, and collaborate on a screenplay shared with it. It cannot: create a second screenplay, or hold more than one editable screenplay at a time.
 
 Export is available on the free tier deliberately. A writer who cannot get their work out of a product has not been given a free tier, they have been given a hostage situation.
+
+**Collaboration is not a paid feature. A collaborative screenplay occupies the free account's single editable slot.** A free account invited to a screenplay may edit it by making it the one screenplay it holds editable; a screenplay shared beyond that slot is readable, not writable. This was decided over the alternative of paywalling collaboration outright, for three reasons. It is one rule rather than two: the entitlement layer enforces a single editable slot instead of an owned-document limit beside an unrelated collaboration gate, and that slot is the same machinery the lapse path below already requires. The upgrade prompt it produces is contextual and honest — make this one editable instead, or subscribe and hold both — rather than a wall at the door. And it keeps collaboration from becoming unmetered free capacity: a writers' room of ten is ten accounts each spending their own slot, not ten people sharing one subscription.
+
+Read-only is the deliberate fallback rather than no access at all. Someone invited into a screenplay should see what they were invited to, both because a permission error is a poor introduction to a product and because the invitation itself is the moment the upgrade is most legible.
+
+**Changing which screenplay occupies the editable slot is rate-limited, not free.** Unlimited switching would make "one editable screenplay" mean "unlimited screenplays, one at a time," which is most of the paid tier. Use a cooldown rather than a quota of switches: a quota is a currency writers must track and hoard, and spending one by accident is a support ticket, whereas a cooldown refreshes itself and states in one sentence. Derive the interval from the gap between honest and evasive use — a writer moving between projects does so on the scale of weeks, while rotation to dodge the paywall happens in minutes — which puts roughly 24 hours in the right place: it forecloses the second case entirely and the first never encounters it. **Start at 24 hours** and adjust if real use shows otherwise. Do not add an exception for newly shared screenplays; re-sharing would reset it, and read-only access already covers the case that exception was aimed at. Implement the rule as one policy function in the entitlement layer, because both the mechanic and the interval are estimates until real writers meet them.
+
+The signal for whether that interval is right does not need an analytics product: enforcing the cooldown requires recording when the editable slot last changed, so the switch history is already server-side data. Query it before reaching for instrumentation.
 
 ### What happens when a subscription lapses
 
 **A writer must never lose access to their own work.** A lapsed or cancelled subscription drops the account to the free tier. It never deletes a screenplay, never hides one behind a paywall, and never removes export.
 
-Concretely, a lapsed account retains: reading every screenplay it has, exporting every screenplay to PDF, FDX, and DOCX, editing one screenplay of the user's choosing, and account and billing management. It loses: creating new screenplays beyond that one, editing the others, and collaboration.
+Concretely, a lapsed account retains: reading every screenplay it has, exporting every screenplay to PDF, FDX, and DOCX, editing one screenplay of the user's choosing, collaborating on that one screenplay, and account and billing management. It loses: creating new screenplays beyond that one, and editing the others. Collaboration itself is not withdrawn, because it is not a paid feature (see the free tier above); what a lapse withdraws is the capacity to hold more than one screenplay editable, whether those screenplays are the account's own or shared with it.
 
 **A lapsed account with several screenplays must be asked which one stays editable.** The system must never pick on the user's behalf, and it must never fall back to the oldest, the newest, or the largest. Until the user chooses, all screenplays are readable and exportable and none is editable. This is the one place where the free tier and the lapse path differ, and getting it wrong silently is worse than prompting.
 
