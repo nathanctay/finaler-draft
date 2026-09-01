@@ -29,6 +29,13 @@
       "when": 1787480274274,
       "tag": "0003_backfill_email_verified",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788244291211,
+      "tag": "0004_burly_tinkerer",
+      "breakpoints": true
     }
   ]
 }

@@ -5,6 +5,9 @@ import { cachedProbe } from './cachedProbe.js';
 import { loadRootEnvironment, shouldLoadRootEnvironment } from './environment.js';
 import { selectMailPort, type MailMessage } from './mail.js';
 import { createPostgresProjectStore } from './projects.js';
+import { createStripeClient } from './stripeClient.js';
+import { createStripeIpAllowlist, fetchStripeWebhookIps } from './stripeIpAllowlist.js';
+import { createPostgresSubscriptionStore } from './stripeSubscriptions.js';
 
 try {
   const systemTestMode = process.env.FINALER_SYSTEM_TEST === 'true';
@@ -85,6 +88,25 @@ async function buildPersistentApp(
     mail,
     rateLimitEnabled: !options.systemTestMode,
   });
+  // Optional in every environment short of production (`requirePersistenceEnvironment` in
+  // `@finaler-draft/server-config` is what makes all four mandatory there) -- so a development or
+  // test process without Stripe configured still starts, just without the webhook route
+  // registered at all (see `BuildAppOptions.stripe` in app.ts: `undefined` here means the route
+  // does not exist, mirroring `testMail`'s "not registered, not registered-and-denies" contract).
+  // The two Pro price ids are validated as part of this gate (plan.md asks for them alongside
+  // the key and signing secret) but not threaded any further than this check: pricing a Checkout
+  // Session is explicitly a later slice's job, not this one's. This slice's only job for them is
+  // to make production refuse to start without them already configured and ready.
+  const stripeConfigured = Boolean(
+    persistence.STRIPE_SECRET_KEY &&
+      persistence.STRIPE_WEBHOOK_SECRET &&
+      persistence.STRIPE_PRICE_ID_MONTHLY &&
+      persistence.STRIPE_PRICE_ID_ANNUAL,
+  );
+  const ipAllowlist = stripeConfigured
+    ? createStripeIpAllowlist({ fetchIps: fetchStripeWebhookIps })
+    : undefined;
+  ipAllowlist?.start();
   const app = await buildApp({
     serveClient: options.serveClient,
     rateLimit: options.rateLimit,
@@ -95,6 +117,14 @@ async function buildPersistentApp(
       trustedOrigins,
     },
     projects: createPostgresProjectStore(pool),
+    stripe: stripeConfigured
+      ? {
+          client: createStripeClient(persistence.STRIPE_SECRET_KEY!),
+          webhookSecret: persistence.STRIPE_WEBHOOK_SECRET!,
+          store: createPostgresSubscriptionStore(pool),
+          ipAllowlist,
+        }
+      : undefined,
     testMail: options.systemTestMode ? { latestTo: (to) => testMailbox.get(to) } : undefined,
     // A cheap connectivity probe, not a migration-state check: it answers "can this process
     // reach the database at all," which is exactly what Railway's rollout gate needs to catch a
@@ -118,6 +148,7 @@ async function buildPersistentApp(
     }, 5_000),
   });
   app.addHook('onClose', async () => {
+    ipAllowlist?.stop();
     await pool.end();
   });
   return app;

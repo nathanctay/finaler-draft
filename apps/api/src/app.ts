@@ -12,6 +12,7 @@ import {
   serializerCompiler,
   validatorCompiler,
 } from 'fastify-type-provider-zod';
+import type Stripe from 'stripe';
 import { z } from 'zod';
 import type { MailMessage } from './mail.js';
 import {
@@ -22,6 +23,9 @@ import {
   renameInput,
   updateScreenplayInput,
 } from './projects.js';
+import type { StripeIpAllowlist } from './stripeIpAllowlist.js';
+import type { SubscriptionStore } from './stripeSubscriptions.js';
+import { dispatchStripeEvent } from './stripeWebhook.js';
 
 export interface AuthPort {
   baseUrl: string;
@@ -37,11 +41,33 @@ export interface AuthPort {
   trustedOrigins: readonly string[];
 }
 
+/**
+ * The webhook route's dependencies (app.ts's `POST /api/webhooks/stripe` registration below).
+ * `client` is typed down to just `webhooks` -- the only member this route calls
+ * (`client.webhooks.constructEvent`) -- rather than the full `Stripe` class, so a test can supply
+ * a client built from nothing but a signing secret (signature verification is pure HMAC, no
+ * network access or API key required) instead of a full, real, API-key-bearing instance.
+ */
+export interface StripeWebhookPort {
+  client: Pick<Stripe, 'webhooks'>;
+  webhookSecret: string;
+  store: SubscriptionStore;
+  /**
+   * Typed down to just `isAllowed` -- the only member this route calls -- for the same testing
+   * reason as `client` above: a test can supply a trivial stub instead of the full
+   * `createStripeIpAllowlist` machinery (refresh timers, network fetches). Omitted entirely
+   * means no IP check is enforced -- see stripeIpAllowlist.ts for why an unenforced allowlist
+   * (not just an "always allow" one) is the correct default until a real one is wired up.
+   */
+  ipAllowlist?: Pick<StripeIpAllowlist, 'isAllowed'> | undefined;
+}
+
 export interface BuildAppOptions {
   serveClient?: boolean;
   clientRoot?: URL;
   auth?: AuthPort;
   projects?: ProjectStore;
+  stripe?: StripeWebhookPort | undefined;
   /**
    * A cheap, side-effect-free database reachability probe (e.g. `select 1`), wired to `/api/health`
    * when persistence is configured. Railway only consults the healthcheck endpoint while gating a
@@ -364,6 +390,79 @@ export async function buildApp(options: BuildAppOptions = {}) {
         return { subject: message.subject, text: message.text };
       },
     );
+  }
+
+  if (options.stripe) {
+    const stripe = options.stripe;
+    // Registered inside a child `register` context so the raw-body content type parser below is
+    // scoped to this one route -- Fastify's plugin encapsulation means a parser added on `scoped`
+    // shadows the parent app's default JSON parser only for routes registered on `scoped` itself,
+    // never for routes registered directly on `app`/`typedApp` elsewhere in this function. This is
+    // Fastify's own documented pattern for a webhook route that needs its raw body (plan.md:
+    // "The webhook route needs the raw request body. Fastify's JSON parser will consume and
+    // re-serialize the body, which invalidates the signature. Register a raw-body content type
+    // parser scoped to that route only; do not disable JSON parsing globally").
+    // `app.test.ts`'s "still parses JSON normally on a sibling route" test is what proves this
+    // scoping actually holds, rather than this comment being the only evidence.
+    await app.register(async (scoped) => {
+      scoped.addContentTypeParser(
+        'application/json',
+        { parseAs: 'buffer' },
+        (_request, body, done) => done(null, body),
+      );
+      scoped.post('/api/webhooks/stripe', async (request, reply) => {
+        // Cheap defence-in-depth check ahead of the signature verification below (stripeIpAllowlist.ts's
+        // module comment covers why this fails open rather than closed). Reuses the same
+        // `x-real-ip`-first resolution as the global rate limiter's `keyGenerator` above, for the
+        // identical reason: behind Railway's proxy, Fastify's own `request.ip` is the proxy's
+        // address, not the caller's.
+        const realIp = request.headers['x-real-ip'];
+        const sourceIp = typeof realIp === 'string' ? realIp : request.ip;
+        if (stripe.ipAllowlist && !stripe.ipAllowlist.isAllowed(sourceIp)) {
+          request.log.warn(
+            { event: 'stripe_webhook_ip_rejected' },
+            "Rejected a webhook request from an IP outside Stripe's published range",
+          );
+          return reply.code(403).send({ error: 'Forbidden' });
+        }
+        const signatureHeader = request.headers['stripe-signature'];
+        if (typeof signatureHeader !== 'string') {
+          return reply.code(400).send({ error: 'Missing Stripe-Signature header' });
+        }
+        let event: Stripe.Event;
+        try {
+          // Verified before anything about the payload is trusted (plan.md: "Verify the webhook
+          // signature on every event ... before parsing or acting on anything"). `request.body`
+          // is the raw `Buffer` the content type parser above handed back, byte-identical to what
+          // Stripe sent and signed -- never Fastify's own re-serialized JSON, which would not
+          // match the signature.
+          event = stripe.client.webhooks.constructEvent(
+            request.body as Buffer,
+            signatureHeader,
+            stripe.webhookSecret,
+          );
+        } catch (error) {
+          // Never logs the error object itself: `constructEvent`'s thrown
+          // `StripeSignatureVerificationError` carries the raw header and payload it failed to
+          // verify, which must not reach the logs. Same convention as the global error handler
+          // above -- only the error's name.
+          request.log.warn(
+            {
+              event: 'stripe_webhook_signature_rejected',
+              err: error instanceof Error ? error.name : 'UnknownError',
+            },
+            'Rejected a webhook request with an invalid or missing signature',
+          );
+          return reply.code(400).send({ error: 'Invalid signature' });
+        }
+        const outcome = await dispatchStripeEvent(stripe.store, event);
+        request.log.info(
+          { event: 'stripe_webhook_processed', type: event.type, outcome },
+          'Processed a Stripe webhook event',
+        );
+        return reply.code(200).send({ received: true });
+      });
+    });
   }
 
   if (options.auth) {

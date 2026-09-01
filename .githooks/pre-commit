@@ -1,0 +1,36 @@
+#!/bin/sh
+#
+# Rejects a commit that would introduce a live Stripe secret or restricted key (plan.md,
+# "Subscription and billing architecture": "Add a pre-commit hook rejecting strings matching
+# sk_live_ and rk_live_"). Both prefixes are real, usable Stripe credentials -- sk_live_ is an
+# unrestricted secret key, rk_live_ a restricted key -- unlike their sk_test_/rk_test_
+# counterparts, which are safe to appear in fixtures and documentation.
+#
+# The pattern requires key MATERIAL after the prefix, not the bare prefix alone. A real Stripe key
+# is the prefix followed by a long alphanumeric run; prose that merely names the prefix is not a
+# credential. Matching the bare prefix made the hook reject its own specification (plan.md's
+# "Add a pre-commit hook rejecting strings matching sk_live_ and rk_live_" cannot be written
+# without the literal) and progress/billing-webhook.md's account of it. A guard that forces
+# documentation to stop naming the thing it guards against is a guard people learn to bypass,
+# and `--no-verify` is always one flag away, so a false positive costs more than it protects.
+#
+# Scans only the lines a commit actually *adds* (`git diff --cached -U0`), not a file's full
+# contents, so a pre-existing occurrence elsewhere in an already-committed file (for instance,
+# this comment's own mention of the prefixes) can never block an unrelated commit that doesn't
+# touch it.
+set -e
+
+pattern='(sk|rk)_live_[A-Za-z0-9]{8,}'
+
+# No path exclusion: the tightened pattern no longer matches this file's own text, so this hook
+# is scanned like everything else rather than being the one place a real key could be committed.
+matches=$(git diff --cached -U0 --no-color \
+  | grep -E '^\+' | grep -Ev '^\+\+\+' | grep -E "$pattern" || true)
+
+if [ -n "$matches" ]; then
+  echo "pre-commit: refusing to commit -- a staged change matches a live Stripe key pattern (sk_live_ or rk_live_)." >&2
+  echo "Live Stripe credentials must never be committed, in any file. Naming the bare prefix in prose" >&2
+  echo "or documentation does not match; what matches is a prefix followed by key-like material, so a" >&2
+  echo "false positive means a placeholder that looks too much like a real key. Write the prefix alone." >&2
+  exit 1
+fi
