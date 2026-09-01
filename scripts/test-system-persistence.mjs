@@ -77,9 +77,20 @@ try {
   await run('pnpm', ['--filter', '@finaler-draft/database', 'db:migrate'], environment);
   await run('pnpm', ['build'], buildEnvironment);
   await assertProductionWebBundle();
+  // Pass through any args given to `pnpm test:system:persistence` (e.g. `-g <pattern>` to scope
+  // to one test, `--repeat-each=N` to check for flakes) straight to the Playwright CLI. Previously
+  // this script swallowed them silently, forcing a full, unscoped run for any targeted
+  // investigation -- diagnosed while chasing the intermittent element-menu save race, see
+  // progress/element-menu-save-race.md.
+  //
+  // Unlike npm, `pnpm run <script> -- <args>` forwards the `--` itself into the script's argv
+  // rather than stripping it (verified directly against the installed pnpm, not assumed), so a
+  // bare `--` must be filtered out here or Playwright reads it as a positional file-pattern
+  // argument and reports "No tests found".
+  const passthroughArgs = process.argv.slice(2).filter((arg) => arg !== '--');
   await run(
     'pnpm',
-    ['exec', 'playwright', 'test', '-c', 'playwright.persistence.config.ts'],
+    ['exec', 'playwright', 'test', '-c', 'playwright.persistence.config.ts', ...passthroughArgs],
     environment,
   );
 } finally {

@@ -997,12 +997,6 @@ test.describe('page rendering: real editor, real DOM', () => {
     const accepted = `${HEADING}${GHOST}`;
     await page.keyboard.type(' ');
     await expect(ghost).toHaveText(GHOST.slice(1));
-    const acceptSaved = page.waitForResponse(
-      (response) =>
-        response.request().method() === 'PUT' &&
-        response.url().includes('/api/screenplays/') &&
-        response.status() === 200,
-    );
     await page.keyboard.press('Tab');
     await expect(page.locator('.smarttype-ghost')).toHaveCount(0);
     expect(
@@ -1011,7 +1005,31 @@ test.describe('page rendering: real editor, real DOM', () => {
       ),
     ).toBe(accepted);
 
-    await acceptSaved;
+    /*
+     * Not `page.waitForResponse` on "the next PUT (200)": the space typed just above is itself a
+     * real document edit and already scheduled its own 600ms debounced save (`scheduleSave`/
+     * `saveLatest`, App.tsx) before Tab ever accepted the ghost. On a loaded runner that earlier
+     * save's own clock can fire independently of Tab's, landing an intermediate PUT that still
+     * carries only the typed space -- not the accepted completion -- which a bare "wait for the
+     * next PUT" would mistake for the accept's own save (the identical race diagnosed for the
+     * element-menu test, progress/element-menu-save-race.md). Poll the persisted document itself
+     * rather than betting on which response lands next.
+     */
+    await expect
+      .poll(
+        async () => {
+          const persisted = await page.request.get(`/api/screenplays/${screenplayId}`);
+          expect(persisted.ok()).toBe(true);
+          const { screenplay } = (await persisted.json()) as {
+            screenplay: { blocks: ScreenplayBlock[] };
+          };
+          const heading = screenplay.blocks[1];
+          return heading && 'text' in heading ? heading.text : undefined;
+        },
+        { timeout: 10_000 },
+      )
+      .toBe(accepted);
+
     const afterAccept = await page.request.get(`/api/screenplays/${screenplayId}`);
     expect(afterAccept.ok()).toBe(true);
     const { screenplay: acceptedScreenplay } = (await afterAccept.json()) as {
@@ -1154,12 +1172,6 @@ test.describe('page rendering: real editor, real DOM', () => {
      * the menu open, that ghost must be gone: a greyed completion offering Tab behind a panel
      * offering element types is two affordances competing over one caret.
      */
-    const chosen = page.waitForResponse(
-      (response) =>
-        response.request().method() === 'PUT' &&
-        response.url().includes('/api/screenplays/') &&
-        response.status() === 200,
-    );
     await page.keyboard.press('Enter');
     await page.keyboard.press('s');
     await expect(elementMenu).toHaveCount(0);
@@ -1190,11 +1202,39 @@ test.describe('page rendering: real editor, real DOM', () => {
     // What actually reached the canonical screenplay across all of that: one more block than the
     // fixture had, empty, carrying the one type that was explicitly chosen. No text, and no second
     // empty block from any of the six Enters above.
-    await chosen;
     const screenplayId = /\/screenplays\/([0-9a-f-]+)/u.exec(page.url())?.[1];
     if (!screenplayId) {
       throw new Error(`Could not find a screenplay id in ${page.url()}.`);
     }
+
+    /*
+     * Not `page.waitForResponse` on "the next PUT (200)": autosave is a genuine debounce
+     * (`scheduleSave`/`saveLatest`, App.tsx) that resets on every change but always sends whatever
+     * `latestProjection` is current when it actually fires -- not what was current when it was
+     * scheduled. The very first Enter above (the one that created this empty block) already
+     * scheduled a save of its own well before this point. On a loaded runner, that save's own
+     * 600ms clock can elapse -- independent of the "s" choice just made -- and land an intermediate
+     * PUT still carrying `action`, which a bare "wait for the next PUT" mistakes for the choice's
+     * save (reproduced directly: forcing that ordering makes this assertion fail with
+     * `Received: "action"`, the identical failure this replaced -- see
+     * progress/element-menu-save-race.md). However many PUTs land or in whatever order, only the
+     * server's eventual state is the thing being asserted on, so poll it directly instead of
+     * betting on a single response.
+     */
+    await expect
+      .poll(
+        async () => {
+          const persisted = await page.request.get(`/api/screenplays/${screenplayId}`);
+          expect(persisted.ok()).toBe(true);
+          const { screenplay } = (await persisted.json()) as {
+            screenplay: { blocks: ScreenplayBlock[] };
+          };
+          return screenplay.blocks[screenplay.blocks.length - 1]?.type;
+        },
+        { timeout: 10_000 },
+      )
+      .toBe('scene_heading');
+
     const persisted = await page.request.get(`/api/screenplays/${screenplayId}`);
     expect(persisted.ok()).toBe(true);
     const { screenplay } = (await persisted.json()) as {
