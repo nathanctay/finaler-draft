@@ -509,10 +509,33 @@ select:focus-visible,
      overflowed the element instead of growing it -- leaving later pages with no painted
      background. Content-sized here, min-height acts as a floor. */
   align-items: flex-start;
-  justify-content: center;
+  /* No `justify-content: center` here (removed; see progress/pinch-zoom.md's "horizontal
+     centring" entry for the full diagnosis) -- `.pages` centres itself with `margin-inline: auto`
+     instead. `justify-content: center` on a scrollable flex container is a well-known pitfall:
+     once the item is wider than the container, CSS pushes half the overflow to the *left* of the
+     container's own scroll origin, which a `scrollLeft >= 0` clamp can never reach, and the
+     item's effective left edge -- `max(0, (containerWidth - contentWidth) / 2)` -- keeps moving
+     as `contentWidth` changes with zoom, which no linear pointer-anchor formula can track. Auto
+     margins do not have this failure mode: per the flexbox spec they absorb *positive* free space
+     exactly like `justify-content: center` would, but resolve to exactly 0 (never negative) once
+     the item no longer fits, so the item's leading edge pins to the container's own scroll origin
+     and every pixel of overflow lands on the reachable, positive-`scrollLeft` side. This is the
+     standard fix for exactly this pitfall, not a novel technique. Keep `align-items: flex-start`
+     -- that is the *cross* axis (vertical, since this container has no `flex-direction` and is
+     therefore row) and is doing the unrelated, already-documented job above; do not touch it
+     while working on the main-axis (horizontal) centring. */
   overflow: auto;
   padding: 44px 56px;
   background: var(--surface-11);
+  /* pan-x pan-y, not the default `auto`: this is what stops a real touchscreen browser from
+     recognizing a two-finger gesture here as its own native pinch-zoom of the page before
+     App.tsx's pointer-event handlers ever see it, while deliberately still allowing ordinary
+     one-finger touch panning (native scrolling) to keep working exactly as before -- omitting
+     `pinch-zoom` from this list is what disables the native gesture; there is no way to disable
+     only pinch-zoom without naming the axes explicitly, since the default value bundles all three
+     together. See App.tsx's pointer-event listeners on this same element (progress/pinch-zoom.md)
+     for the JS side of the same gesture. */
+  touch-action: pan-x pan-y;
 }
 
 .ruler {
@@ -594,17 +617,20 @@ select:focus-visible,
 }
 
 /*
- * `.pages` stacks the title page (if any) above the manuscript `.page`, vertically. `.editor-region`
- * is a flex row centering its one child horizontally, so a second visible sibling needs its own
- * column container to appear above rather than beside `.page`. Deliberately carries no page
- * geometry of its own: `.page`'s own inline style (App.tsx) still carries `--fd-page-gap` and
- * `--fd-page-stack-min-height` directly, unmoved, because App.test.tsx and
- * page-rendering-persistence.spec.ts read them straight off `.page`.
+ * `.pages` stacks the title page (if any) above the manuscript `.page`, vertically, and centres
+ * itself horizontally inside `.editor-region` (a flex row with a single child) with
+ * `margin-inline: auto` -- not `.editor-region`'s own `justify-content`, which used to do this
+ * job and was removed for the reason documented on that rule (progress/pinch-zoom.md). A second
+ * visible sibling (the title page) needs its own column container to appear above rather than
+ * beside `.page`. Deliberately carries no page geometry of its own: `.page`'s own inline style
+ * (App.tsx) still carries `--fd-page-gap` and `--fd-page-stack-min-height` directly, unmoved,
+ * because App.test.tsx and page-rendering-persistence.spec.ts read them straight off `.page`.
  */
 .pages {
   display: flex;
   flex-direction: column;
   align-items: center;
+  margin-inline: auto;
 }
 
 .pages > * + * {

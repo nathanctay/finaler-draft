@@ -1516,6 +1516,427 @@ describe('zoom modes', () => {
 });
 
 /**
+ * Pinch-to-zoom (plan.md:662): a trackpad pinch arrives at `.editor-region` as a `wheel` event
+ * with `ctrlKey` set; a touch pinch arrives as two simultaneous touch pointers. Both paths are
+ * wired up manually in App.tsx (a non-passive `addEventListener`, not React's `onWheel`/
+ * `onPointerMove`, since React's own synthetic wheel listener is passive and cannot
+ * `preventDefault()` at all) -- see that file's own comments for why. jsdom has no native
+ * `PointerEvent` constructor (verified directly against this repo's own jsdom version before
+ * writing these tests), so the touch tests below build a plain `MouseEvent` of type `'pointerdown'`/
+ * `'pointermove'`/etc. and attach `pointerType`/`pointerId` onto it with `Object.defineProperty` --
+ * `addEventListener` dispatches purely on `event.type`, not the constructor used to build the
+ * event, so App.tsx's real handlers (which only ever read `pointerType`/`pointerId`/`clientX`/
+ * `clientY` off the event, none of which are `PointerEvent`-specific) receive an event
+ * indistinguishable from a real one for every property they touch.
+ */
+describe('pinch-to-zoom: trackpad wheel', () => {
+  async function nextFrame(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => resolve());
+    });
+  }
+
+  it('leaves an ordinary wheel scroll (no ctrlKey) completely alone: not prevented, zoom unchanged', async () => {
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+    const region = screen.getByRole('region', { name: 'Screenplay editor' });
+
+    // fireEvent.wheel returns `element.dispatchEvent(event)`'s own boolean: `true` unless some
+    // handler called `preventDefault()` on the (cancelable-by-default) event. Asserting `true`
+    // here is a direct proof that App.tsx's own wheel handler took the early `!event.ctrlKey`
+    // return and touched nothing -- not merely that the zoom level happens to read 100% after.
+    const notPrevented = fireEvent.wheel(region, { clientX: 10, clientY: 10, deltaY: 100 });
+    expect(notPrevented).toBe(true);
+    await nextFrame();
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('100%');
+  });
+
+  it('coalesces every ctrl+wheel event seen within one frame into a single queued animation frame, not one per event', async () => {
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const region = screen.getByRole('region', { name: 'Screenplay editor' });
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame');
+    rafSpy.mockClear();
+
+    fireEvent.wheel(region, { clientX: 20, clientY: 20, ctrlKey: true, deltaY: -5 });
+    fireEvent.wheel(region, { clientX: 20, clientY: 20, ctrlKey: true, deltaY: -5 });
+    fireEvent.wheel(region, { clientX: 20, clientY: 20, ctrlKey: true, deltaY: -5 });
+
+    // Read synchronously, before yielding to the event loop at all: the three dispatches above
+    // ran their handler synchronously and scheduled at most one frame between them, exactly the
+    // `pendingFrame !== undefined` guard `paginationExtension.ts`'s own coalescing uses.
+    expect(rafSpy).toHaveBeenCalledTimes(1);
+    await nextFrame();
+  });
+
+  it('a ctrl+wheel pinch prevents default, leaves any fit mode for a fixed percent that ignores a later resize, and zooms in for a negative deltaY', async () => {
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+    const region = screen.getByRole('region', { name: 'Screenplay editor' });
+
+    const prevented = fireEvent.wheel(region, {
+      cancelable: true,
+      clientX: 40,
+      clientY: 40,
+      ctrlKey: true,
+      deltaY: -10,
+    });
+    // `false` once `preventDefault()` has run on a cancelable event -- the direct proof this
+    // handler, not merely the zoom level afterward, actually intercepted the gesture.
+    expect(prevented).toBe(false);
+    await nextFrame();
+
+    // zoom.ts's own zoomRatioFromWheelDelta(-10) = exp(0.1) ≈ 1.10517, so 100% -> ≈110.517%,
+    // which rounds to 111% for display (Math.round, App.tsx's <output>). The stored value stays
+    // fractional -- see zoom.test.ts's own direct unit tests on `applyPinchWheelDelta` for that
+    // claim proven against the pure function in isolation; not re-derived here.
+    await waitFor(() => {
+      expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('111%');
+    });
+
+    // "Pinch sets a fixed percentage, leaving any fit mode" (plan.md:662) -- proven the same way
+    // the pre-existing "stepping zoom in or out from a fit mode... stops recomputing on resize"
+    // test above proves it for the stepper: a fit mode recomputes on `resize`
+    // (`recomputeZoomPercent`'s own effect, App.tsx), a fixed one does not, so firing a resize
+    // here and confirming the percent is untouched is a real behavioural proof that the pinch
+    // landed on `{ kind: 'fixed', ... }`, not merely a claim about internal state this test has
+    // no other way to observe from outside the component.
+    fireEvent(window, new Event('resize'));
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('111%');
+  });
+
+  it('a positive deltaY zooms out', async () => {
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+    const region = screen.getByRole('region', { name: 'Screenplay editor' });
+
+    fireEvent.wheel(region, { clientX: 40, clientY: 40, ctrlKey: true, deltaY: 10 });
+    await nextFrame();
+
+    await waitFor(() => {
+      // exp(-0.1) ≈ 0.9048, 100% -> ≈90.48%, rounds to 90%.
+      expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('90%');
+    });
+  });
+
+  it('clamps at the 150 ceiling and the 50 floor for a large enough gesture, exactly like every other zoom entry point', async () => {
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+    const region = screen.getByRole('region', { name: 'Screenplay editor' });
+
+    fireEvent.wheel(region, { clientX: 40, clientY: 40, ctrlKey: true, deltaY: -100000 });
+    await nextFrame();
+    await waitFor(() => {
+      expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('150%');
+    });
+
+    fireEvent.wheel(region, { clientX: 40, clientY: 40, ctrlKey: true, deltaY: 100000 });
+    await nextFrame();
+    await waitFor(() => {
+      expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('50%');
+    });
+  });
+
+  /**
+   * "The point under the pointer stays fixed" (plan.md:662, the owner's own decision), proven
+   * here the same way the pre-existing centred-zoom test above proves its own formula: stub
+   * `.editor-region`'s scroll state, stub `.pages`'s `getBoundingClientRect` (the box the anchor
+   * is actually measured against -- see zoom.ts's own comment on
+   * `capturePointerAnchoredScroll`/`restorePointerAnchoredScroll` for why `.pages`, not
+   * `.editor-region`, is the right box; progress/pinch-zoom.md's "the vertical imprecision"/"the
+   * horizontal anchor defect" entries are the diagnosis that motivated it), fire the gesture at a
+   * specific `clientX`/`clientY`, and check the resulting `scrollTop`/`scrollLeft` against
+   * `zoom.ts`'s own formula computed independently here -- not merely that it changed.
+   *
+   * `.editor-region`'s own `getBoundingClientRect` is stubbed too, but deliberately to a *wrong*
+   * answer for this formula (an obviously different box than `.pages`'s) -- if anything ever
+   * regressed back to measuring against the region instead of `.pages`, this test would compute
+   * its expectation from `.pages`'s box while the implementation produced a result matching the
+   * region's, and the assertion would fail loudly rather than coincidentally passing.
+   *
+   * This is also the heaviest available regression test for progress/zoom-scroll-drift.md within
+   * this test file: if `maybeJumpScrollCaretIntoView` (paginationExtension.ts) or a spurious
+   * `editor.setOptions` reconfigure ever wrote to `scrollTop` again during a pinch-triggered
+   * re-render, the exact-formula assertion below would fail (any interference would move the
+   * result away from the exact predicted value), even though this test never mentions either
+   * mechanism by name.
+   */
+  it('anchors both scroll axes on the pointer position relative to .pages, not .editor-region and not the viewport centre -- the exact formula, not merely "it moved"', async () => {
+    const { container } = render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const region = container.querySelector<HTMLElement>('.editor-region');
+    const pages = container.querySelector<HTMLElement>('.pages');
+    if (!region || !pages) {
+      throw new Error('Missing .editor-region or .pages.');
+    }
+    Object.defineProperty(region, 'clientHeight', { configurable: true, value: 200 });
+    Object.defineProperty(region, 'clientWidth', { configurable: true, value: 300 });
+    Object.defineProperty(region, 'scrollHeight', { configurable: true, value: 1000 });
+    Object.defineProperty(region, 'scrollWidth', { configurable: true, value: 900 });
+    region.scrollTop = 100;
+    region.scrollLeft = 60;
+    // A deliberately wrong box for this formula -- see this test's own comment above.
+    region.getBoundingClientRect = () =>
+      ({
+        bottom: 0,
+        height: 200,
+        left: 999,
+        right: 1299,
+        top: 999,
+        width: 300,
+        x: 999,
+        y: 999,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    // `.pages`'s own box -- the one the anchor formula actually measures against.
+    pages.getBoundingClientRect = () =>
+      ({
+        bottom: 0,
+        height: 0,
+        left: 10,
+        right: 10,
+        top: 20,
+        width: 0,
+        x: 10,
+        y: 20,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    // Pointer at viewport (70, 70): 70 - 10 = 60 from .pages's left edge, 70 - 20 = 50 from its
+    // top edge -- the two anchor offsets the formula below must hold fixed.
+    fireEvent.wheel(region, { clientX: 70, clientY: 70, ctrlKey: true, deltaY: -10 });
+    await nextFrame();
+
+    const ratio = Math.exp(0.1); // zoomRatioFromWheelDelta(-10), restated independently here.
+    // newScroll = oldScroll + anchorOffset * (ratio - 1) -- zoom.ts's current formula, restated
+    // independently here, not the pre-fix `(oldScroll + anchorOffset) * ratio - anchorOffset`.
+    const expectedScrollTop = Math.min(Math.max(100 + 50 * (ratio - 1), 0), 1000 - 200);
+    const expectedScrollLeft = Math.min(Math.max(60 + 60 * (ratio - 1), 0), 900 - 300);
+    await waitFor(() => {
+      expect(region.scrollTop).toBeCloseTo(expectedScrollTop, 6);
+    });
+    expect(region.scrollLeft).toBeCloseTo(expectedScrollLeft, 6);
+  });
+});
+
+describe('pinch-to-zoom: touch', () => {
+  async function nextFrame(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => resolve());
+    });
+  }
+
+  /** jsdom has no `PointerEvent` constructor (see this describe block's own top-of-file comment
+   * for how this was confirmed) -- a `MouseEvent` of the right `type` carries `clientX`/`clientY`
+   * natively, and `pointerType`/`pointerId` are attached with `Object.defineProperty` so the real
+   * App.tsx handlers (which only ever read those four fields off the event) cannot tell the
+   * difference. */
+  function firePointer(
+    target: Element,
+    type: 'pointerdown' | 'pointermove' | 'pointerup' | 'pointercancel',
+    options: { pointerId: number; clientX: number; clientY: number; pointerType?: string },
+  ): boolean {
+    const event = new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      clientX: options.clientX,
+      clientY: options.clientY,
+    });
+    Object.defineProperty(event, 'pointerType', { value: options.pointerType ?? 'touch' });
+    Object.defineProperty(event, 'pointerId', { value: options.pointerId });
+    return target.dispatchEvent(event);
+  }
+
+  it('a single touch pointer never zooms and is never prevented, so native one-finger panning keeps working', async () => {
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+    const region = screen.getByRole('region', { name: 'Screenplay editor' });
+
+    firePointer(region, 'pointerdown', { clientX: 100, clientY: 100, pointerId: 1 });
+    const notPrevented = firePointer(region, 'pointermove', {
+      clientX: 120,
+      clientY: 100,
+      pointerId: 1,
+    });
+    expect(notPrevented).toBe(true);
+    await nextFrame();
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('100%');
+  });
+
+  it('two touch pointers spreading apart zoom in, anchored at their midpoint, and prevent default on the move that changed the distance', async () => {
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+    const region = screen.getByRole('region', { name: 'Screenplay editor' });
+
+    firePointer(region, 'pointerdown', { clientX: 100, clientY: 100, pointerId: 1 });
+    firePointer(region, 'pointerdown', { clientX: 200, clientY: 100, pointerId: 2 });
+    // Establishes the baseline distance (100px) -- the module comment's own "first sample has
+    // nothing to compare against yet" case, so this alone must not zoom.
+    firePointer(region, 'pointermove', { clientX: 100, clientY: 100, pointerId: 1 });
+
+    // Fingers spread from 100px apart to 160px apart (ratio 1.6) -- pointerId 2 alone moves, the
+    // same shape a real two-finger spread produces (each finger reports its own pointermove).
+    const notPrevented = firePointer(region, 'pointermove', {
+      clientX: 260,
+      clientY: 100,
+      pointerId: 2,
+    });
+    expect(notPrevented).toBe(false); // preventDefault() ran on this move.
+    await nextFrame();
+
+    await waitFor(() => {
+      // 100% * 1.6 = 160%, clamped to the 150 ceiling.
+      expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('150%');
+    });
+  });
+
+  it('two touch pointers pinching together zoom out', async () => {
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+    const region = screen.getByRole('region', { name: 'Screenplay editor' });
+
+    firePointer(region, 'pointerdown', { clientX: 100, clientY: 100, pointerId: 1 });
+    firePointer(region, 'pointerdown', { clientX: 300, clientY: 100, pointerId: 2 });
+    firePointer(region, 'pointermove', { clientX: 100, clientY: 100, pointerId: 1 });
+    // 200px apart shrinks to 100px apart (ratio 0.5).
+    firePointer(region, 'pointermove', { clientX: 200, clientY: 100, pointerId: 2 });
+    await nextFrame();
+
+    await waitFor(() => {
+      expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('50%');
+    });
+  });
+
+  /**
+   * A third finger joining, then one of the *original* two lifting, leaves the pinch tracking a
+   * completely different pair than it started with (`{2, 3}`, not `{1, 2}`) -- exactly the case
+   * `clearPointer`'s unconditional `previousDistance = undefined` (App.tsx) exists for: it must
+   * discard the old pair's distance so the next move re-establishes a fresh baseline from the
+   * *new* pair, rather than computing a ratio against a distance that belonged to a finger that
+   * is not even touching the screen anymore.
+   *
+   * Chosen numbers discriminate the correct answer from the specific wrong one a missing reset
+   * would produce: pair `{1, 2}` starts 100px apart (the stale distance, if wrongly reused); pair
+   * `{2, 3}` starts 200px apart and grows to 220px (a real 10% pinch-out, correct ratio 1.1). Using
+   * the stale 100px baseline instead would compute 220 / 100 = 2.2, clamping to the 150% ceiling
+   * -- indistinguishable from a working reset if this test only checked "zoom changed". Asserting
+   * exactly 110%, not merely "not 100%", is what makes this test actually kill that bug rather
+   * than merely detect that something moved.
+   */
+  it('one of the original two fingers lifting while a third is down leaves a fresh baseline for the new pair, not the stale one', async () => {
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+    const region = screen.getByRole('region', { name: 'Screenplay editor' });
+
+    firePointer(region, 'pointerdown', { clientX: 0, clientY: 0, pointerId: 1 });
+    firePointer(region, 'pointerdown', { clientX: 100, clientY: 0, pointerId: 2 });
+    // Establishes the (soon-to-be-stale) pair-{1,2} baseline: 100px apart.
+    firePointer(region, 'pointermove', { clientX: 0, clientY: 0, pointerId: 1 });
+
+    // A third finger joins -- pair {2,3} is 200px apart, but nothing computes yet
+    // (`pointers.size !== 2`, App.tsx), so this establishes no baseline of its own.
+    firePointer(region, 'pointerdown', { clientX: 100, clientY: 200, pointerId: 3 });
+
+    // Finger 1 -- one of the *original* pair, not the newcomer -- lifts. `clearPointer` resets
+    // `previousDistance`, and pointers is now exactly {2, 3} again.
+    firePointer(region, 'pointerup', { clientX: 0, clientY: 0, pointerId: 1 });
+
+    // First move back at size 2: only re-establishes the {2,3} baseline (200px) -- must not zoom.
+    firePointer(region, 'pointermove', { clientX: 100, clientY: 0, pointerId: 2 });
+    await nextFrame();
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('100%');
+
+    // {2,3} grows from 200px to 220px -- a real 10% pinch-out on the new pair.
+    firePointer(region, 'pointermove', { clientX: 100, clientY: 220, pointerId: 3 });
+    await nextFrame();
+    await waitFor(() => {
+      expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('110%');
+    });
+  });
+
+  it('lifting a finger clears its pointer, so a lone remaining finger goes back to native one-finger panning', async () => {
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+    const region = screen.getByRole('region', { name: 'Screenplay editor' });
+
+    firePointer(region, 'pointerdown', { clientX: 100, clientY: 100, pointerId: 1 });
+    firePointer(region, 'pointerdown', { clientX: 200, clientY: 100, pointerId: 2 });
+    firePointer(region, 'pointerup', { clientX: 200, clientY: 100, pointerId: 2 });
+    // Only pointer 1 remains -- `pointers.size` is 1, so this move must be left alone entirely.
+    const notPrevented = firePointer(region, 'pointermove', {
+      clientX: 130,
+      clientY: 100,
+      pointerId: 1,
+    });
+    expect(notPrevented).toBe(true);
+    await nextFrame();
+
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('100%');
+  });
+
+  /**
+   * "Pointer Events, not `TouchEvent`, so the same handler naturally ignores mouse/pen input"
+   * (App.tsx's own comment on this effect). A stray non-touch pointer -- a pen resting near the
+   * screen, or a mouse -- sharing the surface with exactly *one* real finger must not make that
+   * one finger's own movement zoom anything, because `handlePointerMove`'s own `pointerType`
+   * check only inspects the *moving* pointer's type, not the type of whichever other pointer it
+   * gets paired with for the distance calculation. Two non-touch pointers moving together (tried
+   * first) does not actually isolate `handlePointerDown`'s guard: `handlePointerMove` independently
+   * rejects a move whose own `event.pointerType` is not `'touch'`, so neither pointer's move
+   * would ever reach the pairing logic regardless of what `handlePointerDown` does -- confirmed
+   * directly (that version was mutation-tested against `handlePointerDown`'s guard and was not
+   * killed). This version uses one pen pointer (never moves) and one real touch pointer (moves
+   * twice, exactly like this file's own two-touch "zoom in" test) so the only way the assertion
+   * below can fail is if the pen pointer was wrongly added to `pointers` by `handlePointerDown`
+   * and paired against the real finger.
+   *
+   * Mutation-tested: removing `handlePointerDown`'s `if (event.pointerType !== 'touch') return;`
+   * guard entirely -- killed (`notPrevented` false, zoom level moved to '150%', the same clamped
+   * ceiling this file's own two-touch "zoom in" test reaches from the identical 100px -> 160px
+   * spread). Reverted; green again. See progress/pinch-zoom.md.
+   */
+  it('a stray non-touch pointer (pen) paired with one real finger never zooms, since only pointerType "touch" is tracked at all', async () => {
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    const toolbar = screen.getByRole('region', { name: 'Screenplay tools' });
+    const region = screen.getByRole('region', { name: 'Screenplay editor' });
+
+    firePointer(region, 'pointerdown', {
+      clientX: 100,
+      clientY: 100,
+      pointerId: 1,
+      pointerType: 'pen',
+    });
+    firePointer(region, 'pointerdown', { clientX: 200, clientY: 100, pointerId: 2 });
+    // Establishes a baseline distance only if the stray pen pointer was wrongly tracked --
+    // otherwise `pointers.size` is 1 (the real finger alone) and this is a no-op, matching this
+    // file's own "first sample has nothing to compare against yet" reasoning for the real
+    // two-touch case.
+    firePointer(region, 'pointermove', { clientX: 200, clientY: 100, pointerId: 2 });
+    // The one real finger spreads from 100px to 160px apart from the pen's fixed position -- the
+    // same spread this file's own two-touch "zoom in" test uses.
+    const notPrevented = firePointer(region, 'pointermove', {
+      clientX: 260,
+      clientY: 100,
+      pointerId: 2,
+    });
+    expect(notPrevented).toBe(true);
+    await nextFrame();
+
+    expect(within(toolbar).getByLabelText('Zoom level')).toHaveTextContent('100%');
+  });
+});
+
+/**
  * The root cause behind the real-browser scroll drift diagnosed in progress/zoom-scroll-drift.md:
  * `@tiptap/react`'s `useEditor` calls `editor.setOptions(...)` -- reconfiguring every ProseMirror
  * plugin, `paginationExtension.ts`'s pagination plugin included -- on any render of `<App>` whose

@@ -39,6 +39,32 @@ import { signIn, verifyEmail } from './testMail.js';
 const TOLERANCE_IN = 0.01;
 const PAGE_PITCH_IN = PAGE_HEIGHT_IN + PAGE_GAP_IN;
 
+/**
+ * The natural (unscaled) layout box of every `[data-block-id]` element and every
+ * `.page-break-widget`'s spacer, in CSS pixels -- hoisted to module scope so both the zoom-modes
+ * test and the pinch-to-zoom test below share one definition rather than each re-deriving it.
+ * `offsetWidth`/`offsetTop`/`offsetLeft` are unaffected by CSS `zoom` (`.pages`'s own zoom
+ * mechanism, App.tsx/styles.css): both are properties an element reports in its own local layout
+ * frame, and `zoom`, like `transform`, changes how a subtree paints into its ancestor's coordinate
+ * space without changing any element's own declared CSS lengths -- verified directly against a
+ * real page rather than assumed, in the zoom-modes test this was written for (see that test's own
+ * comment on `measureFit`, which relies on exactly the opposite property -- that
+ * `getBoundingClientRect()` *does* scale with `zoom` -- to derive a real scale factor). This is
+ * the invariant every zoom mechanism in this app (toolbar, preset, and now pinch) must hold: where
+ * lines break and where pages break never moves just because the visual scale did.
+ */
+function measureGrid(page: Page) {
+  return page.evaluate(() => {
+    const blocks = Array.from(document.querySelectorAll<HTMLElement>('[data-block-id]')).map(
+      (el) => ({ left: el.offsetLeft, top: el.offsetTop, width: el.offsetWidth }),
+    );
+    const widgets = Array.from(
+      document.querySelectorAll<HTMLElement>('.page-break-widget .page-break-spacer'),
+    ).map((el) => ({ height: el.offsetHeight, top: el.offsetTop }));
+    return { blocks, widgets };
+  });
+}
+
 /** `'x'.repeat(budget * (n - 1) + 1)` hard-splits into exactly `n` lines at the given budget. */
 function linesOfLength(budget: number, n: number): string {
   return 'x'.repeat(budget * (n - 1) + 1);
@@ -1932,32 +1958,9 @@ test.describe('zoom modes: real editor, real DOM', () => {
     await page.getByRole('combobox', { name: 'Zoom preset' }).selectOption('100');
     await expect(page.getByLabel('Zoom level')).toHaveText('100%');
 
-    /** The natural (unscaled) layout box of every `[data-block-id]` element and every
-     * `.page-break-widget`'s spacer, in CSS pixels. A zoom-mode change now scales the rendered
-     * document with CSS `zoom` on `.pages` (App.tsx/styles.css; see progress/zoom-modes.md for why
-     * this slice moved off `transform: scale()`), not `transform`, but `offsetWidth`/`offsetTop`/
-     * `offsetLeft` are unaffected by *either* mechanism: both are properties an element reports in
-     * its own local layout frame, and `zoom`, like `transform`, changes how a subtree paints into
-     * its ancestor's coordinate space without changing any element's own declared CSS lengths --
-     * verified directly against this real page rather than assumed from how `transform` behaved,
-     * since `getBoundingClientRect()`, which *does* cross into the ancestor's coordinate space,
-     * demonstrably does scale with `zoom` (see `measureFit` below, which relies on exactly that
-     * difference to derive the real scale factor). The same distinction `page-geometry.spec.ts`'s
-     * own zoom test draws between `offsetWidth` (natural) and `getBoundingClientRect().width`
-     * (visual) still holds under `zoom`, just for a different underlying reason than it did under
-     * `transform`. */
-    const measureGrid = () =>
-      page.evaluate(() => {
-        const blocks = Array.from(document.querySelectorAll<HTMLElement>('[data-block-id]')).map(
-          (el) => ({ left: el.offsetLeft, top: el.offsetTop, width: el.offsetWidth }),
-        );
-        const widgets = Array.from(
-          document.querySelectorAll<HTMLElement>('.page-break-widget .page-break-spacer'),
-        ).map((el) => ({ height: el.offsetHeight, top: el.offsetTop }));
-        return { blocks, widgets };
-      });
-
-    const gridAt100 = await measureGrid();
+    // `measureGrid` is now a module-level helper, shared with the pinch-to-zoom test below -- see
+    // its own comment for what it measures and why it is immune to CSS `zoom`.
+    const gridAt100 = await measureGrid(page);
     expect(gridAt100.blocks.length).toBeGreaterThanOrEqual(2);
     expect(gridAt100.widgets.length).toBe(1);
 
@@ -2023,7 +2026,7 @@ test.describe('zoom modes: real editor, real DOM', () => {
     // rounding -- the direct "actually fits" claim, from real browser measurements on both sides,
     // not a re-derivation of zoom.ts's own formula.
     expect(Math.abs(fitWidth.pageRect.width - fitWidth.available.widthPx)).toBeLessThan(1);
-    expect(await measureGrid()).toEqual(gridAt100);
+    expect(await measureGrid(page)).toEqual(gridAt100);
 
     await zoomPreset.selectOption('fit-page');
     await expect(zoomLevel).not.toHaveText('100%');
@@ -2051,13 +2054,13 @@ test.describe('zoom modes: real editor, real DOM', () => {
     // so the expectation has to apply the same clamp rather than assume one branch.
     const expectedScaleClamped = Math.min(1.5, Math.max(0.5, expectedScale));
     expect(Math.abs(scaleX - expectedScaleClamped)).toBeLessThan(0.01);
-    expect(await measureGrid()).toEqual(gridAt100);
+    expect(await measureGrid(page)).toEqual(gridAt100);
 
     // Back to a fixed 100%: the grid is still exactly where it started, through three real
     // zoom-mode changes.
     await zoomPreset.selectOption('100');
     await expect(zoomLevel).toHaveText('100%');
-    expect(await measureGrid()).toEqual(gridAt100);
+    expect(await measureGrid(page)).toEqual(gridAt100);
 
     /**
      * The owner's own bug report, and the reason this slice moved `.pages`'s zoom mechanism from
@@ -2095,13 +2098,13 @@ test.describe('zoom modes: real editor, real DOM', () => {
     // the same range rather than a different one.
     await zoomPreset.selectOption('70');
     await expect(zoomLevel).toHaveText('70%');
-    expect(await measureGrid()).toEqual(gridAt100);
+    expect(await measureGrid(page)).toEqual(gridAt100);
 
     // The floor: grid invariance and the gap check share this zoom-mode change rather than each
     // triggering their own.
     await zoomPreset.selectOption('50');
     await expect(zoomLevel).toHaveText('50%');
-    expect(await measureGrid()).toEqual(gridAt100);
+    expect(await measureGrid(page)).toEqual(gridAt100);
     const gapAt50 = await measureTitlePageGap();
 
     await zoomPreset.selectOption('100');
@@ -2114,7 +2117,7 @@ test.describe('zoom modes: real editor, real DOM', () => {
     // grid invariance and the gap check again share this one zoom-mode change.
     await zoomPreset.selectOption('150');
     await expect(zoomLevel).toHaveText('150%');
-    expect(await measureGrid()).toEqual(gridAt100);
+    expect(await measureGrid(page)).toEqual(gridAt100);
     const gapAt150 = await measureTitlePageGap();
 
     // Never negative at any zoom level. A negative gap *is* the overlap the owner reported; under
@@ -2132,5 +2135,217 @@ test.describe('zoom modes: real editor, real DOM', () => {
     expect(Math.abs(gapAt50 - naturalGapPx * 0.5)).toBeLessThan(1);
     expect(Math.abs(gapAt100 - naturalGapPx * 1.0)).toBeLessThan(1);
     expect(Math.abs(gapAt150 - naturalGapPx * 1.5)).toBeLessThan(1);
+
+    /**
+     * Pinch-to-zoom (progress/pinch-zoom.md): App.tsx wires a trackpad pinch as a `wheel` event
+     * with `ctrlKey` set, registered manually via `addEventListener('wheel', ..., { passive:
+     * false })` on `.editor-region` rather than React's always-passive `onWheel` -- see that
+     * file's own comment for why a passive listener could never call `preventDefault()` at all.
+     * `zoom.test.ts` and `App.test.tsx` (jsdom) already prove the pure arithmetic and the wiring in
+     * isolation; nothing before this ran the gesture through a real browser, which is the only
+     * environment that can confirm three things at once: a real `ctrlKey` wheel event actually
+     * reaches this handler and is actually prevented, an *unmodified* wheel event is left
+     * completely alone (the regression most likely to ship unnoticed, since it breaks the plainest
+     * interaction in the app), and the pointer-anchored scroll restoration holds up against real
+     * font metrics and real layout rather than the stubbed `scrollHeight`/`clientHeight` the unit
+     * tests substitute.
+     *
+     * `page.mouse.wheel(deltaX, deltaY)` (Playwright's CDP-backed mouse wheel) is what drives the
+     * gesture, with `page.keyboard.down('Control')` held across the call: confirmed directly,
+     * before writing this, that this combination reaches the page as a genuine `wheel` DOMEvent
+     * with `ctrlKey: true` and `deltaMode: 0` (pixel deltas, exactly what
+     * `zoomRatioFromWheelDelta`, zoom.ts, expects) -- not synthesized by Playwright, not routed
+     * through any special-cased pinch API. A `CDPSession`-level `Input.dispatchMouseEvent({ type:
+     * 'mouseWheel', modifiers: 2 })` was tried as an alternative and produces an identical event;
+     * `mouse.wheel` was kept because it needs no separate CDP session and is the same mechanism
+     * `page.mouse.move`/`page.keyboard.down` already use elsewhere in this file.
+     *
+     * This runs as a further phase of the *same* signed-in session and document the checks above
+     * already opened, exactly per this test's own top-of-function comment ("one test, one
+     * sign-up"): these checks were first written as their own `test.describe`, with their own
+     * `createAndOpenScreenplay` call, and that nineteenth real account -- on top of the eighteen
+     * other specs already in this suite -- reproduced the exact rate-limit failure
+     * (`DEFAULT_API_RATE_LIMIT_MAX`, `packages/server-config`) that comment already describes:
+     * `createAndOpenScreenplay` failed with "Projects could not be loaded." Folded back into this
+     * test's own session instead, per that same precedent.
+     */
+    await zoomPreset.selectOption('100');
+    await expect(zoomLevel).toHaveText('100%');
+
+    /**
+     * Requirement 2: ordinary scrolling still works. Start somewhere with room both above and
+     * below (rather than at `scrollTop` 0, where an accidentally-prevented scroll and a
+     * legitimately-clamped-at-the-floor scroll would look identical), fire one plain, unmodified
+     * `wheel` event, and confirm the region's own native scroll actually moved it -- the only
+     * externally observable proof, from outside the page, that nothing called
+     * `preventDefault()`: a prevented wheel event produces no native scroll at all, so any
+     * measured movement is itself the proof. Zoom staying at 100% throughout confirms the branch
+     * taken was the plain "leave it alone" early return in App.tsx's handler, not some path that
+     * both scrolled and zoomed.
+     */
+    const extentBeforeScroll = await measureScrollState();
+    const maxScroll = extentBeforeScroll.scrollHeight - extentBeforeScroll.clientHeight;
+    expect(maxScroll).toBeGreaterThan(200); // Precondition: real room to scroll.
+    await page.evaluate((target) => {
+      const region = document.querySelector('.editor-region');
+      if (region) region.scrollTop = target;
+    }, 0.3 * maxScroll);
+    const beforeOrdinaryScroll = await measureScrollState();
+
+    const editorRegionLocator = page.locator('.editor-region');
+    const regionBoxForScroll = await editorRegionLocator.boundingBox();
+    if (!regionBoxForScroll) throw new Error('Missing .editor-region bounding box.');
+    await page.mouse.move(
+      regionBoxForScroll.x + regionBoxForScroll.width / 2,
+      regionBoxForScroll.y + regionBoxForScroll.height / 2,
+    );
+    await page.mouse.wheel(0, 120);
+    await page.waitForTimeout(100);
+
+    const afterOrdinaryScroll = await measureScrollState();
+    expect(afterOrdinaryScroll.scrollTop).toBeGreaterThan(beforeOrdinaryScroll.scrollTop + 10);
+    await expect(zoomLevel).toHaveText('100%');
+
+    /**
+     * Requirement 1 and 3: the pointer anchor, and the character grid, both against the real
+     * pinch path.
+     *
+     * Rather than re-deriving `restorePointerAnchoredScroll`'s own formula (already proved exactly,
+     * against a stubbed DOM, in `App.test.tsx`), this measures a black-box, real-render-path
+     * property: pick a manuscript block that sits fully inside the viewport, put the pointer at
+     * that block's own screen centre, pinch there, and confirm the *same block*, identified by its
+     * own `data-block-id` and re-measured after the gesture, is still where the pointer was -- not
+     * merely that the internal formula was applied, but that the manuscript visually held still.
+     *
+     * `gridAt100` -- captured well above, before any zoom-mode change, and already the baseline
+     * every zoom-mode check in this test compares against -- is reused rather than re-measured: no
+     * edit has touched the document since it was captured, so it is still the correct pre-pinch
+     * grid.
+     *
+     * Which block to anchor on is chosen deterministically, not by scrolling to an arbitrary
+     * fraction and hoping something fits: this fixture's first block is ~55 lines (fills page 1
+     * almost exactly, ~9in tall) -- far taller than any real viewport -- so a scroll offset picked
+     * without knowing the layout can easily land on a block with no fully-visible instance at all
+     * (confirmed directly: an earlier version of this test did exactly that, at 40% of max scroll,
+     * and failed with "No fully-visible manuscript block found"). The second block (5 lines, well
+     * under 100px tall) always fits with room to spare, so it is selected by geometry -- the
+     * shortest block by its real rendered height -- and the region is scrolled to put its own
+     * centre at the viewport's centre, guaranteeing the anchor point below has real margin on
+     * every side regardless of how tall the surrounding page or the viewport itself happens to be.
+     *
+     * The block's position is computed as `region.scrollTop + (blockRect.top - regionRect.top)`,
+     * not `offsetTop`: `offsetTop` is relative to the element's nearest *positioned* ancestor,
+     * which climbs through `.pages`/`.page`/`.script-body` and lands on whichever of those has its
+     * own `position` set -- not necessarily `.editor-region` -- so it does not reliably give a
+     * document-Y coordinate in `.editor-region`'s own scrollable frame. `getBoundingClientRect()`
+     * is unambiguous (real viewport pixels for both elements) and, combined with the region's own
+     * current `scrollTop`, gives that block's true position in the region's scrollable content
+     * regardless of the positioned-ancestor chain. (Confirmed directly: an earlier version of this
+     * used `offsetTop` and computed a centre far outside the actual scrollable range, leaving the
+     * "centred" block still off-screen and the pointer positioned over nothing -- the pinch fired
+     * over empty space and never reached `.editor-region`'s wheel handler at all.)
+     */
+    const shortestBlock = await page.evaluate(() => {
+      const region = document.querySelector('.editor-region');
+      if (!region) throw new Error('Missing .editor-region.');
+      const regionRect = region.getBoundingClientRect();
+      const blocks = Array.from(document.querySelectorAll<HTMLElement>('[data-block-id]'));
+      if (blocks.length === 0) throw new Error('No manuscript blocks found.');
+      let bestId = '';
+      let bestCenterY = 0;
+      let bestHeight = Infinity;
+      for (const block of blocks) {
+        const rect = block.getBoundingClientRect();
+        if (rect.height < bestHeight) {
+          bestHeight = rect.height;
+          bestId = block.getAttribute('data-block-id') ?? '';
+          bestCenterY = region.scrollTop + (rect.top - regionRect.top) + rect.height / 2;
+        }
+      }
+      return { centerY: bestCenterY, id: bestId };
+    });
+
+    const scrollExtent = await measureScrollState();
+    const desiredScrollTop = Math.min(
+      Math.max(shortestBlock.centerY - scrollExtent.clientHeight / 2, 0),
+      scrollExtent.scrollHeight - scrollExtent.clientHeight,
+    );
+    await page.evaluate((value) => {
+      const region = document.querySelector('.editor-region');
+      if (region) region.scrollTop = value;
+    }, desiredScrollTop);
+
+    const target = await page.evaluate((id) => {
+      const el = document.querySelector<HTMLElement>(`[data-block-id="${id}"]`);
+      if (!el) throw new Error('The chosen anchor block disappeared before it could be measured.');
+      const rect = el.getBoundingClientRect();
+      return { bottom: rect.bottom, left: rect.left, right: rect.right, top: rect.top };
+    }, shortestBlock.id);
+
+    const pointerX = (target.left + target.right) / 2;
+    const pointerY = (target.top + target.bottom) / 2;
+
+    // -20 -> zoomRatioFromWheelDelta(-20) = exp(0.2) ~= 1.221 (zoom.ts): a clearly measurable
+    // ~22% zoom-in, comfortably inside the 50-150 range from 100% in either direction (no clamp
+    // interference) and far larger than any plausible sub-pixel rendering noise, without being so
+    // large it forces the anchor block off-screen before the restoration runs.
+    const PINCH_DELTA_Y = -20;
+
+    await page.mouse.move(pointerX, pointerY);
+    await page.keyboard.down('Control');
+    await page.mouse.wheel(0, PINCH_DELTA_Y);
+    await page.keyboard.up('Control');
+
+    await expect(zoomLevel).not.toHaveText('100%');
+    // One settled read is enough here: unlike the centred-scroll effect's own comment
+    // (progress/zoom-scroll-drift.md), the pointer-anchored restoration has no second,
+    // frame-later reapplication to wait out -- see restorePointerAnchoredScroll's own comment
+    // (zoom.ts) and this section's own comment above.
+    await page.waitForTimeout(150);
+
+    const afterRect = await page.evaluate((id) => {
+      const el = document.querySelector<HTMLElement>(`[data-block-id="${id}"]`);
+      if (!el) throw new Error('The anchor block was removed by the zoom change.');
+      const rect = el.getBoundingClientRect();
+      return { bottom: rect.bottom, left: rect.left, right: rect.right, top: rect.top };
+    }, shortestBlock.id);
+
+    const afterPointerX = (afterRect.left + afterRect.right) / 2;
+    const afterPointerY = (afterRect.top + afterRect.bottom) / 2;
+
+    /**
+     * Both axes now anchor exactly (progress/pinch-zoom.md: "the vertical imprecision, fixed" and
+     * "the horizontal anchor, fixed"). The two defects this test found earlier -- a small, bounded
+     * vertical drift from `.editor-region`'s own unscaled top padding, and a much larger,
+     * unbounded horizontal drift from `justify-content: center`'s zoom-dependent centring offset
+     * -- shared one root cause: `capturePointerAnchoredScroll`/`restorePointerAnchoredScroll`
+     * (zoom.ts) used to measure the pointer's anchor offset against `.editor-region`'s own box,
+     * which carries padding and (used to) carry centring that `.pages` -- the element CSS `zoom`
+     * actually scales -- does not. Both functions now measure against `.pages` itself, and
+     * `.editor-region` lost its `justify-content: center` in favour of `margin-inline: auto` on
+     * `.pages` (styles.css), which centres identically when there is room and, unlike
+     * `justify-content: center`, resolves to a fixed `0` rather than a moving negative offset once
+     * `.pages` overflows -- see that rule's own comment for the full diagnosis.
+     *
+     * Tolerance 1px on each axis: measured directly against this real browser and font while
+     * developing this fix, the actual deviation on both axes was consistently a small fraction of
+     * a pixel (sub-pixel `scrollTop`/`scrollLeft` writes and `getBoundingClientRect()`'s own
+     * fractional reporting) -- 1px leaves a comfortable margin above that noise floor while still
+     * being two orders of magnitude tighter than the horizontal defect this same assertion used to
+     * be unable to make at all (tens to ~90px) and roughly ten times tighter than the vertical
+     * imprecision this test used to predict and accept (~9-10px) rather than correct.
+     */
+    // Confirmed, while developing this assertion, that this scenario genuinely exercises
+    // horizontal overflow and real scrolling rather than passing vacuously with `scrollLeft`
+    // pinned at 0: `scrollWidth` (1109px) comfortably exceeds `clientWidth` (810px) here, and
+    // `scrollLeft` moves to a real, non-zero, non-clamped value (96px) after the gesture.
+    expect(Math.abs(afterPointerX - pointerX)).toBeLessThan(1);
+    expect(Math.abs(afterPointerY - pointerY)).toBeLessThan(1);
+
+    // The character grid -- where lines and pages break -- is exactly where it was before the
+    // pinch, proven against the real render path, not a synthetic stand-in (matching the
+    // zoom-modes test above, which proves the identical invariant for the toolbar and preset
+    // paths).
+    expect(await measureGrid(page)).toEqual(gridAt100);
   });
 });
