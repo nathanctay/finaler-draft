@@ -53,6 +53,20 @@ const serverEnvironment = z.object({
   // configuration as a launch blocker rather than a runtime surprise.
   RESEND_API_KEY: z.string().optional(),
   MAIL_FROM_ADDRESS: z.string().email().optional(),
+  // Stripe Billing (plan.md, "Subscription and billing architecture"). Optional here for the
+  // same reason as the Resend fields above: a health/static-only process, and local development
+  // without Stripe configured, both need to start. `requirePersistenceEnvironment` below is what
+  // makes them mandatory in production.
+  //
+  // `STRIPE_SECRET_KEY` deliberately accepts either an unrestricted secret key (`sk_...`, used
+  // in development) or a restricted key (`rk_...`, required in production per plan.md). Both are
+  // drop-in-compatible Stripe API keys and the code that constructs the Stripe client
+  // (apps/api/src/stripeClient.ts) must not care which it was handed -- so this schema does not
+  // validate the prefix, only that a value is present.
+  STRIPE_SECRET_KEY: z.string().optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().optional(),
+  STRIPE_PRICE_ID_MONTHLY: z.string().optional(),
+  STRIPE_PRICE_ID_ANNUAL: z.string().optional(),
 });
 
 export type ServerEnvironment = z.infer<typeof serverEnvironment>;
@@ -72,6 +86,10 @@ export function requirePersistenceEnvironment(environment: ServerEnvironment) {
       CLIENT_ORIGIN: z.string().url().optional(),
       RESEND_API_KEY: z.string().optional(),
       MAIL_FROM_ADDRESS: z.string().email().optional(),
+      STRIPE_SECRET_KEY: z.string().optional(),
+      STRIPE_WEBHOOK_SECRET: z.string().optional(),
+      STRIPE_PRICE_ID_MONTHLY: z.string().optional(),
+      STRIPE_PRICE_ID_ANNUAL: z.string().optional(),
     })
     .parse(environment);
   if (environment.NODE_ENV === 'production') {
@@ -87,6 +105,23 @@ export function requirePersistenceEnvironment(environment: ServerEnvironment) {
       throw new Error(
         'RESEND_API_KEY and MAIL_FROM_ADDRESS are required in production: without them, ' +
           'password reset and email verification cannot be delivered.',
+      );
+    }
+    // plan.md: "Verify the webhook signature on every event ... Treat the signing secret with
+    // the same care as an API key" and the restricted-key production requirement. A production
+    // process that started without these could not verify Stripe webhooks (so no subscription
+    // state would ever update) or price a Checkout Session -- failing at startup turns that into
+    // a deploy-time error instead of a silent billing outage discovered by a paying customer.
+    if (
+      !persistence.STRIPE_SECRET_KEY ||
+      !persistence.STRIPE_WEBHOOK_SECRET ||
+      !persistence.STRIPE_PRICE_ID_MONTHLY ||
+      !persistence.STRIPE_PRICE_ID_ANNUAL
+    ) {
+      throw new Error(
+        'STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID_MONTHLY, and ' +
+          'STRIPE_PRICE_ID_ANNUAL are required in production: without them, subscription ' +
+          'billing cannot verify webhooks or price a subscription.',
       );
     }
   }

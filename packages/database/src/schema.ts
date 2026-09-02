@@ -119,3 +119,84 @@ export const screenplays = pgTable(
   },
   (table) => [index('screenplays_project_id_index').on(table.projectId)],
 );
+
+// Stripe's own Subscription.Status enum (esm/resources/Subscriptions.d.ts in the installed
+// `stripe` package, API version 2026-07-29.dahlia), reproduced here rather than imported: this
+// package has no dependency on the Stripe SDK, and a database enum is schema, not a client
+// binding. If Stripe ever adds a new status this column would reject it until this migration is
+// extended -- an explicit failure at write time, not a silently truncated/miscategorized value.
+export const subscriptionStatus = pgEnum('subscription_status', [
+  'incomplete',
+  'incomplete_expired',
+  'trialing',
+  'active',
+  'past_due',
+  'canceled',
+  'unpaid',
+  'paused',
+]);
+
+// A queryable cache of Stripe subscription state, keyed to the Better Auth user (plan.md,
+// "Subscription and billing architecture": "Persist a subscriptions projection in PostgreSQL
+// keyed to the Better Auth user ... Stripe remains the source of truth; this table is a
+// queryable cache that the webhook keeps current"). One row per user reflects the flat
+// per-user pricing model plan.md proposes as the simpler starting point (no per-seat billing).
+//
+// `lastEventCreatedAt` is the out-of-order delivery guard: Stripe does not guarantee webhook
+// delivery order, only that each event's own `created` timestamp reflects generation order.
+// Every write compares the incoming event's `created` against this column and is discarded,
+// not applied, when it is not strictly newer -- see stripeSubscriptions.ts's
+// `recordSubscriptionEvent`/`recordInvoiceEvent` for the upsert that enforces this.
+export const subscriptions = pgTable(
+  'subscriptions',
+  {
+    userId: text('user_id')
+      .primaryKey()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    stripeCustomerId: text('stripe_customer_id').notNull(),
+    stripeSubscriptionId: text('stripe_subscription_id').notNull(),
+    stripePriceId: text('stripe_price_id').notNull(),
+    status: subscriptionStatus('status').notNull(),
+    currentPeriodEnd: timestamp('current_period_end', { withTimezone: true }).notNull(),
+    cancelAtPeriodEnd: boolean('cancel_at_period_end').notNull().default(false),
+    canceledAt: timestamp('canceled_at', { withTimezone: true }),
+    lastEventCreatedAt: timestamp('last_event_created_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('subscriptions_stripe_customer_id_unique').on(table.stripeCustomerId),
+    uniqueIndex('subscriptions_stripe_subscription_id_unique').on(table.stripeSubscriptionId),
+  ],
+);
+
+// Dedupe ledger for Stripe webhook delivery (plan.md: "Events are duplicated and arrive out of
+// order. Persist event.id and reject events already processed"). Keyed on Stripe's own event id,
+// which is globally unique per event and stable across retries/redeliveries of the same event.
+export const stripeProcessedEvents = pgTable('stripe_processed_events', {
+  id: text('id').primaryKey(),
+  type: text('type').notNull(),
+  processedAt: timestamp('processed_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+// The single-editable-slot record for the free/lapsed entitlement tier (plan.md's "The free
+// tier" and "What happens when a subscription lapses"): which screenplay currently occupies a
+// restricted account's one editable slot, and when that choice was last made. The timestamp is
+// not incidental -- apps/api/src/entitlements.ts's switch-slot cooldown (switching the slot is
+// rate-limited to once per 24 hours, never a quota of switches) cannot be enforced without it,
+// so this column exists regardless of whether a UI to change the slot has shipped yet.
+//
+// One row per user, and only ever written once a choice actually needs recording. A row is
+// absent for every account that has never needed one -- a paid account, or a restricted account
+// that has only ever had zero or exactly one editable-role screenplay -- see
+// apps/api/src/entitlements.ts's `checkEntitlement` for how an absent row and a single
+// unambiguous candidate resolve identically without a row being written for the latter.
+export const editableSlots = pgTable('editable_slots', {
+  userId: text('user_id')
+    .primaryKey()
+    .references(() => user.id, { onDelete: 'cascade' }),
+  screenplayId: uuid('screenplay_id')
+    .notNull()
+    .references(() => screenplays.id, { onDelete: 'cascade' }),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});

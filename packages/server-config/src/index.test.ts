@@ -62,6 +62,10 @@ describe('parseServerEnvironment', () => {
       CLIENT_ORIGIN: 'https://writer.example.test',
       RESEND_API_KEY: 're_test_key',
       MAIL_FROM_ADDRESS: 'noreply@example.test',
+      STRIPE_SECRET_KEY: 'sk_test_FAKE',
+      STRIPE_WEBHOOK_SECRET: 'whsec_test_FAKE',
+      STRIPE_PRICE_ID_MONTHLY: 'price_test_FAKE_monthly',
+      STRIPE_PRICE_ID_ANNUAL: 'price_test_FAKE_annual',
     });
     expect(findPersistenceEnvironment(environment)).toEqual({
       DATABASE_URL: 'postgresql://localhost/finaler',
@@ -70,6 +74,10 @@ describe('parseServerEnvironment', () => {
       CLIENT_ORIGIN: 'https://writer.example.test',
       RESEND_API_KEY: 're_test_key',
       MAIL_FROM_ADDRESS: 'noreply@example.test',
+      STRIPE_SECRET_KEY: 'sk_test_FAKE',
+      STRIPE_WEBHOOK_SECRET: 'whsec_test_FAKE',
+      STRIPE_PRICE_ID_MONTHLY: 'price_test_FAKE_monthly',
+      STRIPE_PRICE_ID_ANNUAL: 'price_test_FAKE_annual',
     });
   });
 
@@ -136,8 +144,97 @@ describe('parseServerEnvironment', () => {
           BETTER_AUTH_URL: 'https://app.example.test',
           RESEND_API_KEY: 're_test_key',
           MAIL_FROM_ADDRESS: 'noreply@example.test',
+          STRIPE_SECRET_KEY: 'sk_test_FAKE',
+          STRIPE_WEBHOOK_SECRET: 'whsec_test_FAKE',
+          STRIPE_PRICE_ID_MONTHLY: 'price_test_FAKE_monthly',
+          STRIPE_PRICE_ID_ANNUAL: 'price_test_FAKE_annual',
         }),
       ),
     ).toMatchObject({ RESEND_API_KEY: 're_test_key', MAIL_FROM_ADDRESS: 'noreply@example.test' });
+  });
+
+  it('does not require Stripe configuration outside production', () => {
+    expect(
+      requirePersistenceEnvironment(
+        parseServerEnvironment({
+          NODE_ENV: 'test',
+          DATABASE_URL: 'postgresql://localhost/finaler',
+          BETTER_AUTH_SECRET: 'x'.repeat(32),
+          BETTER_AUTH_URL: 'http://127.0.0.1:4174',
+        }),
+      ),
+    ).not.toHaveProperty('STRIPE_SECRET_KEY');
+  });
+
+  it('refuses to start in production without any Stripe configuration, even with Resend configured', () => {
+    expect(() =>
+      requirePersistenceEnvironment(
+        parseServerEnvironment({
+          NODE_ENV: 'production',
+          DATABASE_URL: 'postgresql://localhost/finaler',
+          BETTER_AUTH_SECRET: 'x'.repeat(32),
+          BETTER_AUTH_URL: 'https://app.example.test',
+          RESEND_API_KEY: 're_test_key',
+          MAIL_FROM_ADDRESS: 'noreply@example.test',
+        }),
+      ),
+    ).toThrow(/STRIPE_SECRET_KEY/);
+  });
+
+  it('refuses to start in production with a Stripe key but no webhook secret', () => {
+    expect(() =>
+      requirePersistenceEnvironment(
+        parseServerEnvironment({
+          NODE_ENV: 'production',
+          DATABASE_URL: 'postgresql://localhost/finaler',
+          BETTER_AUTH_SECRET: 'x'.repeat(32),
+          BETTER_AUTH_URL: 'https://app.example.test',
+          RESEND_API_KEY: 're_test_key',
+          MAIL_FROM_ADDRESS: 'noreply@example.test',
+          STRIPE_SECRET_KEY: 'sk_test_FAKE',
+        }),
+      ),
+    ).toThrow(/STRIPE_WEBHOOK_SECRET/);
+  });
+
+  it('refuses to start in production with Stripe credentials but no price ids', () => {
+    expect(() =>
+      requirePersistenceEnvironment(
+        parseServerEnvironment({
+          NODE_ENV: 'production',
+          DATABASE_URL: 'postgresql://localhost/finaler',
+          BETTER_AUTH_SECRET: 'x'.repeat(32),
+          BETTER_AUTH_URL: 'https://app.example.test',
+          RESEND_API_KEY: 're_test_key',
+          MAIL_FROM_ADDRESS: 'noreply@example.test',
+          STRIPE_SECRET_KEY: 'sk_test_FAKE',
+          STRIPE_WEBHOOK_SECRET: 'whsec_test_FAKE',
+        }),
+      ),
+    ).toThrow(/STRIPE_PRICE_ID_MONTHLY/);
+  });
+
+  it('starts in production once Stripe is fully configured, alongside Resend and HTTPS', () => {
+    expect(
+      requirePersistenceEnvironment(
+        parseServerEnvironment({
+          NODE_ENV: 'production',
+          DATABASE_URL: 'postgresql://localhost/finaler',
+          BETTER_AUTH_SECRET: 'x'.repeat(32),
+          BETTER_AUTH_URL: 'https://app.example.test',
+          RESEND_API_KEY: 're_test_key',
+          MAIL_FROM_ADDRESS: 'noreply@example.test',
+          STRIPE_SECRET_KEY: 'sk_test_FAKE',
+          STRIPE_WEBHOOK_SECRET: 'whsec_test_FAKE',
+          STRIPE_PRICE_ID_MONTHLY: 'price_test_FAKE_monthly',
+          STRIPE_PRICE_ID_ANNUAL: 'price_test_FAKE_annual',
+        }),
+      ),
+    ).toMatchObject({
+      STRIPE_SECRET_KEY: 'sk_test_FAKE',
+      STRIPE_WEBHOOK_SECRET: 'whsec_test_FAKE',
+      STRIPE_PRICE_ID_MONTHLY: 'price_test_FAKE_monthly',
+      STRIPE_PRICE_ID_ANNUAL: 'price_test_FAKE_annual',
+    });
   });
 });

@@ -2,9 +2,14 @@ import { findPersistenceEnvironment, parseServerEnvironment } from '@finaler-dra
 import { createAuth } from './auth.js';
 import { buildApp } from './app.js';
 import { cachedProbe } from './cachedProbe.js';
+import { createEntitlementEnforcedProjectStore } from './entitlementProjectStore.js';
+import { createPostgresEntitlementStore } from './entitlementStore.js';
 import { loadRootEnvironment, shouldLoadRootEnvironment } from './environment.js';
 import { selectMailPort, type MailMessage } from './mail.js';
 import { createPostgresProjectStore } from './projects.js';
+import { createStripeClient } from './stripeClient.js';
+import { createStripeIpAllowlist, fetchStripeWebhookIps } from './stripeIpAllowlist.js';
+import { createPostgresSubscriptionStore } from './stripeSubscriptions.js';
 
 try {
   const systemTestMode = process.env.FINALER_SYSTEM_TEST === 'true';
@@ -85,6 +90,34 @@ async function buildPersistentApp(
     mail,
     rateLimitEnabled: !options.systemTestMode,
   });
+  // Optional in every environment short of production (`requirePersistenceEnvironment` in
+  // `@finaler-draft/server-config` is what makes all four mandatory there) -- so a development or
+  // test process without Stripe configured still starts, just without the webhook route
+  // registered at all (see `BuildAppOptions.stripe` in app.ts: `undefined` here means the route
+  // does not exist, mirroring `testMail`'s "not registered, not registered-and-denies" contract).
+  // The two Pro price ids are validated as part of this gate (plan.md asks for them alongside
+  // the key and signing secret) but not threaded any further than this check: pricing a Checkout
+  // Session is explicitly a later slice's job, not this one's. This slice's only job for them is
+  // to make production refuse to start without them already configured and ready.
+  const stripeConfigured = Boolean(
+    persistence.STRIPE_SECRET_KEY &&
+      persistence.STRIPE_WEBHOOK_SECRET &&
+      persistence.STRIPE_PRICE_ID_MONTHLY &&
+      persistence.STRIPE_PRICE_ID_ANNUAL,
+  );
+  const ipAllowlist = stripeConfigured
+    ? createStripeIpAllowlist({ fetchIps: fetchStripeWebhookIps })
+    : undefined;
+  ipAllowlist?.start();
+  // Shared by the entitlement store below and, when Stripe is configured, the webhook route --
+  // one instance either way, not two independent connections to the same table. Entitlement
+  // enforcement needs subscription status regardless of whether Stripe itself is configured in
+  // this environment: `getSubscriptionForUser` returning `undefined` for every account (an empty
+  // table, not a missing dependency) is exactly the free-tier default plan.md asks for, so a
+  // development or test process with persistence but no Stripe keys still enforces the free
+  // tier correctly rather than skipping entitlement checks entirely.
+  const subscriptions = createPostgresSubscriptionStore(pool);
+  const entitlements = createPostgresEntitlementStore(pool, subscriptions);
   const app = await buildApp({
     serveClient: options.serveClient,
     rateLimit: options.rateLimit,
@@ -94,7 +127,20 @@ async function buildPersistentApp(
       getActorId: async (headers) => (await auth.api.getSession({ headers }))?.user.id ?? null,
       trustedOrigins,
     },
-    projects: createPostgresProjectStore(pool),
+    // Wrapped, not the bare Postgres store: plan.md requires entitlement to be enforced in the
+    // same layer as project/screenplay authorization, on every write, regardless of which routes
+    // happen to be registered -- see entitlementProjectStore.ts's module comment for exactly what
+    // this wrapper gates and what it deliberately leaves untouched.
+    projects: createEntitlementEnforcedProjectStore(createPostgresProjectStore(pool), entitlements),
+    entitlements,
+    stripe: stripeConfigured
+      ? {
+          client: createStripeClient(persistence.STRIPE_SECRET_KEY!),
+          webhookSecret: persistence.STRIPE_WEBHOOK_SECRET!,
+          store: subscriptions,
+          ipAllowlist,
+        }
+      : undefined,
     testMail: options.systemTestMode ? { latestTo: (to) => testMailbox.get(to) } : undefined,
     // A cheap connectivity probe, not a migration-state check: it answers "can this process
     // reach the database at all," which is exactly what Railway's rollout gate needs to catch a
@@ -118,6 +164,7 @@ async function buildPersistentApp(
     }, 5_000),
   });
   app.addHook('onClose', async () => {
+    ipAllowlist?.stop();
     await pool.end();
   });
   return app;
