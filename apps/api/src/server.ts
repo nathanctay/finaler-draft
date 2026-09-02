@@ -2,6 +2,8 @@ import { findPersistenceEnvironment, parseServerEnvironment } from '@finaler-dra
 import { createAuth } from './auth.js';
 import { buildApp } from './app.js';
 import { cachedProbe } from './cachedProbe.js';
+import { createEntitlementEnforcedProjectStore } from './entitlementProjectStore.js';
+import { createPostgresEntitlementStore } from './entitlementStore.js';
 import { loadRootEnvironment, shouldLoadRootEnvironment } from './environment.js';
 import { selectMailPort, type MailMessage } from './mail.js';
 import { createPostgresProjectStore } from './projects.js';
@@ -107,6 +109,15 @@ async function buildPersistentApp(
     ? createStripeIpAllowlist({ fetchIps: fetchStripeWebhookIps })
     : undefined;
   ipAllowlist?.start();
+  // Shared by the entitlement store below and, when Stripe is configured, the webhook route --
+  // one instance either way, not two independent connections to the same table. Entitlement
+  // enforcement needs subscription status regardless of whether Stripe itself is configured in
+  // this environment: `getSubscriptionForUser` returning `undefined` for every account (an empty
+  // table, not a missing dependency) is exactly the free-tier default plan.md asks for, so a
+  // development or test process with persistence but no Stripe keys still enforces the free
+  // tier correctly rather than skipping entitlement checks entirely.
+  const subscriptions = createPostgresSubscriptionStore(pool);
+  const entitlements = createPostgresEntitlementStore(pool, subscriptions);
   const app = await buildApp({
     serveClient: options.serveClient,
     rateLimit: options.rateLimit,
@@ -116,12 +127,17 @@ async function buildPersistentApp(
       getActorId: async (headers) => (await auth.api.getSession({ headers }))?.user.id ?? null,
       trustedOrigins,
     },
-    projects: createPostgresProjectStore(pool),
+    // Wrapped, not the bare Postgres store: plan.md requires entitlement to be enforced in the
+    // same layer as project/screenplay authorization, on every write, regardless of which routes
+    // happen to be registered -- see entitlementProjectStore.ts's module comment for exactly what
+    // this wrapper gates and what it deliberately leaves untouched.
+    projects: createEntitlementEnforcedProjectStore(createPostgresProjectStore(pool), entitlements),
+    entitlements,
     stripe: stripeConfigured
       ? {
           client: createStripeClient(persistence.STRIPE_SECRET_KEY!),
           webhookSecret: persistence.STRIPE_WEBHOOK_SECRET!,
-          store: createPostgresSubscriptionStore(pool),
+          store: subscriptions,
           ipAllowlist,
         }
       : undefined,

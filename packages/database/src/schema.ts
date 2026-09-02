@@ -178,3 +178,25 @@ export const stripeProcessedEvents = pgTable('stripe_processed_events', {
   type: text('type').notNull(),
   processedAt: timestamp('processed_at', { withTimezone: true }).defaultNow().notNull(),
 });
+
+// The single-editable-slot record for the free/lapsed entitlement tier (plan.md's "The free
+// tier" and "What happens when a subscription lapses"): which screenplay currently occupies a
+// restricted account's one editable slot, and when that choice was last made. The timestamp is
+// not incidental -- apps/api/src/entitlements.ts's switch-slot cooldown (switching the slot is
+// rate-limited to once per 24 hours, never a quota of switches) cannot be enforced without it,
+// so this column exists regardless of whether a UI to change the slot has shipped yet.
+//
+// One row per user, and only ever written once a choice actually needs recording. A row is
+// absent for every account that has never needed one -- a paid account, or a restricted account
+// that has only ever had zero or exactly one editable-role screenplay -- see
+// apps/api/src/entitlements.ts's `checkEntitlement` for how an absent row and a single
+// unambiguous candidate resolve identically without a row being written for the latter.
+export const editableSlots = pgTable('editable_slots', {
+  userId: text('user_id')
+    .primaryKey()
+    .references(() => user.id, { onDelete: 'cascade' }),
+  screenplayId: uuid('screenplay_id')
+    .notNull()
+    .references(() => screenplays.id, { onDelete: 'cascade' }),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});

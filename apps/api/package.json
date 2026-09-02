@@ -10,7 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:integration": "node scripts/require-test-database.mjs && vitest run src/persistence.integration.test.ts src/stripeSubscriptions.integration.test.ts",
+    "test:integration": "node scripts/require-test-database.mjs && vitest run src/persistence.integration.test.ts src/stripeSubscriptions.integration.test.ts src/entitlements.integration.test.ts",
     "db:migrate": "pnpm --filter @finaler-draft/database db:migrate"
   },
   "dependencies": {

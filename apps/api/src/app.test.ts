@@ -1207,6 +1207,233 @@ describe('persisted project API', () => {
   });
 });
 
+describe('entitlement API', () => {
+  const entitlementAuth = {
+    baseUrl: 'https://app.example.test',
+    handler: async () =>
+      new Response('auth', { headers: { 'set-cookie': 'session=test; HttpOnly' } }),
+    getActorId: async (headers: Headers) =>
+      headers.get('cookie') === 'session=test' ? 'actor-1' : null,
+    trustedOrigins: ['https://app.example.test'],
+  };
+  const headers = { cookie: 'session=test', origin: 'https://app.example.test' };
+
+  it('GET /api/entitlement requires authentication, same as the project routes', async () => {
+    const app = await buildApp({
+      auth: entitlementAuth,
+      entitlements: {
+        getSnapshot: async () => {
+          throw new Error('must not be reached unauthenticated');
+        },
+        claimEmptySlot: async () => undefined,
+        switchEditableScreenplay: async () => ({ outcome: 'not-a-candidate' }),
+      },
+    });
+    try {
+      const response = await app.inject({ method: 'GET', url: '/api/entitlement' });
+      expect(response.statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/entitlement reports a restricted account with an unambiguous single candidate', async () => {
+    const app = await buildApp({
+      auth: entitlementAuth,
+      entitlements: {
+        getSnapshot: async () => ({
+          subscriptionStatus: undefined,
+          candidateScreenplayIds: ['screenplay-1'],
+          slot: null,
+          now: new Date('2026-09-01T00:00:00Z'),
+        }),
+        claimEmptySlot: async () => undefined,
+        switchEditableScreenplay: async () => ({ outcome: 'not-a-candidate' }),
+      },
+    });
+    try {
+      const response = await app.inject({ method: 'GET', url: '/api/entitlement', headers });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        tier: 'restricted',
+        editableScreenplayId: 'screenplay-1',
+        candidateScreenplayIds: ['screenplay-1'],
+        slotUpdatedAt: null,
+        cooldownEndsAt: null,
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/entitlement reports a lapsed account with several screenplays and no choice made', async () => {
+    const app = await buildApp({
+      auth: entitlementAuth,
+      entitlements: {
+        getSnapshot: async () => ({
+          subscriptionStatus: 'canceled',
+          candidateScreenplayIds: ['screenplay-1', 'screenplay-2'],
+          slot: null,
+          now: new Date('2026-09-01T00:00:00Z'),
+        }),
+        claimEmptySlot: async () => undefined,
+        switchEditableScreenplay: async () => ({ outcome: 'not-a-candidate' }),
+      },
+    });
+    try {
+      const response = await app.inject({ method: 'GET', url: '/api/entitlement', headers });
+      expect(response.json()).toEqual({
+        tier: 'restricted',
+        editableScreenplayId: null,
+        candidateScreenplayIds: ['screenplay-1', 'screenplay-2'],
+        slotUpdatedAt: null,
+        cooldownEndsAt: null,
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/entitlement reports the cooldown deadline derived from the slot timestamp', async () => {
+    const slotUpdatedAt = new Date('2026-09-01T00:00:00Z');
+    const app = await buildApp({
+      auth: entitlementAuth,
+      entitlements: {
+        getSnapshot: async () => ({
+          subscriptionStatus: 'canceled',
+          candidateScreenplayIds: ['screenplay-1', 'screenplay-2'],
+          slot: { screenplayId: 'screenplay-1', updatedAt: slotUpdatedAt },
+          now: new Date('2026-09-01T06:00:00Z'),
+        }),
+        claimEmptySlot: async () => undefined,
+        switchEditableScreenplay: async () => ({ outcome: 'not-a-candidate' }),
+      },
+    });
+    try {
+      const response = await app.inject({ method: 'GET', url: '/api/entitlement', headers });
+      expect(response.json()).toEqual({
+        tier: 'restricted',
+        editableScreenplayId: 'screenplay-1',
+        candidateScreenplayIds: ['screenplay-1', 'screenplay-2'],
+        slotUpdatedAt: '2026-09-01T00:00:00.000Z',
+        cooldownEndsAt: '2026-09-02T00:00:00.000Z',
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/entitlement reports a paid account with no candidate list or slot needed', async () => {
+    const app = await buildApp({
+      auth: entitlementAuth,
+      entitlements: {
+        getSnapshot: async () => ({
+          subscriptionStatus: 'active',
+          candidateScreenplayIds: ['screenplay-1', 'screenplay-2'],
+          slot: null,
+          now: new Date('2026-09-01T00:00:00Z'),
+        }),
+        claimEmptySlot: async () => undefined,
+        switchEditableScreenplay: async () => ({ outcome: 'not-a-candidate' }),
+      },
+    });
+    try {
+      const response = await app.inject({ method: 'GET', url: '/api/entitlement', headers });
+      expect(response.json()).toEqual({
+        tier: 'paid',
+        editableScreenplayId: null,
+        candidateScreenplayIds: [],
+        slotUpdatedAt: null,
+        cooldownEndsAt: null,
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('PUT /api/entitlement/editable-screenplay reports success with the store’s own resulting timestamp', async () => {
+    const updatedAt = new Date('2026-09-01T12:00:00Z');
+    const app = await buildApp({
+      auth: entitlementAuth,
+      entitlements: {
+        getSnapshot: async () => {
+          throw new Error('not exercised by this route');
+        },
+        claimEmptySlot: async () => undefined,
+        switchEditableScreenplay: async (_actorId, screenplayId) => ({
+          outcome: 'applied',
+          screenplayId,
+          updatedAt,
+        }),
+      },
+    });
+    try {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/api/entitlement/editable-screenplay',
+        headers,
+        payload: { screenplayId: 'ecf1118c-3a2e-4656-84e6-fce75c461710' },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        screenplayId: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
+        updatedAt: updatedAt.toISOString(),
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('PUT /api/entitlement/editable-screenplay reports 404 for a screenplay outside the candidate set, not a 403 that would leak its existence', async () => {
+    const app = await buildApp({
+      auth: entitlementAuth,
+      entitlements: {
+        getSnapshot: async () => {
+          throw new Error('not exercised by this route');
+        },
+        claimEmptySlot: async () => undefined,
+        switchEditableScreenplay: async () => ({ outcome: 'not-a-candidate' }),
+      },
+    });
+    try {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/api/entitlement/editable-screenplay',
+        headers,
+        payload: { screenplayId: 'ecf1118c-3a2e-4656-84e6-fce75c461710' },
+      });
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({ error: 'Screenplay not found' });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('PUT /api/entitlement/editable-screenplay reports 409 while the cooldown is active', async () => {
+    const app = await buildApp({
+      auth: entitlementAuth,
+      entitlements: {
+        getSnapshot: async () => {
+          throw new Error('not exercised by this route');
+        },
+        claimEmptySlot: async () => undefined,
+        switchEditableScreenplay: async () => ({ outcome: 'cooldown' }),
+      },
+    });
+    try {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/api/entitlement/editable-screenplay',
+        headers,
+        payload: { screenplayId: 'ecf1118c-3a2e-4656-84e6-fce75c461710' },
+      });
+      expect(response.statusCode).toBe(409);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
 describe('global per-client request cap', () => {
   // Distinct from Better Auth's own rate limiter (auth.test.ts, persistence.integration.test.ts):
   // this one applies ahead of every route, including `/api/health`, which is never behind
