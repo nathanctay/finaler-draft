@@ -1,18 +1,22 @@
 import { randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { resolve } from 'node:path';
-import { promisify } from 'node:util';
-import { Pool } from 'pg';
+import type { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  createIntegrationDatabase,
+  createIntegrationPool,
+  dropIntegrationTestDatabase,
+  planIntegrationTestDatabase,
+  runIntegrationMigrations,
+} from './integrationTestDatabase.js';
 import { createPostgresSubscriptionStore, type SubscriptionStore } from './stripeSubscriptions.js';
 
 // Follows persistence.integration.test.ts's pattern exactly: a fresh, throwaway database per
-// suite run, migrated with the project's own tooling, torn down afterward. Skips entirely
-// without TEST_DATABASE_URL, which is expected outside CI/a developer who has opted in.
+// suite run, migrated with the project's own tooling, torn down afterward (see
+// integrationTestDatabase.ts). Skips entirely without TEST_DATABASE_URL, which is expected
+// outside CI/a developer who has opted in.
 const adminUrl = process.env.TEST_DATABASE_URL;
-const executeFile = promisify(execFile);
-const databaseName = `finaler_draft_test_${randomUUID().replaceAll('-', '')}`;
-const databaseUrl = adminUrl ? databaseUrlFor(adminUrl, databaseName) : undefined;
+const planned = adminUrl ? planIntegrationTestDatabase(adminUrl) : undefined;
+const databaseUrl = planned?.databaseUrl;
 let admin: Pool | undefined;
 let pool: Pool | undefined;
 let store: SubscriptionStore | undefined;
@@ -20,12 +24,12 @@ let databaseCreated = false;
 
 describe.skipIf(!databaseUrl)('Stripe subscription projection (PostgreSQL)', () => {
   beforeAll(async () => {
-    admin = new Pool({ connectionString: adminUrl });
-    await admin.query(`create database ${quoteIdentifier(databaseName)}`);
+    admin = createIntegrationPool({ connectionString: adminUrl });
+    await createIntegrationDatabase(admin, planned!.databaseName);
     databaseCreated = true;
-    await runMigrations();
+    await runIntegrationMigrations(databaseUrl!);
 
-    pool = new Pool({ connectionString: databaseUrl });
+    pool = createIntegrationPool({ connectionString: databaseUrl });
     store = createPostgresSubscriptionStore(pool);
     await pool.query(
       `insert into "user" (id, name, email, email_verified, created_at, updated_at)
@@ -38,11 +42,7 @@ describe.skipIf(!databaseUrl)('Stripe subscription projection (PostgreSQL)', () 
   afterAll(async () => {
     await pool?.end();
     if (admin && databaseCreated) {
-      await admin.query(
-        `select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and pid <> pg_backend_pid()`,
-        [databaseName],
-      );
-      await admin.query(`drop database if exists ${quoteIdentifier(databaseName)}`);
+      await dropIntegrationTestDatabase(admin, planned!.databaseName);
     }
     await admin?.end();
   });
@@ -344,20 +344,3 @@ describe.skipIf(!databaseUrl)('Stripe subscription projection (PostgreSQL)', () 
     expect(second).toBe('duplicate');
   });
 });
-
-function databaseUrlFor(url: string, database: string) {
-  const parsed = new URL(url);
-  parsed.pathname = `/${database}`;
-  return parsed.toString();
-}
-
-function quoteIdentifier(identifier: string) {
-  return `"${identifier.replaceAll('"', '""')}"`;
-}
-
-async function runMigrations() {
-  await executeFile('pnpm', ['--filter', '@finaler-draft/database', 'db:migrate'], {
-    cwd: resolve(import.meta.dirname, '../../..'),
-    env: { ...process.env, DATABASE_URL: databaseUrl },
-  });
-}

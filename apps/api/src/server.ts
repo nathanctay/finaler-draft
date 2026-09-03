@@ -11,6 +11,12 @@ import { createStripeClient } from './stripeClient.js';
 import { createStripeIpAllowlist, fetchStripeWebhookIps } from './stripeIpAllowlist.js';
 import { createPostgresSubscriptionStore } from './stripeSubscriptions.js';
 
+// High enough that no realistic system-test run -- three Playwright workers sharing one loopback
+// address -- ever reaches it, while still leaving the limiter itself registered and exercised (see
+// the comment at its use below). Not `Infinity` or `Number.MAX_SAFE_INTEGER`: `@fastify/rate-limit`
+// treats `max` as a bucket size it allocates per key, and this stays a plain, readable number.
+const SYSTEM_TEST_API_RATE_LIMIT_MAX = 1_000_000;
+
 try {
   const systemTestMode = process.env.FINALER_SYSTEM_TEST === 'true';
   if (shouldLoadRootEnvironment(process.env)) {
@@ -28,8 +34,24 @@ try {
     // `@finaler-draft/server-config`'s constants, but only this wiring makes
     // `API_RATE_LIMIT_MAX`/`API_RATE_LIMIT_WINDOW_MS` actually adjustable by an operator --
     // without it, setting either environment variable would parse successfully and do nothing.
+    //
+    // In system-test mode the cap itself is raised, for the same reason Better Auth's own limiter
+    // is disabled outright a few lines below: the browser system suite runs several Playwright
+    // workers in parallel, all issuing requests from one loopback address, so this per-client cap
+    // measures an artifact of the test harness (three workers sharing an IP) rather than the
+    // single-client abuse it exists to defend against. Measured directly: a branch adding more
+    // request volume per test pushed the suite over the production default (300/60s), failing the
+    // same test deterministically at the default while passing 18/18 with the cap raised.
+    //
+    // Raised, not disabled -- unlike Better Auth's limiter below, which is a boolean switch with no
+    // middle ground. `fastifyRateLimit` stays registered ahead of every route in system-test mode
+    // too, so `keyGenerator`, its header handling, and its 429 response shape all still run on
+    // every system-test request; only the ceiling moves high enough that no real test run reaches
+    // it. The production bound keeps its own dedicated coverage: app.test.ts's "global per-client
+    // request cap" builds an instance with an explicit low cap and asserts the 429, independent of
+    // both this value and `API_RATE_LIMIT_MAX`'s default.
     rateLimit: {
-      max: environment.API_RATE_LIMIT_MAX,
+      max: systemTestMode ? SYSTEM_TEST_API_RATE_LIMIT_MAX : environment.API_RATE_LIMIT_MAX,
       timeWindowMs: environment.API_RATE_LIMIT_WINDOW_MS,
     },
   };
