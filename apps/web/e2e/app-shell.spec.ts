@@ -222,3 +222,100 @@ test('the not-saving dot resolves to a visibly different colour from the saving 
   expect(colours.attention).not.toBe('rgba(0, 0, 0, 0)');
   expect(colours.attention).not.toBe(colours.neutral);
 });
+
+/**
+ * `.readonly-banner` (App.tsx, the entitlement-driven read-only state) is an extra grid child
+ * `.application`'s five-row `grid-template-rows` (styles.css) has no track budgeted for --
+ * `.application.has-readonly-banner` is the modifier class that inserts an extra `auto` row for
+ * it. This shipped broken once already: opening a real lapsed screenplay against a real webhook
+ * rendered the toolbar stretched to fill the screen, the manuscript gone, and the navigator and
+ * inspector crushed against the bottom edge -- the banner had silently consumed the toolbar's
+ * row, shoving every row after it down by one. jsdom cannot see this class of defect at all (it
+ * does not run layout), which is exactly why `App.test.tsx`'s otherwise-thorough entitlement
+ * read-only coverage never caught it -- this needs a real browser with the real stylesheet,
+ * following this file's own "not-saving dot" test just above for the identical reason.
+ */
+async function buildShellWithReadonlyBanner(page: Page, withBanner: boolean): Promise<void> {
+  await page.evaluate((includeBanner) => {
+    document.body.innerHTML = '';
+
+    const application = document.createElement('main');
+    application.className = includeBanner ? 'application has-readonly-banner' : 'application';
+
+    const titlebar = document.createElement('header');
+    titlebar.className = 'titlebar';
+    titlebar.textContent = 'Finaler Draft';
+
+    const menubar = document.createElement('nav');
+    menubar.className = 'menubar';
+    menubar.textContent = 'File Edit View';
+
+    const children = [titlebar, menubar];
+
+    if (includeBanner) {
+      // Matches App.tsx's actual DOM position: directly before `.toolbar`, so grid
+      // auto-placement (row tracks are consumed in document order) lines up with the CSS.
+      const banner = document.createElement('div');
+      banner.className = 'readonly-banner';
+      banner.setAttribute('role', 'status');
+      const message = document.createElement('p');
+      message.textContent =
+        'Your subscription has ended and a different screenplay is currently your account’s editable one.';
+      const button = document.createElement('button');
+      button.className = 'primary-button';
+      button.type = 'button';
+      button.textContent = 'Make this one editable';
+      banner.append(message, button);
+      children.push(banner);
+    }
+
+    const toolbar = document.createElement('section');
+    toolbar.className = 'toolbar';
+    toolbar.textContent = 'Tools';
+
+    const workspace = document.createElement('div');
+    workspace.className = 'workspace';
+
+    const statusbar = document.createElement('footer');
+    statusbar.className = 'statusbar';
+    statusbar.textContent = 'Save state';
+
+    children.push(toolbar, workspace, statusbar);
+    application.append(...children);
+    document.body.appendChild(application);
+  }, withBanner);
+}
+
+test('the read-only banner gets its own grid row instead of displacing the toolbar into the workspace', async ({
+  page,
+}) => {
+  await buildShellWithReadonlyBanner(page, true);
+
+  const measurements = await page.evaluate(() => {
+    function rect(selector: string) {
+      const el = document.querySelector(selector);
+      if (!el) throw new Error(`Missing ${selector} in the injected fixture.`);
+      return el.getBoundingClientRect();
+    }
+    return {
+      banner: rect('.readonly-banner'),
+      toolbar: rect('.toolbar'),
+      workspace: rect('.workspace'),
+      statusbar: rect('.statusbar'),
+    };
+  });
+
+  // The defect, verbatim: without `.has-readonly-banner`, the toolbar's real rendered height is
+  // the workspace row's `minmax(0, 1fr)` -- hundreds of pixels, "stretched to fill the screen."
+  // A correctly row-budgeted toolbar stays close to its own 47px track.
+  expect(measurements.toolbar.height).toBeLessThan(80);
+  expect(measurements.toolbar.height).toBeGreaterThan(20);
+  // The banner sits above the toolbar, not on top of it or past it.
+  expect(measurements.banner.bottom).toBeLessThanOrEqual(measurements.toolbar.top + 1);
+  // The workspace -- "the manuscript gone... crushed against the bottom edge" -- gets real room,
+  // not the status bar's 30px.
+  expect(measurements.workspace.height).toBeGreaterThan(200);
+  // The status bar stays inside the viewport instead of overflowing into an implicit row past
+  // the end of the track list.
+  expect(measurements.statusbar.bottom).toBeLessThanOrEqual(VIEWPORT.height);
+});

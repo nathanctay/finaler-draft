@@ -12,7 +12,7 @@ import {
   type TitlePage,
 } from '@finaler-draft/screenplay';
 import { App } from './App.js';
-import { ApiError, api, type PersistedScreenplay } from './api.js';
+import { ApiError, MessageApiError, api, type PersistedScreenplay } from './api.js';
 import { pageStackMinHeightIn } from './pagination.js';
 import {
   findScreenplayBlockPosition,
@@ -2626,5 +2626,268 @@ describe('document settings', () => {
     expect(screen.queryByRole('alert')).toBeNull();
 
     consoleError.mockRestore();
+  });
+});
+
+describe('entitlement-driven read-only', () => {
+  const script = persistedScreenplay(
+    '2222aaaa-0000-4000-8000-000000000002',
+    'A Working Draft',
+    'INT. APARTMENT - MORNING',
+  );
+  const scriptBlockId = '2222aaaa-8d05-4e6e-bac7-e471e8df33a1';
+
+  it('ignores a change event on the element selector even though the disabled attribute alone might not', async () => {
+    // The `disabled` attribute (asserted elsewhere) is what stops a real user, but
+    // `convertActiveScreenplayBlock` dispatches a ProseMirror transaction directly and does not
+    // consult it -- `changeElement`'s own `!editingAllowed` guard is what actually stops this,
+    // and `fireEvent.change` (unlike `userEvent`, which respects `disabled`) is what proves the
+    // guard itself is load-bearing rather than merely mirroring the DOM attribute.
+    render(<App entitlementReadOnly={{ message: 'Read-only for this test.' }} initial={script} />);
+    const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Active screenplay element' }), {
+      target: { value: 'shot' },
+    });
+
+    expect(getBlock(canvas, scriptBlockId)).toHaveAttribute(
+      'data-screenplay-element',
+      'scene_heading',
+    );
+  });
+
+  it('renders visibly read-only when entitlement forbids editing, even though the schema is fully supported', async () => {
+    render(
+      <App
+        entitlementReadOnly={{
+          message:
+            'Your subscription has ended and a different screenplay is currently your account’s editable one.',
+        }}
+        initial={script}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    // The mutation that matters most: reusing the exact seam the schema-unsupported case already
+    // proves itself with (see "renders unsupported persisted snapshots as read-only" above).
+    // Flipping `editable: editingAllowed` back to `editable: true` for this reason is the
+    // work-loss path this whole slice exists to close, and this is what catches it.
+    expect(screen.getByRole('textbox', { name: 'Screenplay editing canvas' })).not.toHaveAttribute(
+      'contenteditable',
+      'true',
+    );
+    // Unlike the schema-unsupported case (which renders `unavailableEditorContent`, an empty
+    // document), the actual text stays fully present and legible -- this is what "visibly
+    // read-only", not a blank state or an error page, means. Scoped to the canvas itself: the
+    // same heading text is also echoed, separately, by the footer's "Active scene" indicator.
+    expect(
+      within(screen.getByRole('textbox', { name: 'Screenplay editing canvas' })).getByText(
+        'INT. APARTMENT - MORNING',
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/Your subscription has ended and a different screenplay/),
+    ).toBeVisible();
+    expect(
+      screen.getByText('Read-only · make this screenplay editable to save changes here'),
+    ).toBeVisible();
+    // No action offered: the route omits `onMakeEditable` when this screenplay isn't a candidate
+    // the account could choose, and the banner must not offer a button that could only fail.
+    expect(
+      screen.queryByRole('button', { name: 'Make this one editable' }),
+    ).not.toBeInTheDocument();
+    // `.application`'s own five-row grid (styles.css) budgets no track for `.readonly-banner` --
+    // `has-readonly-banner` is the modifier class that inserts one. This is the App.tsx-side half
+    // of that mechanism: jsdom cannot verify the CSS grid itself renders correctly (it does not
+    // run layout at all -- see apps/web/e2e/app-shell.spec.ts's real-browser test for that half),
+    // but it can verify the class the CSS keys off is actually applied. Losing this class was the
+    // real, reported defect: a real lapsed screenplay rendered with the toolbar stretched to fill
+    // the screen and the manuscript crushed out of view.
+    expect(screen.getByRole('main')).toHaveClass('has-readonly-banner');
+  });
+
+  it('does not add the readonly-banner grid row when the account can edit', async () => {
+    render(<App initial={script} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    expect(screen.getByRole('main')).toHaveClass('application');
+    expect(screen.getByRole('main')).not.toHaveClass('has-readonly-banner');
+  });
+
+  it('disables every other affordance that could mutate the document -- undo/redo, the element selector, and Document settings -- not only typing', async () => {
+    const user = userEvent.setup();
+    render(<App entitlementReadOnly={{ message: 'Read-only for this test.' }} initial={script} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    expect(screen.getByRole('combobox', { name: 'Active screenplay element' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Undo local change' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Redo local change' })).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    expect(screen.getByRole('menuitem', { name: 'Document settings…' })).toBeDisabled();
+  });
+
+  it('disables undo even when local history already exists, once entitlement flips to read-only mid-session', async () => {
+    // Distinct from the test above: there, `editor.can().undo()` is false anyway (no edits were
+    // ever made), so `disabled={!editingAllowed || !editor?.can().undo()}` could satisfy that
+    // assertion even with the `!editingAllowed` half deleted. This is the scenario that half
+    // actually exists for -- the route's own live `useQuery(['entitlement'])` can flip
+    // `entitlementReadOnly` on mid-session (a switch made elsewhere, or the account lapsing)
+    // without remounting `App` or discarding whatever undo history already exists.
+    const user = userEvent.setup();
+    const { rerender } = render(<App initial={script} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'shot',
+    );
+    expect(screen.getByRole('button', { name: 'Undo local change' })).toBeEnabled();
+
+    rerender(
+      <App entitlementReadOnly={{ message: 'Read-only for this test.' }} initial={script} />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Undo local change' })).toBeDisabled();
+  });
+
+  it('offers "Make this one editable" when the route provides the action, and calls it on click', async () => {
+    const onMakeEditable = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <App
+        entitlementReadOnly={{
+          message: 'Your subscription has ended, and you haven’t chosen yet.',
+          onMakeEditable,
+        }}
+        initial={script}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'Make this one editable' }));
+
+    expect(onMakeEditable).toHaveBeenCalledOnce();
+  });
+
+  it('surfaces the server’s own explanation, inline, when the make-editable action fails', async () => {
+    const onMakeEditable = vi
+      .fn()
+      .mockRejectedValue(new MessageApiError(409, 'Try again in 6 hours.'));
+    const user = userEvent.setup();
+    render(
+      <App
+        entitlementReadOnly={{
+          message: 'Your subscription has ended, and you haven’t chosen yet.',
+          onMakeEditable,
+        }}
+        initial={script}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'Make this one editable' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Try again in 6 hours.');
+  });
+
+  it('disables the make-editable button and states when it clears, rather than inviting a click that cannot succeed, when the account is already known to be in cooldown', async () => {
+    const onMakeEditable = vi.fn().mockResolvedValue(undefined);
+    render(
+      <App
+        entitlementReadOnly={{
+          cooldownUntil: '9/4/2026, 3:15:00 PM',
+          message:
+            'Your subscription has ended, and a different screenplay is currently your account’s editable one.',
+          onMakeEditable,
+        }}
+        initial={script}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const button = screen.getByRole('button', { name: 'Make this one editable' });
+    expect(button).toBeDisabled();
+    expect(
+      screen.getByText('You can switch to a different screenplay again at 9/4/2026, 3:15:00 PM.'),
+    ).toBeVisible();
+    // A real browser refuses to dispatch a click at all on a disabled button -- this proves the
+    // handler stays unreachable through jsdom's own enforcement of that, not merely that the
+    // attribute is present.
+    fireEvent.click(button);
+    expect(onMakeEditable).not.toHaveBeenCalled();
+  });
+
+  it('yields to the up-front cooldown notice, not a redundant raw error, once the route refetches after a failed click lands inside a cooldown', async () => {
+    const onMakeEditable = vi
+      .fn()
+      .mockRejectedValue(
+        new MessageApiError(
+          409,
+          'The editable screenplay was changed recently; try again once the cooldown ends',
+        ),
+      );
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <App
+        entitlementReadOnly={{
+          message:
+            'Your subscription has ended, and a different screenplay is currently your account’s editable one.',
+          onMakeEditable,
+        }}
+        initial={script}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'Make this one editable' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The editable screenplay was changed recently',
+    );
+
+    // The route's own `onMakeEditable` invalidates entitlement on failure too (see its own
+    // comment), so the very next render this simulates carries the fresh `cooldownUntil` --
+    // App.tsx must show that, not the stale one-off error, once both would otherwise say the
+    // same thing.
+    rerender(
+      <App
+        entitlementReadOnly={{
+          cooldownUntil: '9/4/2026, 3:15:00 PM',
+          message:
+            'Your subscription has ended, and a different screenplay is currently your account’s editable one.',
+          onMakeEditable,
+        }}
+        initial={script}
+      />,
+    );
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(
+      screen.getByText('You can switch to a different screenplay again at 9/4/2026, 3:15:00 PM.'),
+    ).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Make this one editable' })).toBeDisabled();
+  });
+
+  it('leaves a title page fully readable but not editable while read-only', async () => {
+    const titlePageId = '00000000-0000-4000-8000-0000000000f2';
+    const withTitlePage: PersistedScreenplay = {
+      ...script,
+      screenplay: {
+        ...script.screenplay,
+        titlePages: [createDefaultTitlePage(titlePageId, 'A Working Draft')],
+      },
+    };
+    render(
+      <App entitlementReadOnly={{ message: 'Read-only for this test.' }} initial={withTitlePage} />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const titleField = screen.getByRole('textbox', { name: 'Title page: title' });
+    expect(titleField).toHaveTextContent('A Working Draft');
+    // The title page's fields are bare `contentEditable` divs, entirely outside Tiptap's own
+    // `editable` flag -- see titlePageEditor.tsx's own comment on why this needed its own guard.
+    expect(titleField).not.toHaveAttribute('contenteditable', 'true');
+    expect(screen.queryByRole('button', { name: 'Add author line' })).not.toBeInTheDocument();
   });
 });

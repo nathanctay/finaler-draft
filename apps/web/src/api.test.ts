@@ -58,6 +58,7 @@ describe('API client', () => {
           cooldownEndsAt: null,
         }),
       )
+      .mockResolvedValueOnce(response({ screenplayId, updatedAt: '2026-09-02T00:00:00.000Z' }))
       .mockResolvedValueOnce(response({ url: 'https://checkout.stripe.test/cs_test_1' }))
       .mockResolvedValueOnce(response({ url: 'https://billing.stripe.test/bps_test_1' }))
       .mockResolvedValueOnce(
@@ -121,6 +122,10 @@ describe('API client', () => {
       slotUpdatedAt: null,
       cooldownEndsAt: null,
     });
+    await expect(api.switchEditableScreenplay(screenplayId)).resolves.toEqual({
+      screenplayId,
+      updatedAt: '2026-09-02T00:00:00.000Z',
+    });
     await expect(api.createCheckoutSession('monthly')).resolves.toEqual({
       url: 'https://checkout.stripe.test/cs_test_1',
     });
@@ -141,7 +146,7 @@ describe('API client', () => {
       annual: { amount: 5000, currency: 'usd', interval: 'year' },
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(20);
+    expect(fetchMock).toHaveBeenCalledTimes(21);
     expect(fetchMock.mock.calls[1]).toEqual([
       '/api/auth/sign-in/email',
       expect.objectContaining({ credentials: 'include', method: 'POST' }),
@@ -179,18 +184,25 @@ describe('API client', () => {
       expect.objectContaining({ credentials: 'include' }),
     ]);
     expect(fetchMock.mock.calls[16]).toEqual([
+      '/api/entitlement/editable-screenplay',
+      expect.objectContaining({
+        body: JSON.stringify({ screenplayId }),
+        method: 'PUT',
+      }),
+    ]);
+    expect(fetchMock.mock.calls[17]).toEqual([
       '/api/billing/checkout-session',
       expect.objectContaining({ body: JSON.stringify({ plan: 'monthly' }), method: 'POST' }),
     ]);
-    expect(fetchMock.mock.calls[17]).toEqual([
+    expect(fetchMock.mock.calls[18]).toEqual([
       '/api/billing/portal-session',
       expect.objectContaining({ method: 'POST' }),
     ]);
-    expect(fetchMock.mock.calls[18]).toEqual([
+    expect(fetchMock.mock.calls[19]).toEqual([
       '/api/billing/subscription',
       expect.objectContaining({ credentials: 'include' }),
     ]);
-    expect(fetchMock.mock.calls[19]).toEqual([
+    expect(fetchMock.mock.calls[20]).toEqual([
       '/api/billing/plans',
       expect.objectContaining({ credentials: 'include' }),
     ]);
@@ -339,6 +351,42 @@ describe('API client', () => {
       await expect(
         api.createScreenplay(projectId, 'Draft', screenplayFixture),
       ).rejects.toMatchObject({ serverMessage: 'Request failed (500)', status: 500 });
+    });
+  });
+
+  describe('switchEditableScreenplay error reporting', () => {
+    // 404 ("not-a-candidate"): app.ts deliberately does not distinguish "not a candidate" from
+    // "does not exist", the same information-hiding convention the rest of this API already
+    // follows -- App.tsx's read-only banner reads `.serverMessage` straight into its own inline
+    // error, so it must survive the round trip verbatim.
+    it('keeps the server-provided message from a 404 not-a-candidate response', async () => {
+      fetchMock.mockResolvedValue(response({ error: 'Screenplay not found' }, false, 404));
+      await expect(api.switchEditableScreenplay(screenplayId)).rejects.toMatchObject({
+        serverMessage: 'Screenplay not found',
+        status: 404,
+      });
+      await expect(api.switchEditableScreenplay(screenplayId)).rejects.toBeInstanceOf(
+        MessageApiError,
+      );
+    });
+
+    // 409 (the switch-slot cooldown): the one failure a writer using "Make this one editable" a
+    // second time within 24 hours will actually see.
+    it('keeps the server-provided message from a 409 cooldown response', async () => {
+      fetchMock.mockResolvedValue(
+        response(
+          {
+            error: 'The editable screenplay was changed recently; try again once the cooldown ends',
+          },
+          false,
+          409,
+        ),
+      );
+      await expect(api.switchEditableScreenplay(screenplayId)).rejects.toMatchObject({
+        serverMessage:
+          'The editable screenplay was changed recently; try again once the cooldown ends',
+        status: 409,
+      });
     });
   });
 });

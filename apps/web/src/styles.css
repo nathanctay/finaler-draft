@@ -121,6 +121,25 @@ select:focus-visible,
   background: var(--surface-08);
 }
 
+/* `.readonly-banner` (App.tsx) is an extra grid child, present only for an entitlement-driven
+   read-only screenplay -- `.application`'s own five-row track list above has no row budgeted for
+   it. Without this modifier class, the banner would silently occupy the toolbar's 47px row,
+   shoving the toolbar into the workspace's `minmax(0, 1fr)` row, the workspace into the status
+   bar's 30px row, and the status bar into an implicit, unstyled row past the end of the track
+   list -- the exact broken layout a real lapsed-subscription test run surfaced. `auto`, not a
+   fixed pixel height, because the banner's message length (and therefore its wrapped line count)
+   varies with which entitlement state produced it -- see the two messages in
+   $projectId.screenplays.$screenplayId.tsx. Inserted between the menubar and the toolbar rows,
+   matching the banner's actual position in the DOM (App.tsx renders it directly before
+   `.toolbar`), so grid auto-placement (row tracks are consumed in document order) lines up with
+   this list without any child needing an explicit `grid-row`. The `max-width: 600px` copy of the
+   base rule below must gain the identical extra `auto` row for the same reason -- the two are
+   listed together at the top of this file's own history for exactly that kind of drift risk.
+*/
+.application.has-readonly-banner {
+  grid-template-rows: 38px 31px auto 47px minmax(0, 1fr) 30px;
+}
+
 .titlebar {
   display: flex;
   align-items: center;
@@ -1601,6 +1620,62 @@ select:focus-visible,
   margin: 0;
 }
 
+/* The lapse-chooser banner (routes/projects/index.tsx): shown on the projects page when a
+   restricted account has more than one candidate screenplay and hasn't chosen which one stays
+   editable yet. Same neutral surface and shape as `.upgrade-banner` (both are advisory, not
+   errors), styled as a standalone block rather than `.upgrade-banner`'s row layout -- there is no
+   paired action button here, only explanatory text, since the actual choice is made from inside a
+   screenplay (App.tsx's own read-only banner), not from this page. */
+.lapse-chooser-banner {
+  margin-top: 16px;
+  border: 1px solid var(--border-04);
+  border-radius: 2px;
+  background: var(--surface-06);
+  padding: 10px 14px;
+  color: var(--text-17);
+  font-size: 12px;
+}
+
+.lapse-chooser-banner p {
+  margin: 0;
+}
+
+/* The entitlement-driven read-only banner (App.tsx): shown whenever this screenplay is not the
+   signed-in account's editable one (plan.md's lapse policy). A full-width bar sitting between the
+   menubar and the toolbar, not `.upgrade-banner`'s inline-with-content treatment -- this needs to
+   be visible regardless of scroll position or which panels are open, the same reasoning
+   `.menubar`/`.toolbar` themselves are full width for. Neutral surface, not `--feedback-error`:
+   this is an explained state with a working way out, not a failure. */
+.readonly-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  border-bottom: 1px solid var(--border-04);
+  background: var(--surface-06);
+  padding: 10px 14px;
+  color: var(--text-17);
+  font-size: 12px;
+}
+
+.readonly-banner p {
+  margin: 0;
+}
+
+.readonly-banner .field-error {
+  flex-basis: 100%;
+}
+
+/* The preemptive cooldown notice (App.tsx): shares `.field-error`'s full-width wrap behaviour
+   above (a second line under the message/button row) but not its colour -- this is expected,
+   known-in-advance information, not a failure. */
+.readonly-banner-cooldown {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--text-17);
+}
+
 .upgrade-dialog-plans {
   display: flex;
   justify-content: flex-start;
@@ -2086,6 +2161,13 @@ select:focus-visible,
 @media (max-width: 600px) {
   .application {
     grid-template-rows: 38px 31px 42px minmax(0, 1fr) 30px;
+  }
+
+  /* The narrow-viewport counterpart to `.application.has-readonly-banner` above -- same extra
+     `auto` row for the banner, inserted in the same position, over this breakpoint's own 42px
+     (not 47px) toolbar-row override. */
+  .application.has-readonly-banner {
+    grid-template-rows: 38px 31px auto 42px minmax(0, 1fr) 30px;
   }
 
   .toolbar {

@@ -19,6 +19,22 @@ function jsonResponse(body: unknown, ok = true, status = ok ? 200 : 500): Respon
   return { json: async () => body, ok, status } as unknown as Response;
 }
 
+// This page now fetches `/api/entitlement` unconditionally (routes/projects/index.tsx's own
+// lapse-chooser banner) alongside `/api/projects`, so every `fetchMock` implementation below
+// needs an answer for it -- paid, so none of these delete/undo-focused tests incidentally render
+// the banner. `entitlement-driven editability` in
+// routes/projects/index.test.tsx (the sibling suite that keeps the mocked react-query) is where
+// the banner's own content and states are actually exercised.
+function entitlementResponse(): Response {
+  return jsonResponse({
+    tier: 'paid',
+    editableScreenplayId: null,
+    candidateScreenplayIds: [],
+    slotUpdatedAt: null,
+    cooldownEndsAt: null,
+  });
+}
+
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -59,6 +75,9 @@ describe('projects page: delete and undo', () => {
       if (url === `/api/projects/${projectId}/restore` && method === 'POST') {
         deleted = false;
         return jsonResponse({ id: projectId, title: 'Feature' });
+      }
+      if (url === '/api/entitlement' && method === 'GET') {
+        return entitlementResponse();
       }
       return jsonResponse([]);
     });
@@ -120,8 +139,11 @@ describe('projects page: delete and undo', () => {
     // Simulate an incidental refetch (e.g. window focus regain) that the writer did not cause.
     // The delete already succeeded server-side, so the fresh GET genuinely omits the row -- the
     // Undo affordance must survive this via the orphaned-id path, not disappear along with it.
+    // Four calls, not three: the page's own `['entitlement']` query (the lapse-chooser banner)
+    // fires once on mount alongside `['projects']`, and this invalidate only targets `['projects']`
+    // -- entitlement's own single fetch is unaffected either way.
     await act(() => queryClient.invalidateQueries({ queryKey: ['projects'] }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
     expect(screen.getByText('Feature — Deleted')).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: 'Undo delete of Feature' }));
@@ -141,6 +163,9 @@ describe('projects page: delete and undo', () => {
       }
       if (url === `/api/projects/${projectId}` && method === 'DELETE') {
         return jsonResponse({ error: 'nope' }, false, 403);
+      }
+      if (url === '/api/entitlement' && method === 'GET') {
+        return entitlementResponse();
       }
       return jsonResponse([]);
     });
@@ -181,6 +206,9 @@ describe('projects page: delete and undo', () => {
       }
       if (url === `/api/projects/${projectId}/restore` && method === 'POST') {
         return jsonResponse({ error: 'nope' }, false, 409);
+      }
+      if (url === '/api/entitlement' && method === 'GET') {
+        return entitlementResponse();
       }
       return jsonResponse([]);
     });
@@ -229,6 +257,9 @@ describe('projects page: delete and undo', () => {
         deleted = false;
         return jsonResponse({ id: projectId, title: 'Feature' });
       }
+      if (url === '/api/entitlement' && method === 'GET') {
+        return entitlementResponse();
+      }
       return jsonResponse([]);
     });
     renderPage();
@@ -254,19 +285,30 @@ describe('projects page: delete and undo', () => {
     expect(screen.queryByRole('link', { name: /deleted/i })).not.toBeInTheDocument();
   });
 
-  // The account menu no longer fetches entitlement state at all (routes/projects/index.tsx's
-  // "Manage Subscription" entry is a static link to routes/billing.subscription.tsx, which owns
-  // that fetch itself) -- an earlier version of this slice deferred an entitlement fetch until
-  // the menu was opened, to fix a real E2E regression an eager, unconditional fetch caused; that
-  // deferral is now moot because the fetch was removed from this page entirely, not merely
-  // delayed. This test proves the account menu makes no billing-related request of its own.
-  it('never fetches entitlement or billing state from the account menu itself', async () => {
+  // The account menu's own "Manage Subscription" entry is a static link to
+  // routes/billing.subscription.tsx, which owns the billing-subscription/plans fetches itself --
+  // opening the menu triggers none of its own. This page's own `/api/entitlement` fetch (the
+  // lapse-chooser banner, routes/projects/index.tsx) is a separate, page-level concern: it fires
+  // once on mount regardless of the menu, which is exactly what the "no extra fetch" assertion
+  // below checks for, rather than asserting the endpoint is never called at all -- a real
+  // regression check found and fixed here once already (progress/billing-checkout.md's "A
+  // regression, found and fixed": an earlier, eager, unconditional entitlement fetch on this same
+  // page measurably slowed `test:system:persistence` under Playwright's 3-worker contention,
+  // since this is the one page nearly every system-suite flow touches at least once). The banner
+  // reintroduces an unconditional fetch by necessity -- see routes/projects/index.tsx's own
+  // comment on why, and its `staleTime` -- so this test's job now is narrower: prove the menu
+  // itself adds nothing beyond what the page already fetches.
+  it('opening the account menu fetches nothing beyond the page’s own entitlement fetch', async () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByText('Feature');
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith('/api/entitlement', expect.anything()),
+    );
+    const callsBeforeMenuOpen = fetchMock.mock.calls.length;
     await user.click(screen.getByRole('button', { name: 'Account menu' }));
     expect(screen.getByRole('menuitem', { name: 'Manage Subscription' })).toBeVisible();
-    expect(fetchMock).not.toHaveBeenCalledWith('/api/entitlement', expect.anything());
+    expect(fetchMock.mock.calls.length).toBe(callsBeforeMenuOpen);
     expect(fetchMock).not.toHaveBeenCalledWith('/api/billing/subscription', expect.anything());
   });
 });
