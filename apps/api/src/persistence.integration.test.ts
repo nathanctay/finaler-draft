@@ -1,19 +1,24 @@
 import { randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { resolve } from 'node:path';
-import { promisify } from 'node:util';
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createAuth } from './auth.js';
 import { buildApp } from './app.js';
+import {
+  createIntegrationDatabase,
+  createIntegrationPool,
+  dropIntegrationTestDatabase,
+  planIntegrationTestDatabase,
+  runIntegrationMigrations,
+  suppressPoolShutdownErrors,
+} from './integrationTestDatabase.js';
 import type { MailMessage, MailPort } from './mail.js';
 import { createPostgresProjectStore } from './projects.js';
 
+// See integrationTestDatabase.ts for what this shared setup/teardown fixes and why.
 const adminUrl = process.env.TEST_DATABASE_URL;
-const executeFile = promisify(execFile);
-const databaseName = `finaler_draft_test_${randomUUID().replaceAll('-', '')}`;
-const databaseUrl = adminUrl ? databaseUrlFor(adminUrl, databaseName) : undefined;
+const planned = adminUrl ? planIntegrationTestDatabase(adminUrl) : undefined;
+const databaseUrl = planned?.databaseUrl;
 let admin: Pool | undefined;
 let app: Awaited<ReturnType<typeof buildApp>> | undefined;
 let pool: Pool | undefined;
@@ -36,11 +41,12 @@ const mail: MailPort = {
 
 describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
   beforeAll(async () => {
-    admin = new Pool({ connectionString: adminUrl });
-    await admin.query(`create database ${quoteIdentifier(databaseName)}`);
+    admin = createIntegrationPool({ connectionString: adminUrl });
+    await createIntegrationDatabase(admin, planned!.databaseName);
     databaseCreated = true;
-    await runMigrations();
-    await runMigrations();
+    // Preserved as two calls, matching this suite's pre-existing behavior.
+    await runIntegrationMigrations(databaseUrl!);
+    await runIntegrationMigrations(databaseUrl!);
 
     const authentication = createAuth(
       {
@@ -56,7 +62,10 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       // this call site, rather than the real default being loosened to accommodate this suite.
       { mail, rateLimitEnabled: false },
     );
-    pool = authentication.pool;
+    // `authentication.pool` is constructed inside `createAuth` (via `@finaler-draft/database`'s
+    // `createDatabase`), not through `createIntegrationPool` above, so it needs the shutdown-error
+    // listener attached explicitly here instead.
+    pool = suppressPoolShutdownErrors(authentication.pool);
     store = createPostgresProjectStore(pool);
     app = await buildApp({
       auth: {
@@ -83,11 +92,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     await app?.close();
     await pool?.end();
     if (admin && databaseCreated) {
-      await admin.query(
-        `select pg_terminate_backend(pid) from pg_stat_activity where datname = $1 and pid <> pg_backend_pid()`,
-        [databaseName],
-      );
-      await admin.query(`drop database if exists ${quoteIdentifier(databaseName)}`);
+      await dropIntegrationTestDatabase(admin, planned!.databaseName);
     }
     await admin?.end();
   });
@@ -1401,15 +1406,4 @@ function databaseUrlFor(url: string, database: string) {
   const parsed = new URL(url);
   parsed.pathname = `/${database}`;
   return parsed.toString();
-}
-
-function quoteIdentifier(identifier: string) {
-  return `"${identifier.replaceAll('"', '""')}"`;
-}
-
-async function runMigrations() {
-  await executeFile('pnpm', ['--filter', '@finaler-draft/database', 'db:migrate'], {
-    cwd: resolve(import.meta.dirname, '../../..'),
-    env: { ...process.env, DATABASE_URL: databaseUrl },
-  });
 }
