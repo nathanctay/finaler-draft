@@ -253,4 +253,20 @@ describe('projects page: delete and undo', () => {
     renderPage();
     expect(screen.queryByRole('link', { name: /deleted/i })).not.toBeInTheDocument();
   });
+
+  // The account menu no longer fetches entitlement state at all (routes/projects/index.tsx's
+  // "Manage Subscription" entry is a static link to routes/billing.subscription.tsx, which owns
+  // that fetch itself) -- an earlier version of this slice deferred an entitlement fetch until
+  // the menu was opened, to fix a real E2E regression an eager, unconditional fetch caused; that
+  // deferral is now moot because the fetch was removed from this page entirely, not merely
+  // delayed. This test proves the account menu makes no billing-related request of its own.
+  it('never fetches entitlement or billing state from the account menu itself', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('Feature');
+    await user.click(screen.getByRole('button', { name: 'Account menu' }));
+    expect(screen.getByRole('menuitem', { name: 'Manage Subscription' })).toBeVisible();
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/entitlement', expect.anything());
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/billing/subscription', expect.anything());
+  });
 });

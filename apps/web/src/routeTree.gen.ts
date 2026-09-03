@@ -17,6 +17,9 @@ import { Route as DeletedRouteImport } from './routes/deleted'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ProjectsIndexRouteImport } from './routes/projects/index'
 import { Route as ProjectsProjectIdRouteImport } from './routes/projects/$projectId'
+import { Route as BillingSuccessRouteImport } from './routes/billing.success'
+import { Route as BillingSubscriptionRouteImport } from './routes/billing.subscription'
+import { Route as BillingCanceledRouteImport } from './routes/billing.canceled'
 import { Route as ProjectsProjectIdIndexRouteImport } from './routes/projects/$projectId/index'
 import { Route as ProjectsProjectIdScreenplaysScreenplayIdRouteImport } from './routes/projects/$projectId.screenplays.$screenplayId'
 
@@ -60,6 +63,21 @@ const ProjectsProjectIdRoute = ProjectsProjectIdRouteImport.update({
   path: '/projects/$projectId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const BillingSuccessRoute = BillingSuccessRouteImport.update({
+  id: '/billing/success',
+  path: '/billing/success',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BillingSubscriptionRoute = BillingSubscriptionRouteImport.update({
+  id: '/billing/subscription',
+  path: '/billing/subscription',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BillingCanceledRoute = BillingCanceledRouteImport.update({
+  id: '/billing/canceled',
+  path: '/billing/canceled',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ProjectsProjectIdIndexRoute = ProjectsProjectIdIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -79,6 +97,9 @@ export interface FileRoutesByFullPath {
   '/reset-password': typeof ResetPasswordRoute
   '/sign-in': typeof SignInRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/billing/canceled': typeof BillingCanceledRoute
+  '/billing/subscription': typeof BillingSubscriptionRoute
+  '/billing/success': typeof BillingSuccessRoute
   '/projects/$projectId': typeof ProjectsProjectIdRouteWithChildren
   '/projects': typeof ProjectsIndexRoute
   '/projects/$projectId/': typeof ProjectsProjectIdIndexRoute
@@ -91,6 +112,9 @@ export interface FileRoutesByTo {
   '/reset-password': typeof ResetPasswordRoute
   '/sign-in': typeof SignInRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/billing/canceled': typeof BillingCanceledRoute
+  '/billing/subscription': typeof BillingSubscriptionRoute
+  '/billing/success': typeof BillingSuccessRoute
   '/projects': typeof ProjectsIndexRoute
   '/projects/$projectId': typeof ProjectsProjectIdIndexRoute
   '/projects/$projectId/screenplays/$screenplayId': typeof ProjectsProjectIdScreenplaysScreenplayIdRoute
@@ -103,6 +127,9 @@ export interface FileRoutesById {
   '/reset-password': typeof ResetPasswordRoute
   '/sign-in': typeof SignInRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/billing/canceled': typeof BillingCanceledRoute
+  '/billing/subscription': typeof BillingSubscriptionRoute
+  '/billing/success': typeof BillingSuccessRoute
   '/projects/$projectId': typeof ProjectsProjectIdRouteWithChildren
   '/projects/': typeof ProjectsIndexRoute
   '/projects/$projectId/': typeof ProjectsProjectIdIndexRoute
@@ -117,6 +144,9 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/sign-in'
     | '/verify-email'
+    | '/billing/canceled'
+    | '/billing/subscription'
+    | '/billing/success'
     | '/projects/$projectId'
     | '/projects'
     | '/projects/$projectId/'
@@ -129,6 +159,9 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/sign-in'
     | '/verify-email'
+    | '/billing/canceled'
+    | '/billing/subscription'
+    | '/billing/success'
     | '/projects'
     | '/projects/$projectId'
     | '/projects/$projectId/screenplays/$screenplayId'
@@ -140,6 +173,9 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/sign-in'
     | '/verify-email'
+    | '/billing/canceled'
+    | '/billing/subscription'
+    | '/billing/success'
     | '/projects/$projectId'
     | '/projects/'
     | '/projects/$projectId/'
@@ -153,6 +189,9 @@ export interface RootRouteChildren {
   ResetPasswordRoute: typeof ResetPasswordRoute
   SignInRoute: typeof SignInRoute
   VerifyEmailRoute: typeof VerifyEmailRoute
+  BillingCanceledRoute: typeof BillingCanceledRoute
+  BillingSubscriptionRoute: typeof BillingSubscriptionRoute
+  BillingSuccessRoute: typeof BillingSuccessRoute
   ProjectsProjectIdRoute: typeof ProjectsProjectIdRouteWithChildren
   ProjectsIndexRoute: typeof ProjectsIndexRoute
 }
@@ -215,6 +254,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProjectsProjectIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/billing/success': {
+      id: '/billing/success'
+      path: '/billing/success'
+      fullPath: '/billing/success'
+      preLoaderRoute: typeof BillingSuccessRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/billing/subscription': {
+      id: '/billing/subscription'
+      path: '/billing/subscription'
+      fullPath: '/billing/subscription'
+      preLoaderRoute: typeof BillingSubscriptionRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/billing/canceled': {
+      id: '/billing/canceled'
+      path: '/billing/canceled'
+      fullPath: '/billing/canceled'
+      preLoaderRoute: typeof BillingCanceledRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/projects/$projectId/': {
       id: '/projects/$projectId/'
       path: '/'
@@ -253,6 +313,9 @@ const rootRouteChildren: RootRouteChildren = {
   ResetPasswordRoute: ResetPasswordRoute,
   SignInRoute: SignInRoute,
   VerifyEmailRoute: VerifyEmailRoute,
+  BillingCanceledRoute: BillingCanceledRoute,
+  BillingSubscriptionRoute: BillingSubscriptionRoute,
+  BillingSuccessRoute: BillingSuccessRoute,
   ProjectsProjectIdRoute: ProjectsProjectIdRouteWithChildren,
   ProjectsIndexRoute: ProjectsIndexRoute,
 }

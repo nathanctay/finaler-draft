@@ -5,14 +5,14 @@ import {
   DEFAULT_API_RATE_LIMIT_MAX,
   DEFAULT_API_RATE_LIMIT_WINDOW_MS,
 } from '@finaler-draft/server-config';
-import Fastify from 'fastify';
+import Fastify, { type FastifyRequest } from 'fastify';
 import { fromNodeHeaders } from 'better-auth/node';
 import {
   type ZodTypeProvider,
   serializerCompiler,
   validatorCompiler,
 } from 'fastify-type-provider-zod';
-import type Stripe from 'stripe';
+import Stripe from 'stripe';
 import { z } from 'zod';
 import {
   EDITABLE_SLOT_COOLDOWN_MS,
@@ -31,8 +31,14 @@ import {
   renameInput,
   updateScreenplayInput,
 } from './projects.js';
+import {
+  createCheckoutSession,
+  createPortalSession,
+  fetchBillingPlans,
+  type BillingPort,
+} from './stripeCheckout.js';
 import type { StripeIpAllowlist } from './stripeIpAllowlist.js';
-import type { SubscriptionStore } from './stripeSubscriptions.js';
+import type { SubscriptionProjection, SubscriptionStore } from './stripeSubscriptions.js';
 import { dispatchStripeEvent } from './stripeWebhook.js';
 
 export interface AuthPort {
@@ -86,6 +92,20 @@ export interface BuildAppOptions {
    */
   entitlements?: EntitlementStore;
   stripe?: StripeWebhookPort | undefined;
+  /**
+   * Backs `POST /api/billing/checkout-session`, `POST /api/billing/portal-session`, and
+   * `GET /api/billing/subscription` -- the purchase, manage-billing, and billing-status-read entry
+   * points this slice adds. Deliberately a separate option from `stripe` above rather than reusing
+   * the same port: `stripe`'s `client` is narrowed to `Pick<Stripe, 'webhooks'>` because the
+   * webhook route only ever verifies and dispatches an already-received event, while these routes
+   * only ever *create* Checkout/Portal sessions (or read this app's own `subscriptions` projection,
+   * never Stripe directly) and never see a webhook payload -- two disjoint capabilities of the same
+   * underlying `Stripe` client, each narrowed to exactly what its own routes call (see
+   * `BillingPort` in stripeCheckout.ts). `server.ts` constructs one real `Stripe` instance and
+   * passes it into both options, so this split costs nothing at runtime; it only keeps each route's
+   * test surface minimal.
+   */
+  billing?: BillingPort | undefined;
   /**
    * A cheap, side-effect-free database reachability probe (e.g. `select 1`), wired to `/api/health`
    * when persistence is configured. Railway only consults the healthcheck endpoint while gating a
@@ -261,6 +281,54 @@ const switchEditableScreenplayResponseSchema = z.object({
   screenplayId: z.string(),
   updatedAt: z.string(),
 });
+// `.strict()`: an unknown field (most pointedly a `userId` naming a different actor) is rejected
+// with 400 rather than silently ignored. This is the whole answer to "a user cannot create a
+// billing session for another user" -- the route always acts on `request.actorId!`, the
+// authenticated session's own id, and the request body has no field capable of naming anyone
+// else in the first place.
+const checkoutSessionInput = z.object({ plan: z.enum(['monthly', 'annual']) }).strict();
+const checkoutSessionResponseSchema = z.object({ url: z.string() });
+const portalSessionResponseSchema = z.object({ url: z.string() });
+// Mirrors `stripeSubscriptions.ts`'s `SubscriptionStatus` union exactly (kept in sync by hand, the
+// same convention that file's own doc comment establishes for its Postgres enum) -- a specific,
+// closed enum here rather than a bare `z.string()`, matching this codebase's general discipline
+// for wire shapes that have a known, finite set of values.
+const billingSubscriptionStatusSchema = z.enum([
+  'incomplete',
+  'incomplete_expired',
+  'trialing',
+  'active',
+  'past_due',
+  'canceled',
+  'unpaid',
+  'paused',
+]);
+// Backs `GET /api/billing/subscription` -- the Manage Subscription page's data source (see that
+// route's own comment for why this is a new, narrow endpoint rather than folding these fields
+// into `GET /api/entitlement`). `subscription: null` means no `subscriptions` row exists at all
+// (never subscribed); a lapsed or canceled account still returns a non-null `subscription` with
+// its last-known `status`, distinguishing "never subscribed" from "subscribed once."
+const billingSubscriptionResponseSchema = z.object({
+  subscription: z
+    .object({
+      plan: z.enum(['monthly', 'annual', 'unknown']),
+      status: billingSubscriptionStatusSchema,
+      currentPeriodEnd: z.string(),
+      cancelAtPeriodEnd: z.boolean(),
+      canceledAt: z.string().nullable(),
+    })
+    .nullable(),
+});
+// Backs `GET /api/billing/plans` -- real Stripe amounts for the pricing cards
+// (routes/billing.subscription.tsx), so the annual saving shown there is derived from actual
+// configured prices rather than a hardcoded percentage. `amount` mirrors Stripe's own
+// `unit_amount` exactly (the smallest unit of `currency`, e.g. cents for USD).
+const planPriceSchema = z.object({
+  amount: z.number(),
+  currency: z.string(),
+  interval: z.string().nullable(),
+});
+const billingPlansResponseSchema = z.object({ monthly: planPriceSchema, annual: planPriceSchema });
 
 /**
  * Pure projection from an `EntitlementSnapshot` to the wire shape `GET /api/entitlement` returns.
@@ -281,6 +349,96 @@ function describeEntitlement(snapshot: EntitlementSnapshot) {
         ? new Date(snapshot.slot.updatedAt.getTime() + EDITABLE_SLOT_COOLDOWN_MS).toISOString()
         : null,
   };
+}
+
+/**
+ * Pure projection from a raw `subscriptions` row (slice 1's projection, kept current by the
+ * webhook -- never read live from Stripe) to the wire shape `GET /api/billing/subscription`
+ * returns. `GET /api/entitlement` deliberately doesn't carry this: it answers "what can this actor
+ * do" (tier, the editable slot) for the free-tier/lapse mechanics, while this answers "what does
+ * this actor's Stripe subscription actually look like" for the Manage Subscription page
+ * (routes/billing.subscription.tsx) -- two different questions with two different shapes, and
+ * folding billing detail into the authorization-shaped endpoint would have bloated it for a
+ * concern only one page needs. A new, narrow `/api/billing/*` route (alongside this slice's other
+ * two) is cleaner than extending `/api/entitlement` for that reason.
+ *
+ * Deliberately narrower than the full `SubscriptionProjection`: `stripeCustomerId` and
+ * `stripeSubscriptionId` are Stripe-internal identifiers the browser has no use for and no reason
+ * to receive (least-privilege data exposure). `subscription: null` means no row exists at all
+ * (never subscribed) -- distinct from a lapsed/canceled account, which still returns a non-null
+ * `subscription` carrying its last-known `status`, so the page can tell the two apart.
+ */
+function describeBillingSubscription(
+  row: SubscriptionProjection | undefined,
+  priceIds: { monthly: string; annual: string },
+) {
+  if (!row) return { subscription: null };
+  return {
+    subscription: {
+      plan:
+        row.stripePriceId === priceIds.monthly
+          ? ('monthly' as const)
+          : row.stripePriceId === priceIds.annual
+            ? ('annual' as const)
+            : ('unknown' as const),
+      status: row.status,
+      currentPeriodEnd: row.currentPeriodEnd.toISOString(),
+      cancelAtPeriodEnd: row.cancelAtPeriodEnd,
+      canceledAt: row.canceledAt ? row.canceledAt.toISOString() : null,
+    },
+  };
+}
+
+/**
+ * Logs an operator-diagnosable line when Stripe itself rejects a request this process made to
+ * it -- distinct from, and more specific than, the generic top-level error handler below
+ * (`request.log.error({ err: error.name }, 'Request failed')`), which was the entire problem
+ * this exists to fix. Running this branch against a real Stripe sandbox, both Checkout buttons
+ * returned a bare 400 with no way to tell why; the actual cause (Stripe refusing
+ * `automatic_tax: { enabled: true }` because the account's Tax Settings have no origin address
+ * configured yet -- an account-configuration prerequisite, not a bug in this code, see plan.md's
+ * Tax section) took directly checking the account's `/v1/tax/settings` to find, because nothing
+ * server-side named it.
+ *
+ * `StripeError`'s own `type`, `rawType`, `code`, `param`, `requestId`, `statusCode`, and `doc_url`
+ * name a failure precisely enough to diagnose from the log line alone, and are genuinely safe to
+ * log: unlike `.message` or `.raw` (which can echo request content back) or `.headers`, none of
+ * those six fields carry anything from this request's own body. `type` and `rawType` are two
+ * different things, both worth having -- confirmed against the installed SDK's own source
+ * (`Error.js`): `type` is the specific error *class* Stripe's SDK constructed
+ * (`StripeInvalidRequestError`, `StripeCardError`, ...), which is what Stripe's own error-handling
+ * documentation is organized around, while `rawType` is the broader category the raw HTTP response
+ * reported (`invalid_request_error`, `card_error`, ...). This is the same "log a bounded,
+ * structured description, never the raw error object" discipline stripeWebhook.ts's
+ * signature-rejection logging already established, applied to the other direction (a request
+ * *this* server made to Stripe, not one Stripe made to us).
+ */
+function logStripeRequestFailure(request: FastifyRequest, operation: string, error: unknown): void {
+  if (error instanceof Stripe.errors.StripeError) {
+    request.log.error(
+      {
+        event: 'stripe_request_failed',
+        operation,
+        stripeErrorType: error.type,
+        stripeErrorRawType: error.rawType,
+        stripeErrorCode: error.code,
+        stripeErrorParam: error.param,
+        stripeRequestId: error.requestId,
+        stripeStatusCode: error.statusCode,
+        stripeDocUrl: error.doc_url,
+      },
+      'Stripe rejected a request this server made',
+    );
+    return;
+  }
+  request.log.error(
+    {
+      event: 'stripe_request_failed',
+      operation,
+      err: error instanceof Error ? error.name : 'UnknownError',
+    },
+    'A billing request failed for a reason other than a Stripe API rejection',
+  );
 }
 
 export async function buildApp(options: BuildAppOptions = {}) {
@@ -500,12 +658,25 @@ export async function buildApp(options: BuildAppOptions = {}) {
           // `StripeSignatureVerificationError` carries the raw header and payload it failed to
           // verify, which must not reach the logs. Same convention as the global error handler
           // above -- only the error's name.
+          //
+          // The message text itself carries an actionable hint, though, for the same reason
+          // `logStripeRequestFailure` above exists: a bare "rejected" line here is a confusing
+          // dead end from the outside. This route's most common real cause of rejection isn't an
+          // attack -- it's a stale `STRIPE_WEBHOOK_SECRET`: `stripe listen` (the standard local
+          // dev tool for receiving real events) prints a fresh `whsec_...` every time it starts,
+          // and a leftover value from a previous session in `.env` produces exactly this
+          // rejection with no indication of why. Naming that possibility directly turns a
+          // confusing dead end into a one-line diagnosis, without logging anything from the
+          // header or payload that caused it.
           request.log.warn(
             {
               event: 'stripe_webhook_signature_rejected',
               err: error instanceof Error ? error.name : 'UnknownError',
             },
-            'Rejected a webhook request with an invalid or missing signature',
+            'Rejected a webhook request with an invalid or missing signature -- if this is ' +
+              'unexpected, check that STRIPE_WEBHOOK_SECRET matches the currently running ' +
+              '`stripe listen` session (it prints a fresh whsec_ value every time it starts) or ' +
+              'the signing secret configured for this endpoint in the Stripe Dashboard',
           );
           return reply.code(400).send({ error: 'Invalid signature' });
         }
@@ -567,7 +738,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     });
   }
 
-  if (options.auth && (options.projects || options.entitlements)) {
+  if (options.auth && (options.projects || options.entitlements || options.billing)) {
     // Runs as `preValidation`, not `preHandler`. Fastify's request lifecycle runs
     // preValidation -> schema validation -> preHandler -> the route handler, and before this
     // refactor every id/body check was a manual `.parse()` call inside the handler, i.e. later
@@ -577,15 +748,17 @@ export async function buildApp(options: BuildAppOptions = {}) {
     // in `preValidation` (ahead of validation too) is what keeps that precedence, and that
     // precedence, byte-identical to before.
     //
-    // `/api/entitlement` shares this hook rather than getting its own: it carries the same
-    // authenticated-actor and same-origin requirements as every other route here, and reporting
-    // or changing entitlement state without knowing which actor is asking would defeat the point.
+    // `/api/entitlement` and `/api/billing` share this hook rather than getting their own: they
+    // carry the same authenticated-actor and same-origin requirements as every other route here,
+    // and reporting entitlement state or minting a Checkout/Portal session without knowing which
+    // actor is asking would defeat the point of either.
     app.addHook('preValidation', async (request, reply) => {
       if (
         !request.url.startsWith('/api/projects') &&
         !request.url.startsWith('/api/screenplays') &&
         !request.url.startsWith('/api/deleted') &&
-        !request.url.startsWith('/api/entitlement')
+        !request.url.startsWith('/api/entitlement') &&
+        !request.url.startsWith('/api/billing')
       )
         return;
       // Checked ahead of the session lookup: a forged cross-origin request is rejected outright
@@ -631,6 +804,76 @@ export async function buildApp(options: BuildAppOptions = {}) {
             error: 'The editable screenplay was changed recently; try again once the cooldown ends',
           });
         return { screenplayId: result.screenplayId, updatedAt: result.updatedAt.toISOString() };
+      },
+    );
+  }
+
+  if (options.auth && options.billing) {
+    const billing = options.billing;
+    typedApp.post(
+      '/api/billing/checkout-session',
+      {
+        schema: {
+          body: checkoutSessionInput,
+          response: { 200: checkoutSessionResponseSchema, 502: errorResponseSchema },
+        },
+      },
+      async (request, reply) => {
+        try {
+          return await createCheckoutSession(billing, request.actorId!, request.body.plan);
+        } catch (error) {
+          logStripeRequestFailure(request, 'checkout_session', error);
+          return reply.code(502).send({ error: 'Could not start checkout. Try again shortly.' });
+        }
+      },
+    );
+    typedApp.post(
+      '/api/billing/portal-session',
+      {
+        schema: {
+          response: {
+            200: portalSessionResponseSchema,
+            404: errorResponseSchema,
+            502: errorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        try {
+          const result = await createPortalSession(billing, request.actorId!);
+          if (result.outcome === 'no-customer') {
+            return reply
+              .code(404)
+              .send({ error: 'No billing account yet. Subscribe first to manage billing.' });
+          }
+          return { url: result.url };
+        } catch (error) {
+          logStripeRequestFailure(request, 'portal_session', error);
+          return reply
+            .code(502)
+            .send({ error: 'Could not open billing management. Try again shortly.' });
+        }
+      },
+    );
+    typedApp.get(
+      '/api/billing/subscription',
+      { schema: { response: { 200: billingSubscriptionResponseSchema } } },
+      async (request) =>
+        describeBillingSubscription(
+          await billing.store.getSubscriptionForUser(request.actorId!),
+          billing.priceIds,
+        ),
+    );
+    typedApp.get(
+      '/api/billing/plans',
+      { schema: { response: { 200: billingPlansResponseSchema, 502: errorResponseSchema } } },
+      async (request, reply) => {
+        try {
+          return await fetchBillingPlans(billing);
+        } catch (error) {
+          logStripeRequestFailure(request, 'billing_plans', error);
+          return reply.code(502).send({ error: 'Could not load pricing. Try again shortly.' });
+        }
       },
     );
   }
@@ -725,7 +968,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
         schema: {
           params: idParam,
           body: createScreenplayInput,
-          response: { 201: createScreenplayResponseSchema, 403: errorResponseSchema },
+          response: {
+            201: createScreenplayResponseSchema,
+            402: errorResponseSchema,
+            403: errorResponseSchema,
+          },
         },
       },
       async (request, reply) => {
@@ -744,8 +991,17 @@ export async function buildApp(options: BuildAppOptions = {}) {
           // `options.projects` in `createEntitlementEnforcedProjectStore` before it ever reaches
           // here) throws its own distinct error type specifically so a billing-driven refusal is
           // never reported to the client -- or logged -- as a plain membership failure.
+          //
+          // 402 Payment Required, not 403: this slice adds a client (the free-tier limit prompt,
+          // see routes/projects/$projectId/index.tsx) that needs to react specifically to "you
+          // must pay to do this" and never to a plain membership failure -- the two used to share
+          // 403 (set in slice 2, before any client needed to tell them apart), which is
+          // indistinguishable without inspecting the message text. 402 is the status HTTP actually
+          // reserves for this, and the distinction is real: 403 still means "you have no rights
+          // here regardless of billing," 402 means "you have rights here, but not on the free
+          // tier."
           if (error instanceof EntitlementLimitError)
-            return reply.code(403).send({ error: error.message });
+            return reply.code(402).send({ error: error.message });
           if (error instanceof ForbiddenError)
             return reply.code(403).send({ error: 'Project editor access required' });
           throw error;

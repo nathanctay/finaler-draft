@@ -1580,6 +1580,185 @@ select:focus-visible,
   padding: 12px 34px 0;
 }
 
+/* The free-tier limit prompt (routes/projects/$projectId/index.tsx): says what happened and
+   offers the upgrade, rather than presenting a bare error. Sits inside `.project-list`, which
+   already supplies horizontal padding, so this needs only vertical spacing of its own. */
+.upgrade-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  border: 1px solid var(--border-04);
+  border-radius: 2px;
+  background: var(--surface-06);
+  padding: 10px 14px;
+  color: var(--text-17);
+  font-size: 12px;
+}
+
+.upgrade-banner p {
+  margin: 0;
+}
+
+.upgrade-dialog-plans {
+  display: flex;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+/* The Manage Subscription page (routes/billing.subscription.tsx): a status block, sitting inside
+   `.project-list` the same way `.upgrade-banner` does above, and shown as supporting information
+   inside the Pro card rather than the page's primary content. */
+.subscription-status {
+  margin-top: 16px;
+  border: 1px solid var(--border-04);
+  border-radius: 2px;
+  background: var(--surface-06);
+  padding: 14px;
+}
+
+.subscription-status p {
+  margin: 0 0 4px;
+  color: var(--text-17);
+  font-size: 13px;
+}
+
+.subscription-status p:last-child {
+  margin-bottom: 0;
+}
+
+.subscription-plan {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+/* The billing-interval toggle: a real `<fieldset>`/radio group (see billing.subscription.tsx's
+   own comment on why), styled as the familiar segmented-control pair rather than left as bare
+   native radios. */
+.interval-toggle {
+  display: flex;
+  gap: 4px;
+  margin-top: 20px;
+  border: 0;
+  border-radius: 2px;
+  background: var(--surface-06);
+  padding: 4px;
+}
+
+.interval-option {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 1px;
+  padding: 8px 12px;
+  color: var(--text-08);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.interval-option-selected {
+  background: var(--surface-01);
+  color: var(--text-17);
+  box-shadow: 0 1px 2px var(--shadow-tint-01);
+}
+
+/* The radio input itself stays in the accessibility tree (real role, real keyboard operation)
+   but is visually replaced by the label's own selected styling above. */
+.interval-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.interval-savings {
+  display: inline-block;
+  margin-left: 6px;
+  color: var(--border-13);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.interval-toggle-note {
+  margin: 8px 0 0;
+  color: var(--text-08);
+  font-size: 12px;
+}
+
+.plan-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.plan-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-08);
+  border-radius: 2px;
+  background: var(--surface-02);
+  padding: 20px;
+}
+
+.plan-card h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  letter-spacing: -0.02em;
+}
+
+.plan-card-price {
+  margin: 0 0 16px;
+  color: var(--text-17);
+  font-size: 26px;
+  font-weight: 700;
+}
+
+.plan-card-price-interval {
+  color: var(--text-08);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.plan-card-features {
+  flex: 1;
+  margin: 0 0 20px;
+  padding: 0;
+  list-style: none;
+  color: var(--text-17);
+  font-size: 13px;
+}
+
+.plan-card-features li {
+  margin-bottom: 6px;
+}
+
+.plan-card-badge {
+  margin: 0;
+  border: 1px solid var(--border-04);
+  border-radius: 1px;
+  padding: 8px 12px;
+  color: var(--text-08);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* A cancelled-but-still-current Pro subscriber (billing.subscription.tsx): the badge stays, since
+   it is still their plan, but a "Resume subscription" action sits below it -- the one case where
+   the Pro card's action area shows both at once. */
+.plan-card-current-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .overflow-menu {
   position: relative;
 }

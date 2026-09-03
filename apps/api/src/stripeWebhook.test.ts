@@ -1,5 +1,5 @@
 import Stripe from 'stripe';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from './app.js';
 import { dispatchStripeEvent } from './stripeWebhook.js';
 import type {
@@ -417,6 +417,45 @@ describe('POST /api/webhooks/stripe', () => {
     // Confirms the signature failure actually stopped processing, not just that the HTTP status
     // happens to be 400 for some unrelated reason.
     await expect(store.getSubscriptionForUser('user-x')).resolves.toBeUndefined();
+  });
+
+  // Regression coverage for a real finding: a stale `STRIPE_WEBHOOK_SECRET` (`stripe listen`
+  // prints a fresh `whsec_` every session) produces exactly this rejection with no indication of
+  // why from the outside. The log line's message text now names that as the likely cause -- this
+  // proves the hint is actually there, and that it still never logs anything from the header or
+  // payload that failed to verify (the whole reason the structured `err` field stays just the
+  // error's name).
+  it('logs an actionable hint about a possibly-stale signing secret, never the raw error, when a signature is rejected', async () => {
+    const { app } = await buildWebhookApp();
+    let warnSpy: ReturnType<typeof vi.spyOn> | undefined;
+    app.addHook('onRequest', async (request) => {
+      warnSpy = vi.spyOn(request.log, 'warn');
+    });
+    const payload = JSON.stringify({
+      id: 'evt_stale_secret',
+      type: 'customer.subscription.created',
+    });
+    const wrongSecretSignature = Stripe.webhooks.generateTestHeaderString({
+      payload,
+      secret: 'whsec_test_FAKE_a_completely_different_secret',
+    });
+    await app.inject({
+      method: 'POST',
+      url: '/api/webhooks/stripe',
+      headers: { 'content-type': 'application/json', 'stripe-signature': wrongSecretSignature },
+      payload,
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'stripe_webhook_signature_rejected' }),
+      expect.stringContaining('STRIPE_WEBHOOK_SECRET'),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('stripe listen'),
+    );
+    // Never the raw payload or header the signature check failed against.
+    const loggedMessage = warnSpy?.mock.calls[0]?.[1] as string;
+    expect(loggedMessage).not.toContain('evt_stale_secret');
   });
 
   it('rejects a payload whose body was tampered with after signing', async () => {

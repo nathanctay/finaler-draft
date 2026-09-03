@@ -26,6 +26,47 @@
 export const STRIPE_WEBHOOK_IPS_URL = 'https://stripe.com/files/ips/ips_webhooks.json';
 
 /**
+ * Decides whether this allowlist should even be constructed and enforced at all, given the
+ * running environment -- separate from `isAllowed`'s per-request decision, and separate from
+ * `stripeConfigured`'s "are the Stripe env vars present" gate in server.ts.
+ *
+ * A real incident this slice hit directly: a completed Stripe sandbox checkout produced zero rows
+ * in `stripe_processed_events`, and probing the webhook route returned 403 `{"error":"Forbidden"}`
+ * -- this allowlist's rejection branch, not the 400 signature verification would have returned.
+ * `stripe listen`, the standard tool for receiving real Stripe events locally, forwards from the
+ * developer's own machine (localhost), an address that will never appear in Stripe's published
+ * range because it isn't where Stripe itself sends from. Enforcing the allowlist outside
+ * production doesn't defend against anything there -- there is no live attacker on a developer's
+ * loopback interface -- it only blocks legitimate local traffic before signature verification, the
+ * actual authentication, ever runs.
+ *
+ * Deliberately an explicit environment gate, not a loopback-address exemption. A blanket
+ * "always allow 127.0.0.1/::1" rule would be a real bypass risk in production: behind Railway's
+ * proxy this app already prefers the `x-real-ip` header over the raw connection address
+ * specifically because `request.ip` is the proxy's own address, not the caller's (see app.ts's
+ * webhook route and the rate limiter's identical `keyGenerator`, and auth.ts's matching comment)
+ * -- so if `x-real-ip` were ever absent, the connection address a loopback exemption would have to
+ * inspect could plausibly be a proxy-internal address in some deployment topology, and a bare
+ * address check cannot tell that apart from a developer's real loopback interface. A process-level
+ * `NODE_ENV`/system-test-mode check has no such ambiguity: it describes what this process *is*,
+ * not something read off an individual request that a network layer could misroute or an attacker
+ * could attempt to spoof.
+ *
+ * `systemTestMode` is checked independently of `nodeEnv === 'production'` (not folded into a
+ * single flag) as an explicit belt-and-suspenders guard, matching this file's neighbours' own
+ * carefulness about the two together (e.g. `requirePersistenceEnvironment`'s production check):
+ * the system-test script always sets `NODE_ENV=test`, never `production`, so this only matters if
+ * that ever changed, but treating "is this really a production deployment" as needing both to
+ * agree costs nothing and removes a way this could silently regress.
+ */
+export function shouldEnforceStripeIpAllowlist(environment: {
+  nodeEnv: string;
+  systemTestMode: boolean;
+}): boolean {
+  return environment.nodeEnv === 'production' && !environment.systemTestMode;
+}
+
+/**
  * Fetches and parses Stripe's published webhook source-IP list. Talks to the network -- callers
  * that want a fake list for tests should pass a different `fetchIps` into
  * `createStripeIpAllowlist` rather than mocking this function's internals.
