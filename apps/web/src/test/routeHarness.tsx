@@ -17,6 +17,15 @@ export const routeState: {
   mutationErrorValue: unknown;
   navigate: ReturnType<typeof vi.fn>;
   query: QueryState;
+  /**
+   * Per-`queryKey` overrides, keyed by `JSON.stringify(queryKey)`. A page with only one
+   * `useQuery` call never needs this -- `query` above still works exactly as before. A page with
+   * more than one concurrent `useQuery` call (e.g. `['projects']` and `['entitlement']` on the
+   * same screen) sets an entry here for each key it needs to control independently; any
+   * `queryKey` with no entry here falls back to the single shared `query` above, unchanged from
+   * every test written before this existed.
+   */
+  queries: Record<string, QueryState>;
   screenplayId: string;
 } = {
   editorMounts: 0,
@@ -24,6 +33,7 @@ export const routeState: {
   mutationErrorValue: undefined,
   navigate: vi.fn(),
   query: { data: undefined, isError: false, isLoading: false },
+  queries: {},
   screenplayId,
 };
 
@@ -60,14 +70,18 @@ export function reactQueryMock(): Record<string, unknown> {
   return {
     queryOptions: (options: unknown) => options,
     useMutation: (options: {
-      mutationFn: () => Promise<unknown>;
+      mutationFn: (variables?: unknown) => Promise<unknown>;
       onSuccess?: (value: never) => unknown;
     }) => ({
       error: routeState.mutationErrorValue,
       isError: routeState.mutationError || routeState.mutationErrorValue !== undefined,
       isPending: false,
-      mutate: () =>
-        void Promise.resolve(options.mutationFn()).then(
+      // Forwards whatever variable the caller passed (e.g. `mutate('monthly')`) through to
+      // `mutationFn` -- every mutation in this app before upgradeDialog.tsx called `mutate()`
+      // with no argument, and `mutationFn` for those ignores its parameter, so this is a strict
+      // superset of the previous zero-argument behaviour.
+      mutate: (variables?: unknown) =>
+        void Promise.resolve(options.mutationFn(variables)).then(
           (value) => options.onSuccess?.(value as never),
           (error: unknown) => {
             routeState.mutationErrorValue = error;
@@ -79,9 +93,15 @@ export function reactQueryMock(): Record<string, unknown> {
       },
     }),
     // The page's own query function runs so the endpoint it requests is exercised.
-    // Its result is discarded; tests drive rendering through `routeState.query`.
-    useQuery: (options: { queryFn?: () => unknown }) => {
+    // Its result is discarded; tests drive rendering through `routeState.query` (or, for a page
+    // with more than one concurrent `useQuery` call, `routeState.queries` keyed by `queryKey` --
+    // see that field's own comment).
+    useQuery: (options: { queryKey?: unknown[]; queryFn?: () => unknown }) => {
       void Promise.resolve(options.queryFn?.()).catch(() => undefined);
+      const key = options.queryKey ? JSON.stringify(options.queryKey) : undefined;
+      if (key !== undefined && Object.hasOwn(routeState.queries, key)) {
+        return routeState.queries[key];
+      }
       return routeState.query;
     },
     useQueryClient: () => ({ clear: clearQueryCache, invalidateQueries, removeQueries }),
@@ -126,6 +146,7 @@ export function resetRouteHarness() {
   routeState.mutationErrorValue = undefined;
   routeState.navigate.mockReset();
   routeState.query = { data: undefined, isError: false, isLoading: false };
+  routeState.queries = {};
   routeState.screenplayId = screenplayId;
   invalidateQueries.mockReset();
   clearQueryCache.mockReset();
@@ -146,10 +167,27 @@ export function resetRouteHarness() {
             // `fetchMock.mockImplementation`, the same way error-response tests already do below.
             path === '/api/auth/sign-in/email' || path === '/api/auth/sign-up/email'
             ? { token: 'test-session-token' }
-            : // `requestPasswordReset`/`resetPassword` (api.ts, via authClient.ts) both parse
-              // whatever body comes back through `unwrapAuthClientResult`, which only ever reads
-              // `.error`; an empty object is a safe default success body for either.
-              {},
+            : // A free/never-subscribed account by default -- the shape every test not
+              // specifically exercising billing state can safely ignore.
+              path === '/api/entitlement'
+              ? {
+                  tier: 'restricted',
+                  editableScreenplayId: null,
+                  candidateScreenplayIds: [],
+                  slotUpdatedAt: null,
+                  cooldownEndsAt: null,
+                }
+              : path === '/api/billing/checkout-session' && init?.method === 'POST'
+                ? { url: 'https://checkout.stripe.test/test-session' }
+                : path === '/api/billing/portal-session' && init?.method === 'POST'
+                  ? { url: 'https://billing.stripe.test/test-session' }
+                  : // No subscription by default, matching the free/never-subscribed default above.
+                    path === '/api/billing/subscription'
+                    ? { subscription: null }
+                    : // `requestPasswordReset`/`resetPassword` (api.ts, via authClient.ts) both parse
+                      // whatever body comes back through `unwrapAuthClientResult`, which only ever
+                      // reads `.error`; an empty object is a safe default success body for either.
+                      {},
     ),
   );
 }

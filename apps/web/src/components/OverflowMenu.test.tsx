@@ -1,3 +1,4 @@
+import { StrictMode, useState } from 'react';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
@@ -191,5 +192,96 @@ describe('OverflowMenu', () => {
 
     await user.click(item);
     expect(onSelect).toHaveBeenCalledOnce();
+  });
+
+  it('notifies onOpenChange on every open/close transition', async () => {
+    const user = userEvent.setup();
+    const onOpenChange = vi.fn();
+    render(
+      <OverflowMenu
+        items={[{ label: 'Delete', onSelect: vi.fn() }]}
+        label="Row actions"
+        onOpenChange={onOpenChange}
+      />,
+    );
+    const trigger = screen.getByRole('button', { name: 'Row actions' });
+
+    await user.click(trigger);
+    expect(onOpenChange).toHaveBeenLastCalledWith(true);
+    expect(onOpenChange).toHaveBeenCalledTimes(1);
+
+    await user.keyboard('{Escape}');
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+    expect(onOpenChange).toHaveBeenCalledTimes(2);
+
+    // Opening again is a real transition too -- routes/projects/index.tsx relies on this firing
+    // every time the menu opens, not only the first time.
+    await user.click(trigger);
+    expect(onOpenChange).toHaveBeenLastCalledWith(true);
+    expect(onOpenChange).toHaveBeenCalledTimes(3);
+  });
+
+  it('works with no onOpenChange at all -- every other caller in this codebase omits it', async () => {
+    const user = userEvent.setup();
+    render(<OverflowMenu items={[{ label: 'Delete', onSelect: vi.fn() }]} label="Row actions" />);
+    await user.click(screen.getByRole('button', { name: 'Row actions' }));
+    expect(screen.getByRole('menu')).toBeVisible();
+  });
+
+  it('does not call onOpenChange on mount -- it reports transitions, not the starting (closed) state', () => {
+    const onOpenChange = vi.fn();
+    render(
+      <OverflowMenu
+        items={[{ label: 'Delete', onSelect: vi.fn() }]}
+        label="Row actions"
+        onOpenChange={onOpenChange}
+      />,
+    );
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  // Regression test for a real bug the owner hit running this branch: `onOpenChange` used to be
+  // invoked from inside `setOpen`'s own updater function, which is impure (React can and does
+  // invoke updater functions during render) and produced "Cannot update a component (X) while
+  // rendering a different component (OverflowMenu)" -- logged by React, not thrown, which is
+  // exactly why every other test in this file passed with the bug present: none of them asserted
+  // on the absence of that warning, only on the menu's own visible behaviour. This harness mirrors
+  // the real trigger exactly -- routes/projects/index.tsx's account menu passes an `onOpenChange`
+  // that itself calls a *different* component's `setState`.
+  it('does not warn about updating a different component during render when onOpenChange itself calls setState', async () => {
+    function Harness() {
+      const [opened, setOpened] = useState(false);
+      return (
+        <>
+          <OverflowMenu
+            items={[{ label: 'Delete', onSelect: vi.fn() }]}
+            label="Row actions"
+            onOpenChange={(open) => {
+              if (open) setOpened(true);
+            }}
+          />
+          <span>{opened ? 'opened at least once' : 'never opened'}</span>
+        </>
+      );
+    }
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const user = userEvent.setup();
+    // StrictMode, matching main.tsx's real wrapping (development builds only -- the shape the
+    // owner actually ran): its double-invocation of state updater functions is what surfaces an
+    // impure updater as this exact warning rather than as silently-wrong-but-passing behaviour.
+    render(
+      <StrictMode>
+        <Harness />
+      </StrictMode>,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Row actions' }));
+
+    expect(screen.getByText('opened at least once')).toBeVisible();
+    const reactRenderWarning = consoleError.mock.calls.some(
+      ([message]) => typeof message === 'string' && message.includes('Cannot update a component'),
+    );
+    expect(reactRenderWarning).toBe(false);
+    consoleError.mockRestore();
   });
 });

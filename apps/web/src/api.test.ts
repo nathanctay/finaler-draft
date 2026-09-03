@@ -1,7 +1,7 @@
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PASSWORD_REQUIREMENTS_MESSAGE } from '@finaler-draft/config';
-import { ApiError, AuthApiError, api } from './api.js';
+import { ApiError, AuthApiError, MessageApiError, api } from './api.js';
 
 const projectId = '216ec49a-a6c6-49ff-8e2e-5994d5ca91dd';
 const screenplayId = '38d8a6db-43f1-4b47-b8fc-c15a96f9ac0e';
@@ -48,7 +48,35 @@ describe('API client', () => {
       .mockResolvedValueOnce(response({ id: projectId, title: 'Feature' }))
       .mockResolvedValueOnce(response({ id: screenplayId }))
       .mockResolvedValueOnce(response({ id: screenplayId, title: 'Draft' }))
-      .mockResolvedValueOnce(response({ projects: [], screenplays: [] }));
+      .mockResolvedValueOnce(response({ projects: [], screenplays: [] }))
+      .mockResolvedValueOnce(
+        response({
+          tier: 'restricted',
+          editableScreenplayId: null,
+          candidateScreenplayIds: [],
+          slotUpdatedAt: null,
+          cooldownEndsAt: null,
+        }),
+      )
+      .mockResolvedValueOnce(response({ url: 'https://checkout.stripe.test/cs_test_1' }))
+      .mockResolvedValueOnce(response({ url: 'https://billing.stripe.test/bps_test_1' }))
+      .mockResolvedValueOnce(
+        response({
+          subscription: {
+            plan: 'monthly',
+            status: 'active',
+            currentPeriodEnd: '2026-10-01T00:00:00.000Z',
+            cancelAtPeriodEnd: false,
+            canceledAt: null,
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        response({
+          monthly: { amount: 500, currency: 'usd', interval: 'month' },
+          annual: { amount: 5000, currency: 'usd', interval: 'year' },
+        }),
+      );
 
     await expect(api.session()).resolves.toEqual({
       email: 'writer@example.com',
@@ -86,8 +114,34 @@ describe('API client', () => {
       title: 'Draft',
     });
     await expect(api.deletedItems()).resolves.toEqual({ projects: [], screenplays: [] });
+    await expect(api.entitlement()).resolves.toEqual({
+      tier: 'restricted',
+      editableScreenplayId: null,
+      candidateScreenplayIds: [],
+      slotUpdatedAt: null,
+      cooldownEndsAt: null,
+    });
+    await expect(api.createCheckoutSession('monthly')).resolves.toEqual({
+      url: 'https://checkout.stripe.test/cs_test_1',
+    });
+    await expect(api.createPortalSession()).resolves.toEqual({
+      url: 'https://billing.stripe.test/bps_test_1',
+    });
+    await expect(api.billingSubscription()).resolves.toEqual({
+      subscription: {
+        plan: 'monthly',
+        status: 'active',
+        currentPeriodEnd: '2026-10-01T00:00:00.000Z',
+        cancelAtPeriodEnd: false,
+        canceledAt: null,
+      },
+    });
+    await expect(api.billingPlans()).resolves.toEqual({
+      monthly: { amount: 500, currency: 'usd', interval: 'month' },
+      annual: { amount: 5000, currency: 'usd', interval: 'year' },
+    });
 
-    expect(fetchMock).toHaveBeenCalledTimes(15);
+    expect(fetchMock).toHaveBeenCalledTimes(20);
     expect(fetchMock.mock.calls[1]).toEqual([
       '/api/auth/sign-in/email',
       expect.objectContaining({ credentials: 'include', method: 'POST' }),
@@ -118,6 +172,26 @@ describe('API client', () => {
     ]);
     expect(fetchMock.mock.calls[14]).toEqual([
       '/api/deleted',
+      expect.objectContaining({ credentials: 'include' }),
+    ]);
+    expect(fetchMock.mock.calls[15]).toEqual([
+      '/api/entitlement',
+      expect.objectContaining({ credentials: 'include' }),
+    ]);
+    expect(fetchMock.mock.calls[16]).toEqual([
+      '/api/billing/checkout-session',
+      expect.objectContaining({ body: JSON.stringify({ plan: 'monthly' }), method: 'POST' }),
+    ]);
+    expect(fetchMock.mock.calls[17]).toEqual([
+      '/api/billing/portal-session',
+      expect.objectContaining({ method: 'POST' }),
+    ]);
+    expect(fetchMock.mock.calls[18]).toEqual([
+      '/api/billing/subscription',
+      expect.objectContaining({ credentials: 'include' }),
+    ]);
+    expect(fetchMock.mock.calls[19]).toEqual([
+      '/api/billing/plans',
       expect.objectContaining({ credentials: 'include' }),
     ]);
   });
@@ -226,6 +300,45 @@ describe('API client', () => {
     expect(fetchMock.mock.calls[0]?.[1]).not.toHaveProperty('headers');
     expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
       headers: { 'content-type': 'application/json' },
+    });
+  });
+
+  describe('createScreenplay error reporting', () => {
+    // The one write a free account can hit the one-screenplay limit on (app.ts maps
+    // EntitlementLimitError to 402, deliberately distinct from a plain 403): the server's own
+    // explanation of the limit is worth keeping, not collapsing into a generic "Request failed".
+    it('keeps the server-provided message from a 402 free-tier-limit response', async () => {
+      fetchMock.mockResolvedValue(
+        response(
+          {
+            error:
+              'Free tier limit reached: only one editable screenplay is allowed. Choose an existing one to keep editing, or upgrade to create another.',
+          },
+          false,
+          402,
+        ),
+      );
+      await expect(
+        api.createScreenplay(projectId, 'Draft', screenplayFixture),
+      ).rejects.toMatchObject({
+        serverMessage:
+          'Free tier limit reached: only one editable screenplay is allowed. Choose an existing one to keep editing, or upgrade to create another.',
+        status: 402,
+      });
+      await expect(
+        api.createScreenplay(projectId, 'Draft', screenplayFixture),
+      ).rejects.toBeInstanceOf(MessageApiError);
+    });
+
+    it('falls back to a generic message when the error response has no usable body', async () => {
+      fetchMock.mockResolvedValue({
+        json: vi.fn().mockRejectedValue(new SyntaxError('Unexpected end of JSON input')),
+        ok: false,
+        status: 500,
+      } as unknown as Response);
+      await expect(
+        api.createScreenplay(projectId, 'Draft', screenplayFixture),
+      ).rejects.toMatchObject({ serverMessage: 'Request failed (500)', status: 500 });
     });
   });
 });

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createStripeIpAllowlist,
   fetchStripeWebhookIps,
+  shouldEnforceStripeIpAllowlist,
   STRIPE_WEBHOOK_IPS_URL,
 } from './stripeIpAllowlist.js';
 
@@ -121,5 +122,35 @@ describe('fetchStripeWebhookIps', () => {
       async () => new Response(JSON.stringify({ unexpected: true }), { status: 200 }),
     ) as unknown as typeof fetch;
     await expect(fetchStripeWebhookIps()).rejects.toThrow(/WEBHOOKS/);
+  });
+});
+
+// Regression coverage for a real incident: `stripe listen` (the standard local-development tool
+// for receiving real Stripe events) forwards from localhost, never a Stripe-owned address, so
+// enforcing this allowlist outside production rejected the developer's own legitimate webhook
+// traffic with a 403 before signature verification -- the actual authentication -- ever ran. See
+// `shouldEnforceStripeIpAllowlist`'s own comment for the full incident and the reasoning against
+// a loopback-address exemption instead of this explicit environment check.
+describe('shouldEnforceStripeIpAllowlist', () => {
+  it('enforces in production', () => {
+    expect(shouldEnforceStripeIpAllowlist({ nodeEnv: 'production', systemTestMode: false })).toBe(
+      true,
+    );
+  });
+
+  it('does not enforce in development, so a local stripe listen session is never blocked', () => {
+    expect(shouldEnforceStripeIpAllowlist({ nodeEnv: 'development', systemTestMode: false })).toBe(
+      false,
+    );
+  });
+
+  it('does not enforce in test mode', () => {
+    expect(shouldEnforceStripeIpAllowlist({ nodeEnv: 'test', systemTestMode: false })).toBe(false);
+  });
+
+  it('does not enforce in system-test mode even if NODE_ENV were somehow production -- belt and suspenders', () => {
+    expect(shouldEnforceStripeIpAllowlist({ nodeEnv: 'production', systemTestMode: true })).toBe(
+      false,
+    );
   });
 });

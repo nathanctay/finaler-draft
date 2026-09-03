@@ -1,8 +1,10 @@
+import Stripe from 'stripe';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { buildApp, MAX_SCREENPLAY_REQUEST_BODY_BYTES } from './app.js';
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import { DEFAULT_API_RATE_LIMIT_MAX } from '@finaler-draft/server-config';
 import type { ProjectStore } from './projects.js';
+import type { BillingPort } from './stripeCheckout.js';
 
 const app = await buildApp();
 
@@ -256,10 +258,11 @@ describe('logging', () => {
 });
 
 describe('persisted project API', () => {
-  let createScreenplayResult: { id: string; version: number } | 'forbidden' = {
-    id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
-    version: 1,
-  };
+  let createScreenplayResult: { id: string; version: number } | 'forbidden' | 'entitlement-limit' =
+    {
+      id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
+      version: 1,
+    };
   let updateResult: Awaited<ReturnType<ProjectStore['updateScreenplay']>> = 'conflict';
   let renameProjectResult: Awaited<ReturnType<ProjectStore['renameProject']>> = {
     id: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
@@ -323,6 +326,10 @@ describe('persisted project API', () => {
     createScreenplay: async () => {
       if (createScreenplayResult === 'forbidden')
         throw new (await import('./projects.js')).ForbiddenError();
+      if (createScreenplayResult === 'entitlement-limit')
+        throw new (await import('./entitlements.js')).EntitlementLimitError(
+          'Free tier limit reached: only one editable screenplay is allowed. Choose an existing one to keep editing, or upgrade to create another.',
+        );
       return createScreenplayResult;
     },
     getScreenplay: async () => ({
@@ -526,6 +533,22 @@ describe('persisted project API', () => {
           })
         ).statusCode,
       ).toBe(403);
+      // 402, not 403: distinct from the plain membership refusal just above, and distinct on
+      // purpose (see app.ts's comment on this mapping) -- a billing-driven refusal is something
+      // the web client (routes/projects/$projectId/index.tsx's free-tier limit prompt) needs to
+      // tell apart from "you don't have access here" without parsing the message text.
+      createScreenplayResult = 'entitlement-limit';
+      const limitResponse = await app.inject({
+        method: 'POST',
+        url: '/api/projects/5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f/screenplays',
+        headers,
+        payload: { title: 'Draft', screenplay: screenplayFixture },
+      });
+      expect(limitResponse.statusCode).toBe(402);
+      expect(limitResponse.json()).toEqual({
+        error:
+          'Free tier limit reached: only one editable screenplay is allowed. Choose an existing one to keep editing, or upgrade to create another.',
+      });
       createScreenplayResult = { id: 'ecf1118c-3a2e-4656-84e6-fce75c461710', version: 1 };
       updateResult = 'missing';
       expect(
@@ -1428,6 +1451,571 @@ describe('entitlement API', () => {
         payload: { screenplayId: 'ecf1118c-3a2e-4656-84e6-fce75c461710' },
       });
       expect(response.statusCode).toBe(409);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe('billing checkout API', () => {
+  const billingAuth = {
+    baseUrl: 'https://app.example.test',
+    handler: async () =>
+      new Response('auth', { headers: { 'set-cookie': 'session=test; HttpOnly' } }),
+    getActorId: async (headers: Headers) =>
+      headers.get('cookie') === 'session=test' ? 'actor-1' : null,
+    trustedOrigins: ['https://app.example.test'],
+  };
+  const headers = { cookie: 'session=test', origin: 'https://app.example.test' };
+
+  // Obviously-fake test-only values, never anything resembling a real Stripe credential.
+  const TEST_PRICE_ID_MONTHLY = 'price_test_FAKE_monthly';
+  const TEST_PRICE_ID_ANNUAL = 'price_test_FAKE_annual';
+
+  // A real `Stripe.errors.StripeInvalidRequestError` instance, not a plain object shaped like
+  // one -- `logStripeRequestFailure` (app.ts) branches on `instanceof Stripe.errors.StripeError`,
+  // so the test has to construct the real thing to exercise that branch at all. `requestId` and
+  // `statusCode` aren't constructor arguments on the real SDK (they're attached separately, from
+  // the HTTP response, by Stripe's own error-generation code) so they're assigned afterward here.
+  function fakeStripeInvalidRequestError(fields: {
+    code?: string;
+    docUrl?: string;
+    message?: string;
+    param?: string;
+    requestId?: string;
+    statusCode?: number;
+    type?: Stripe.RawErrorType;
+  }): Stripe.errors.StripeInvalidRequestError {
+    // Built by spreading only the fields actually supplied, not passing `undefined` explicitly --
+    // `exactOptionalPropertyTypes` (this repo's strict tsconfig) treats `{ code: undefined }` as a
+    // different, disallowed shape from simply omitting `code`.
+    return new Stripe.errors.StripeInvalidRequestError({
+      message: fields.message ?? 'A fake Stripe rejection for this test.',
+      type: fields.type ?? 'invalid_request_error',
+      ...(fields.code !== undefined ? { code: fields.code } : {}),
+      ...(fields.docUrl !== undefined ? { doc_url: fields.docUrl } : {}),
+      ...(fields.param !== undefined ? { param: fields.param } : {}),
+      ...(fields.requestId !== undefined ? { requestId: fields.requestId } : {}),
+      ...(fields.statusCode !== undefined ? { statusCode: fields.statusCode } : {}),
+    });
+  }
+
+  function fakeBilling(overrides?: {
+    checkoutError?: unknown;
+    checkoutUrl?: string | null;
+    portalError?: unknown;
+    portalUrl?: string;
+    plansError?: unknown;
+    existingCustomerId?: string;
+    subscriptionStatus?: 'active' | 'trialing' | 'past_due' | 'canceled';
+    subscriptionPriceId?: string;
+    cancelAtPeriodEnd?: boolean;
+    canceledAt?: Date | null;
+    onCheckoutCreate?: (params: unknown) => void;
+  }): BillingPort {
+    return {
+      client: {
+        checkout: {
+          sessions: {
+            create: async (params: unknown) => {
+              if (overrides?.checkoutError) throw overrides.checkoutError;
+              overrides?.onCheckoutCreate?.(params);
+              return {
+                id: 'cs_test_FAKE_1',
+                url: overrides?.checkoutUrl ?? 'https://checkout.stripe.test/cs_test_FAKE_1',
+              };
+            },
+          },
+        },
+        billingPortal: {
+          sessions: {
+            create: async () => {
+              if (overrides?.portalError) throw overrides.portalError;
+              return {
+                id: 'bps_test_FAKE_1',
+                url: overrides?.portalUrl ?? 'https://billing.stripe.test/bps_test_FAKE_1',
+              };
+            },
+          },
+        },
+        prices: {
+          retrieve: async (priceId: string) => {
+            if (overrides?.plansError) throw overrides.plansError;
+            return priceId === TEST_PRICE_ID_ANNUAL
+              ? { id: priceId, unit_amount: 5000, currency: 'usd', recurring: { interval: 'year' } }
+              : {
+                  id: priceId,
+                  unit_amount: 500,
+                  currency: 'usd',
+                  recurring: { interval: 'month' },
+                };
+          },
+        },
+      } as unknown as BillingPort['client'],
+      store: {
+        getSubscriptionForUser: async () =>
+          overrides?.existingCustomerId
+            ? {
+                userId: 'actor-1',
+                stripeCustomerId: overrides.existingCustomerId,
+                stripeSubscriptionId: 'sub_test_FAKE_1',
+                stripePriceId: overrides.subscriptionPriceId ?? TEST_PRICE_ID_MONTHLY,
+                status: overrides.subscriptionStatus ?? ('active' as const),
+                currentPeriodEnd: new Date('2026-10-01T00:00:00Z'),
+                cancelAtPeriodEnd: overrides.cancelAtPeriodEnd ?? false,
+                canceledAt: overrides.canceledAt ?? null,
+              }
+            : undefined,
+      },
+      priceIds: { monthly: TEST_PRICE_ID_MONTHLY, annual: TEST_PRICE_ID_ANNUAL },
+      appOrigin: 'https://app.example.test',
+    };
+  }
+
+  it('POST /api/billing/checkout-session requires authentication', async () => {
+    const app = await buildApp({ auth: billingAuth, billing: fakeBilling() });
+    try {
+      // A same-origin request without a session -- the Origin header alone is not enough, so
+      // this exercises the authentication check specifically, not the earlier CSRF/origin guard
+      // (already covered for this same shared hook in the "persisted project API" suite above).
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/billing/checkout-session',
+        headers: { origin: 'https://app.example.test' },
+        payload: { plan: 'monthly' },
+      });
+      expect(response.statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('POST /api/billing/checkout-session rejects a body naming another user -- the schema admits no such field', async () => {
+    const app = await buildApp({ auth: billingAuth, billing: fakeBilling() });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/billing/checkout-session',
+        headers,
+        // A caller cannot request a session "for" another actor: there is no field to name one
+        // with, so an attempt to add one is rejected as an invalid request rather than silently
+        // ignored.
+        payload: { plan: 'monthly', userId: 'actor-2' },
+      });
+      expect(response.statusCode).toBe(400);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('POST /api/billing/checkout-session creates a session for the authenticated actor only, and returns its url', async () => {
+    let seenUserId: unknown;
+    const app = await buildApp({
+      auth: billingAuth,
+      billing: fakeBilling({
+        onCheckoutCreate: (params) => {
+          seenUserId = (params as { metadata?: { userId?: string } }).metadata?.userId;
+        },
+      }),
+    });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/billing/checkout-session',
+        headers,
+        payload: { plan: 'monthly' },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ url: 'https://checkout.stripe.test/cs_test_FAKE_1' });
+      expect(seenUserId).toBe('actor-1');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('POST /api/billing/portal-session requires authentication', async () => {
+    const app = await buildApp({ auth: billingAuth, billing: fakeBilling() });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/billing/portal-session',
+        headers: { origin: 'https://app.example.test' },
+      });
+      expect(response.statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('POST /api/billing/portal-session reports 404 when the actor has never subscribed', async () => {
+    const app = await buildApp({ auth: billingAuth, billing: fakeBilling() });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/billing/portal-session',
+        headers,
+      });
+      expect(response.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('POST /api/billing/portal-session returns the Portal url for an existing customer', async () => {
+    const app = await buildApp({
+      auth: billingAuth,
+      billing: fakeBilling({ existingCustomerId: 'cus_test_FAKE_1' }),
+    });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/billing/portal-session',
+        headers,
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ url: 'https://billing.stripe.test/bps_test_FAKE_1' });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/billing/subscription requires authentication', async () => {
+    const app = await buildApp({ auth: billingAuth, billing: fakeBilling() });
+    try {
+      const response = await app.inject({ method: 'GET', url: '/api/billing/subscription' });
+      expect(response.statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/billing/subscription reports null for an account that has never subscribed', async () => {
+    const app = await buildApp({ auth: billingAuth, billing: fakeBilling() });
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/billing/subscription',
+        headers,
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ subscription: null });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/billing/subscription reports the plan, status, and dates for an active monthly subscriber, never leaking Stripe ids', async () => {
+    const app = await buildApp({
+      auth: billingAuth,
+      billing: fakeBilling({ existingCustomerId: 'cus_test_FAKE_1' }),
+    });
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/billing/subscription',
+        headers,
+      });
+      expect(response.statusCode).toBe(200);
+      // `.toEqual`, not `.toMatchObject`: proves the body carries *only* this shape -- no
+      // `stripeCustomerId`/`stripeSubscriptionId` leaking through alongside it.
+      expect(response.json()).toEqual({
+        subscription: {
+          plan: 'monthly',
+          status: 'active',
+          currentPeriodEnd: '2026-10-01T00:00:00.000Z',
+          cancelAtPeriodEnd: false,
+          canceledAt: null,
+        },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/billing/subscription reports the annual plan and pending cancellation for a subscriber who canceled at period end', async () => {
+    const app = await buildApp({
+      auth: billingAuth,
+      billing: fakeBilling({
+        existingCustomerId: 'cus_test_FAKE_1',
+        subscriptionPriceId: TEST_PRICE_ID_ANNUAL,
+        cancelAtPeriodEnd: true,
+      }),
+    });
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/billing/subscription',
+        headers,
+      });
+      expect(response.json()).toMatchObject({
+        subscription: { plan: 'annual', cancelAtPeriodEnd: true },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/billing/subscription reports a lapsed account distinctly from one that never subscribed', async () => {
+    const canceledAt = new Date('2026-09-15T00:00:00Z');
+    const app = await buildApp({
+      auth: billingAuth,
+      billing: fakeBilling({
+        existingCustomerId: 'cus_test_FAKE_1',
+        subscriptionStatus: 'canceled',
+        canceledAt,
+      }),
+    });
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/billing/subscription',
+        headers,
+      });
+      expect(response.json()).toEqual({
+        subscription: {
+          plan: 'monthly',
+          status: 'canceled',
+          currentPeriodEnd: '2026-10-01T00:00:00.000Z',
+          cancelAtPeriodEnd: false,
+          canceledAt: canceledAt.toISOString(),
+        },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/billing/subscription reports "unknown" for a price id that matches neither configured plan', async () => {
+    const app = await buildApp({
+      auth: billingAuth,
+      billing: fakeBilling({
+        existingCustomerId: 'cus_test_FAKE_1',
+        subscriptionPriceId: 'price_test_FAKE_some_other_price',
+      }),
+    });
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/billing/subscription',
+        headers,
+      });
+      expect(response.json()).toMatchObject({ subscription: { plan: 'unknown' } });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/billing/plans requires authentication', async () => {
+    const app = await buildApp({ auth: billingAuth, billing: fakeBilling() });
+    try {
+      const response = await app.inject({ method: 'GET', url: '/api/billing/plans' });
+      expect(response.statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/billing/plans reports the real configured monthly and annual prices', async () => {
+    const app = await buildApp({ auth: billingAuth, billing: fakeBilling() });
+    try {
+      const response = await app.inject({ method: 'GET', url: '/api/billing/plans', headers });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        monthly: { amount: 500, currency: 'usd', interval: 'month' },
+        annual: { amount: 5000, currency: 'usd', interval: 'year' },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('GET /api/billing/plans logs a diagnosable line and returns 502 when Stripe rejects the price lookup', async () => {
+    const app = await buildApp({
+      auth: billingAuth,
+      billing: fakeBilling({
+        plansError: fakeStripeInvalidRequestError({ code: 'resource_missing', statusCode: 404 }),
+      }),
+    });
+    let errorSpy: ReturnType<typeof vi.spyOn> | undefined;
+    app.addHook('onRequest', async (request) => {
+      errorSpy = vi.spyOn(request.log, 'error');
+    });
+    try {
+      const response = await app.inject({ method: 'GET', url: '/api/billing/plans', headers });
+      expect(response.statusCode).toBe(502);
+      expect(response.json()).toEqual({ error: 'Could not load pricing. Try again shortly.' });
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'stripe_request_failed', operation: 'billing_plans' }),
+        'Stripe rejected a request this server made',
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  // Regression coverage for a real finding running this branch against a real Stripe sandbox:
+  // both Checkout buttons returned a bare 400 with nothing in the response or the server log
+  // naming why (it turned out to be an account-configuration prerequisite for `automatic_tax`,
+  // not a bug -- see stripeCheckout.ts and app.ts's own comments). These prove the fix: a Stripe
+  // rejection now surfaces as a distinct 502 (not the generic error handler's plain 500) and logs
+  // a bounded, operator-diagnosable line naming the Stripe error's own type/code/param/requestId,
+  // never the raw error object.
+  it('logs a diagnosable line and returns 502, not a bare 500, when Stripe rejects the Checkout Session request', async () => {
+    const app = await buildApp({
+      auth: billingAuth,
+      billing: fakeBilling({
+        checkoutError: fakeStripeInvalidRequestError({
+          code: 'automatic_tax_supported',
+          param: 'automatic_tax[enabled]',
+          requestId: 'req_test_FAKE123',
+          statusCode: 400,
+          message: 'This Checkout Session cannot enable automatic tax without an origin address.',
+        }),
+      }),
+    });
+    let errorSpy: ReturnType<typeof vi.spyOn> | undefined;
+    app.addHook('onRequest', async (request) => {
+      errorSpy = vi.spyOn(request.log, 'error');
+    });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/billing/checkout-session',
+        headers,
+        payload: { plan: 'monthly' },
+      });
+      expect(response.statusCode).toBe(502);
+      expect(response.json()).toEqual({ error: 'Could not start checkout. Try again shortly.' });
+      expect(errorSpy).toHaveBeenCalledWith(
+        {
+          event: 'stripe_request_failed',
+          operation: 'checkout_session',
+          stripeErrorType: 'StripeInvalidRequestError',
+          stripeErrorRawType: 'invalid_request_error',
+          stripeErrorCode: 'automatic_tax_supported',
+          stripeErrorParam: 'automatic_tax[enabled]',
+          stripeRequestId: 'req_test_FAKE123',
+          stripeStatusCode: 400,
+          stripeDocUrl: undefined,
+        },
+        'Stripe rejected a request this server made',
+      );
+      // Never the raw error message or the error object itself -- only the bounded field set.
+      const logged = JSON.stringify(errorSpy?.mock.calls);
+      expect(logged).not.toContain('origin address');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('logs a diagnosable line and returns 502 when Stripe rejects the Portal session request', async () => {
+    const app = await buildApp({
+      auth: billingAuth,
+      billing: fakeBilling({
+        existingCustomerId: 'cus_test_FAKE_1',
+        portalError: fakeStripeInvalidRequestError({
+          code: 'resource_missing',
+          requestId: 'req_test_FAKE456',
+          statusCode: 404,
+        }),
+      }),
+    });
+    let errorSpy: ReturnType<typeof vi.spyOn> | undefined;
+    app.addHook('onRequest', async (request) => {
+      errorSpy = vi.spyOn(request.log, 'error');
+    });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/billing/portal-session',
+        headers,
+      });
+      expect(response.statusCode).toBe(502);
+      expect(response.json()).toEqual({
+        error: 'Could not open billing management. Try again shortly.',
+      });
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'stripe_request_failed',
+          operation: 'portal_session',
+          stripeErrorType: 'StripeInvalidRequestError',
+          stripeErrorRawType: 'invalid_request_error',
+          stripeErrorCode: 'resource_missing',
+          stripeRequestId: 'req_test_FAKE456',
+          stripeStatusCode: 404,
+        }),
+        'Stripe rejected a request this server made',
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('logs by error name, not a Stripe-shaped line, when checkout fails for a reason other than a Stripe rejection', async () => {
+    const app = await buildApp({
+      auth: billingAuth,
+      billing: fakeBilling({ checkoutError: new Error('boom') }),
+    });
+    let errorSpy: ReturnType<typeof vi.spyOn> | undefined;
+    app.addHook('onRequest', async (request) => {
+      errorSpy = vi.spyOn(request.log, 'error');
+    });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/billing/checkout-session',
+        headers,
+        payload: { plan: 'monthly' },
+      });
+      expect(response.statusCode).toBe(502);
+      expect(errorSpy).toHaveBeenCalledWith(
+        { event: 'stripe_request_failed', operation: 'checkout_session', err: 'Error' },
+        'A billing request failed for a reason other than a Stripe API rejection',
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  // plan.md: "The Checkout success redirect is not proof of payment. A user can navigate to the
+  // success URL directly ... Granting access on redirect is the single most common way
+  // subscription integrations leak paid features." Creating a Checkout Session is exactly what
+  // happens before a user is sent to Stripe -- and therefore exactly what has already happened by
+  // the time anyone could reach the success URL, webhook or not. This proves that act alone
+  // changes nothing: the same actor's entitlement, read immediately afterward with no webhook
+  // event ever delivered, is unaffected.
+  it('creating a Checkout Session grants no entitlement by itself -- only the webhook can', async () => {
+    const app = await buildApp({
+      auth: billingAuth,
+      billing: fakeBilling(),
+      entitlements: {
+        getSnapshot: async () => ({
+          subscriptionStatus: undefined,
+          candidateScreenplayIds: [],
+          slot: null,
+          now: new Date('2026-09-01T00:00:00Z'),
+        }),
+        claimEmptySlot: async () => undefined,
+        switchEditableScreenplay: async () => ({ outcome: 'not-a-candidate' }),
+      },
+    });
+    try {
+      const checkoutResponse = await app.inject({
+        method: 'POST',
+        url: '/api/billing/checkout-session',
+        headers,
+        payload: { plan: 'monthly' },
+      });
+      expect(checkoutResponse.statusCode).toBe(200);
+      // Navigating straight to the success URL is simulated here as "read entitlement state right
+      // after the session was created" -- there is no webhook delivery anywhere in this test, and
+      // there must not need to be one for this assertion to hold.
+      const entitlementResponse = await app.inject({
+        method: 'GET',
+        url: '/api/entitlement',
+        headers,
+      });
+      expect(entitlementResponse.json()).toMatchObject({ tier: 'restricted' });
     } finally {
       await app.close();
     }

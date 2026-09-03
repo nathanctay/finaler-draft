@@ -113,6 +113,17 @@ function ProjectsPage() {
         </div>
         <OverflowMenu
           items={[
+            // A single, always-available entry rather than two tier-conditional ones ("Upgrade
+            // to Pro" vs. "Manage billing", the previous shape): both destinations are now the
+            // same page (routes/billing.subscription.tsx), which shows the writer's actual plan
+            // and status and offers the right action from there -- upgrade for a free/restricted
+            // account, the Customer Portal for a paying one. This also means the account menu no
+            // longer needs to fetch entitlement state itself just to decide a label or an action;
+            // the destination page owns that.
+            {
+              label: 'Manage Subscription',
+              onSelect: () => void navigate({ to: '/billing/subscription' }),
+            },
             { label: 'Deleted items', onSelect: () => void navigate({ to: '/deleted' }) },
             { label: 'Sign out', onSelect: () => signOut.mutate() },
           ]}

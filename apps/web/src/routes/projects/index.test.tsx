@@ -65,6 +65,17 @@ describe('projects page', () => {
     expect(routeState.navigate).toHaveBeenCalledWith({ to: '/deleted' });
   });
 
+  it('reaches the Manage Subscription page from the account menu -- one entry regardless of tier', async () => {
+    const user = userEvent.setup();
+    render(<ProjectsPage />);
+    await user.click(screen.getByRole('button', { name: 'Account menu' }));
+    // No tier-conditional labelling or behaviour left in this menu (see the component's own
+    // comment for why): the destination page itself decides what a free, paid, or lapsed account
+    // sees, so the menu item is a single, always-present link.
+    await user.click(screen.getByRole('menuitem', { name: 'Manage Subscription' }));
+    expect(routeState.navigate).toHaveBeenCalledWith({ to: '/billing/subscription' });
+  });
+
   it('surfaces feedback when sign-out fails, without pretending it succeeded', () => {
     routeState.mutationError = true;
     render(<ProjectsPage />);

@@ -1,10 +1,17 @@
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createFileRoute, Link, useParams, useRouter } from '@tanstack/react-router';
 import { createDefaultTitlePage, DEFAULT_DOCUMENT_SETTINGS } from '@finaler-draft/screenplay';
-import { api, type ScreenplaySummary } from '../../../api.js';
+import { api, MessageApiError, type ScreenplaySummary } from '../../../api.js';
 import { DeletedRow } from '../../../components/DeletedRow.js';
 import { OverflowMenu } from '../../../components/OverflowMenu.js';
+
+// Lazy, same reasoning as routes/projects/index.tsx's identical import: this dialog is only
+// needed once a writer actually hits the free-tier limit or opens it, not on every visit to this
+// page, so it stays out of this route's own eagerly-loaded chunk graph.
+const UpgradeDialog = lazy(async () => ({
+  default: (await import('../../../upgradeDialog.js')).UpgradeDialog,
+}));
 
 export const Route = createFileRoute('/projects/$projectId/')({ component: ProjectPage });
 
@@ -56,6 +63,7 @@ function ProjectPage() {
   // this affordance goes away: it persists until Undo or navigation away, never on a timer, and
   // survives an incidental background refetch via the orphaned-id rendering below.
   const [deletedScreenplays, setDeletedScreenplays] = useState<Record<string, string>>({});
+  const [upgradeDialogOpen, setUpgradeDialogOpen] = useState(false);
   const scripts = useQuery({
     queryKey: ['screenplays', projectId],
     queryFn: () => api.screenplays(projectId),
@@ -97,6 +105,14 @@ function ProjectPage() {
   const orphanedDeletedIds = Object.keys(deletedScreenplays).filter(
     (id) => !liveScreenplays.some((script) => script.id === id),
   );
+  // 402 Payment Required is app.ts's dedicated status for `EntitlementLimitError` specifically
+  // (see that route's own comment), distinct from any other reason screenplay creation could
+  // fail -- so this is an unambiguous signal to show the upgrade prompt rather than a bare error,
+  // and `serverMessage` is the exact sentence entitlements.ts wrote to explain the limit.
+  const limitError =
+    create.error instanceof MessageApiError && create.error.status === 402
+      ? create.error
+      : undefined;
 
   return (
     <main className="project-screen">
@@ -123,6 +139,26 @@ function ProjectPage() {
             New screenplay
           </button>
         </form>
+        {limitError && (
+          <div className="upgrade-banner" role="alert">
+            <p>{limitError.serverMessage}</p>
+            <button
+              className="primary-button"
+              onClick={() => setUpgradeDialogOpen(true)}
+              type="button"
+            >
+              Upgrade to Pro
+            </button>
+          </div>
+        )}
+        {upgradeDialogOpen && (
+          <Suspense fallback={null}>
+            <UpgradeDialog
+              message={limitError?.serverMessage}
+              onClose={() => setUpgradeDialogOpen(false)}
+            />
+          </Suspense>
+        )}
         {scripts.isLoading ? (
           <p>Loading scripts…</p>
         ) : (

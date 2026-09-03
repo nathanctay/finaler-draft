@@ -8,7 +8,11 @@ import { loadRootEnvironment, shouldLoadRootEnvironment } from './environment.js
 import { selectMailPort, type MailMessage } from './mail.js';
 import { createPostgresProjectStore } from './projects.js';
 import { createStripeClient } from './stripeClient.js';
-import { createStripeIpAllowlist, fetchStripeWebhookIps } from './stripeIpAllowlist.js';
+import {
+  createStripeIpAllowlist,
+  fetchStripeWebhookIps,
+  shouldEnforceStripeIpAllowlist,
+} from './stripeIpAllowlist.js';
 import { createPostgresSubscriptionStore } from './stripeSubscriptions.js';
 
 try {
@@ -24,6 +28,11 @@ try {
   const appOptions = {
     serveClient: environment.NODE_ENV === 'production' || systemTestMode,
     systemTestMode,
+    // Threaded through explicitly so `buildPersistentApp` can decide whether to enforce the
+    // Stripe webhook IP allowlist at all -- see `shouldEnforceStripeIpAllowlist`'s own comment for
+    // why that decision belongs on the raw `NODE_ENV` value, not on `serveClient`'s
+    // production-or-system-test conflation just above.
+    nodeEnv: environment.NODE_ENV,
     // Threaded through explicitly: `buildApp`'s own default already matches
     // `@finaler-draft/server-config`'s constants, but only this wiring makes
     // `API_RATE_LIMIT_MAX`/`API_RATE_LIMIT_WINDOW_MS` actually adjustable by an operator --
@@ -47,6 +56,7 @@ async function buildPersistentApp(
   options: {
     serveClient: boolean;
     systemTestMode: boolean;
+    nodeEnv: string;
     rateLimit: { max: number; timeWindowMs: number };
   },
 ) {
@@ -92,23 +102,43 @@ async function buildPersistentApp(
   });
   // Optional in every environment short of production (`requirePersistenceEnvironment` in
   // `@finaler-draft/server-config` is what makes all four mandatory there) -- so a development or
-  // test process without Stripe configured still starts, just without the webhook route
-  // registered at all (see `BuildAppOptions.stripe` in app.ts: `undefined` here means the route
-  // does not exist, mirroring `testMail`'s "not registered, not registered-and-denies" contract).
-  // The two Pro price ids are validated as part of this gate (plan.md asks for them alongside
-  // the key and signing secret) but not threaded any further than this check: pricing a Checkout
-  // Session is explicitly a later slice's job, not this one's. This slice's only job for them is
-  // to make production refuse to start without them already configured and ready.
+  // test process without Stripe configured still starts, just without the webhook route or the
+  // billing (Checkout/Portal) routes registered at all (see `BuildAppOptions.stripe`/`.billing` in
+  // app.ts: `undefined` here means the route does not exist, mirroring `testMail`'s "not
+  // registered, not registered-and-denies" contract). The two Pro price ids gate the same flag and
+  // feed `billing.priceIds` below, where Checkout Session creation actually selects between them.
   const stripeConfigured = Boolean(
     persistence.STRIPE_SECRET_KEY &&
       persistence.STRIPE_WEBHOOK_SECRET &&
       persistence.STRIPE_PRICE_ID_MONTHLY &&
       persistence.STRIPE_PRICE_ID_ANNUAL,
   );
-  const ipAllowlist = stripeConfigured
-    ? createStripeIpAllowlist({ fetchIps: fetchStripeWebhookIps })
-    : undefined;
+  // `stripeConfigured` alone used to be the only gate here, which is exactly what let this
+  // allowlist reject the developer's own `stripe listen` traffic in every local run: see
+  // `shouldEnforceStripeIpAllowlist`'s own comment for the incident and the reasoning against a
+  // loopback-address exemption instead of this explicit environment check.
+  const ipAllowlist =
+    stripeConfigured &&
+    shouldEnforceStripeIpAllowlist({
+      nodeEnv: options.nodeEnv,
+      systemTestMode: options.systemTestMode,
+    })
+      ? createStripeIpAllowlist({ fetchIps: fetchStripeWebhookIps })
+      : undefined;
   ipAllowlist?.start();
+  // One real `Stripe` client instance, shared by the webhook route and the checkout/portal
+  // routes below rather than constructed twice -- both are narrowed views of the same client
+  // (see `StripeWebhookPort.client` and `BillingPort.client` in app.ts/stripeCheckout.ts), and
+  // there is no reason for this process to hold two separate connections to the same API.
+  const stripeClient = stripeConfigured
+    ? createStripeClient(persistence.STRIPE_SECRET_KEY!)
+    : undefined;
+  // The public origin Checkout's `success_url`/`cancel_url` and the Customer Portal's
+  // `return_url` redirect back to. Same fallback `auth.ts`'s `trustedOrigins` and
+  // `apps/web/src/api.ts`'s `appUrl` already use: `CLIENT_ORIGIN` in local development, where the
+  // SPA (:5173) and the API (:3001) are different origins, or `BETTER_AUTH_URL` otherwise, since
+  // the same process serves both client and API in every deployed environment.
+  const appOrigin = persistence.CLIENT_ORIGIN ?? persistence.BETTER_AUTH_URL;
   // Shared by the entitlement store below and, when Stripe is configured, the webhook route --
   // one instance either way, not two independent connections to the same table. Entitlement
   // enforcement needs subscription status regardless of whether Stripe itself is configured in
@@ -135,10 +165,26 @@ async function buildPersistentApp(
     entitlements,
     stripe: stripeConfigured
       ? {
-          client: createStripeClient(persistence.STRIPE_SECRET_KEY!),
+          client: stripeClient!,
           webhookSecret: persistence.STRIPE_WEBHOOK_SECRET!,
           store: subscriptions,
           ipAllowlist,
+        }
+      : undefined,
+    // Checkout Session and Customer Portal session creation (this slice). Gated behind the same
+    // `stripeConfigured` check as the webhook route above -- both need the same four Stripe
+    // environment variables (`requirePersistenceEnvironment` makes all four mandatory in
+    // production), and a process without them configured should offer no purchase path rather
+    // than fail every request to it.
+    billing: stripeConfigured
+      ? {
+          client: stripeClient!,
+          store: subscriptions,
+          priceIds: {
+            monthly: persistence.STRIPE_PRICE_ID_MONTHLY!,
+            annual: persistence.STRIPE_PRICE_ID_ANNUAL!,
+          },
+          appOrigin,
         }
       : undefined,
     testMail: options.systemTestMode ? { latestTo: (to) => testMailbox.get(to) } : undefined,
