@@ -19,13 +19,13 @@
     "db:studio": "node ./scripts/run-drizzle.mjs studio"
   },
   "dependencies": {
+    "drizzle-kit": "0.31.10",
     "drizzle-orm": "0.45.2",
     "pg": "8.22.0"
   },
   "devDependencies": {
     "@types/pg": "8.20.0",
     "@vitest/coverage-v8": "3.2.4",
-    "drizzle-kit": "0.31.10",
     "vitest": "3.2.4"
   }
 }

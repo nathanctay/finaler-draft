@@ -52,22 +52,24 @@ describe('index page render', () => {
     expect(html).toContain('Available when the app launches.');
   });
 
-  it('marks "Coming soon" and the collaboration status as pre-launch state, both present together', async () => {
+  it('marks the pre-launch state and claims nothing the product does not ship', async () => {
     const container = await AstroContainer.create();
     const html = await container.renderToString(Index);
 
     expect(html).toContain('Coming soon');
-    // The one planned feature the owner asked to include, visually distinguished (a "Planned"
-    // badge, a separate Status section) rather than blended into the shipped feature list above
-    // it -- see StatusSection.astro's own comment on why this distinction is load-bearing.
-    expect(html).toContain('Planned');
-    expect(html).toContain('Real-time collaboration');
-    // Revision history and FDX import were deliberately cut from this round's copy (see
-    // progress/landing-page.md) -- neither has a comparable near-term commitment, and asserting
-    // their absence here means a future edit that quietly reintroduces either has to also update
-    // this test, not slip in unnoticed.
+    // Revision history and FDX import are not built. Asserting their absence means a future edit
+    // that quietly reintroduces either has to update this test rather than slipping in unnoticed
+    // -- this page is the URL handed to Stripe, so a claim the product cannot support is a
+    // liability rather than merely inaccurate copy.
     expect(html).not.toMatch(/revision history/i);
     expect(html).not.toMatch(/FDX import/i);
+    // Deliberately NOT asserted: a "Planned" badge and a Status section naming real-time
+    // collaboration. Both belonged to an earlier draft, and the owner removed that section
+    // (2026-09-04). Nothing on the page now describes unbuilt work, so there is no
+    // planned-versus-shipped distinction left to protect -- the two absence assertions above are
+    // what keep it that way. If planned features return, they need that visual distinction back
+    // and a test for it: "Coming soon" is what makes such claims honest today, and it is gated on
+    // `APP_IS_LIVE`, so it disappears at launch while any planned copy would not.
   });
 
   it('renders the product name and tagline exactly once each as the hero heading and subheading', async () => {
