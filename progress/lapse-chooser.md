@@ -564,3 +564,187 @@ Additionally, since Bug 1's real regression test lives in `apps/web/e2e/app-shel
 part of `test:system:persistence`, which ignores that file): `pnpm build && npx playwright test
 apps/web/e2e/app-shell.spec.ts` -- **6 passed** (the file's five pre-existing tests plus the new
 one), exit 0.
+
+## Bug 3: a disabled button was indistinguishable from an enabled one
+
+The owner tested the cooldown fix from Bug 2. The logic was correct -- the banner correctly
+rendered "You can switch to a different screenplay again at {time}." and `App.tsx`'s
+`disabled={makeEditableState === 'pending' || entitlementReadOnly.cooldownUntil !== undefined}`
+really was applying the `disabled` attribute. **But the button looked, and behaved, fully active:
+solid, coloured, and it still lit up on hover.**
+
+**Cause:** the `disabled` HTML attribute has no visual effect of its own -- it only changes
+behaviour (no click fires, the control leaves the Tab order). `.primary-button` (styles.css) had
+no `:disabled` rule at all, and its `:hover` rule was not scoped to exclude a disabled instance.
+Only `.tool-button` had a `:disabled` treatment in the whole stylesheet.
+
+**Scope, not just this button.** Four classes were named as suspects (each backing real,
+`disabled`-rendering buttons somewhere in the app): `.primary-button`, `.text-button`,
+`.account-button`, `.status-conflict-button`. Each was checked against the actual rendered markup,
+not assumed:
+
+- **`.primary-button` -- styled.** Genuinely disabled in 8 files (`upgradeDialog.tsx` ×2,
+  `App.tsx`'s own read-only banner, `routes/deleted.tsx`, `routes/reset-password.tsx`,
+  `routes/forgot-password.tsx`, `routes/billing.subscription.tsx` ×3, `routes/projects/index.tsx`,
+  `routes/sign-in.tsx`).
+- **`.text-button` -- styled.** Genuinely disabled in `components/DeletedRow.tsx` (`disabled={
+restoreMutation.isPending}`, the "Undo" affordance while a restore is in flight) and
+  `routes/sign-in.tsx` (`disabled={resend.isPending}`, "Resend verification email"). Its `<Link>`
+  instances (`forgot-password.tsx`'s "Back to sign in", etc.) are never disabled -- HTML has no
+  `disabled` attribute for an anchor -- so `:disabled` simply never matches them, correctly.
+- **`.account-button` -- found never disabled, left alone.** Every use (one, in `App.tsx`) is a
+  `<span>`, not a `<button>` -- structurally incapable of carrying `disabled` at all. No rule
+  added; styling a state that cannot occur would be dead CSS.
+- **`.status-conflict-button` -- found never disabled, left alone.** Both uses ("Copy my version",
+  "Reload (discards this copy)", `App.tsx`'s save-conflict recovery actions) are real `<button>`s
+  but neither is ever passed a `disabled` prop anywhere in the codebase -- confirmed by an
+  exhaustive grep, not by reading one call site. No rule added for the same reason as above.
+
+**One additional instance, found while verifying the four, fixed for the identical reason:**
+`.overflow-menu-list button` (the list `OverflowMenu.tsx` renders) had the same gap -- no
+`:disabled` rule, `:hover`/`:focus-visible` unscoped -- and genuinely backs disabled items already
+(the FDX/DOCX/PDF export entries when the projection is invalid, and, as of this slice, "Document
+settings…" while the entitlement-driven read-only banner is showing). Not one of the four named
+classes, but leaving the exact same defect sitting in a fifth real, currently-disabled control
+while fixing the other four would have been inconsistent with the report's own framing ("latent
+everywhere a disabled state already exists").
+
+**The fix, following `.tool-button:disabled`'s existing visual language (muted colour, `cursor:
+default`) rather than inventing a second convention, adapted per button:**
+
+- `.tool-button:hover` was folded together with `.menubar button:hover` in one shared selector
+  (neither was scoped) -- split into two rules so `.tool-button:hover:not(:disabled)` can be
+  scoped without also touching `.menubar button`, which has no disabled state to guard.
+- `.primary-button:disabled` -- `cursor: default`, plus `background: var(--surface-11)` and
+  `border-color: var(--border-05)` alongside `color: var(--text-04)`: `.tool-button` only ever
+  needed to mute its own foreground (it starts transparent), but `.primary-button` is a solid
+  brand-green fill, so muting only the text would have been nearly invisible against it. The whole
+  control flattens to a neutral grey unit instead. `.primary-button:hover` scoped to
+  `:not(:disabled)`.
+- `.text-button:disabled` -- `cursor: default`, `color: var(--text-04)`, and `text-decoration:
+none` (dropping the underline specifically, since an underlined disabled control still reads as
+  "this is a link" -- adapting the same muted-text idea to this class's own underline-on-transparent
+  look, the way `.primary-button`'s fix adapted it to a filled button). `.text-button` has no
+  `:hover` rule to scope.
+- `.overflow-menu-list button:disabled` -- `cursor: default`, `color: var(--text-04)` (already a
+  transparent-background list, so no background swap needed). `:hover`/`:focus-visible` both
+  scoped to `:not(:disabled)`.
+
+## Verifying, and testing, Bug 3
+
+**Real-browser assertion added, not a jsdom one -- explicitly, for the same reason as Bug 1.**
+jsdom has no computed styles worth trusting, and Bug 2's own `disabled` attribute was already
+correct in App.tsx when this shipped broken -- a test asserting the attribute alone would have
+passed on the exact code that produced this bug. `apps/web/e2e/app-shell.spec.ts` gained one new
+test, following the same pattern as the grid-row test: `'a disabled .primary-button is visually
+distinct from an enabled one and does not respond to hover'` injects an enabled and a disabled
+`.primary-button` side by side and asserts, against real computed styles in real Chromium:
+
+- the disabled instance's resolved `background-color` differs from the enabled one's (the actual
+  reported defect -- "solid, coloured", indistinguishable at rest),
+- its resolved `cursor` is not `pointer` (a pointer cursor on a dead control is the same lie a
+  matching hover state tells), and
+- hovering it (`page.hover`) leaves its `background-color` unchanged (the literal reported
+  symptom -- "it still lights up on hover").
+
+One test, not four, deliberately: `.text-button` and `.overflow-menu-list button` got the
+identical `cursor: default` + `--text-04` treatment for the identical reason, and a second and
+third near-duplicate real-browser test would have re-proven the same mechanism (a `:disabled` rule
+existing and being read) rather than anything button-specific -- disproportionate to what a second
+test would actually add. `.text-button`'s and `.overflow-menu-list button`'s markup and disabled
+usage were verified directly against the source (quoted above), which is the same level of
+diligence Bug 1's fix applied to its own second, narrow-breakpoint CSS copy.
+
+**A genuine, honestly-reported testing limit, found while mutation-testing:** removing
+`.primary-button:disabled` entirely correctly fails the new test (below). Removing only the
+`:not(:disabled)` half of `.primary-button:hover`'s scoping does **not** fail it, in this file's
+current source order -- `.primary-button:disabled` is declared _after_ `.primary-button:hover`,
+and on equal specificity the later rule already wins the cascade for the `background` property
+both rules set, regardless of the `:not(:disabled)` guard. The explicit scoping is still the
+correct fix (it does not depend on declaration order holding, which is exactly the kind of thing a
+later reorganisation of this file could silently break), but this test does not independently
+prove it, and reordering the CSS purely to make a mutation fail would be testing a fact about the
+test rather than the product. Recorded here rather than left silent, per the instruction that an
+acknowledged gap is preferable to a test that passes either way.
+
+## Mutations for Bug 3 (rebuilt before every browser run, per the owner's own warning about that)
+
+18. **`.primary-button:disabled` removed outright.** Rebuilt (`pnpm --filter @finaler-draft/web
+build`) and ran the new `app-shell.spec.ts` test against the real build: failed with the
+    disabled button's background matching the enabled one's exactly (`rgb(39, 98, 82)`, the brand
+    green) -- the reported defect, reproduced on demand, the same way Bug 1's mutation was.
+    Reverted; rebuilt again; confirmed green.
+19. **`.primary-button:disabled`'s `cursor: default` alone changed to `cursor: pointer`** (leaving
+    the colour/background rule intact). Rebuilt and ran the same test: failed on the cursor
+    assertion specifically (`expected cursor not to be "pointer"`), independent of the background
+    assertion -- confirming the test's two claims are each independently load-bearing, not one
+    assertion incidentally covering for the other. Reverted; rebuilt; confirmed green.
+20. **`.primary-button:hover`'s `:not(:disabled)` scoping removed**, leaving the bare `:hover`
+    selector. Did **not** fail the test -- see "A genuine, honestly-reported testing limit" above
+    for why, confirmed by running the mutation rather than assumed from reading the cascade rules.
+    Reverted (the code fix itself was kept; only the test's inability to independently prove this
+    one half is being reported).
+
+`grep -rn MUTATION apps/web/src apps/web/e2e` after every revert returns nothing.
+
+## Gates, re-run after Bug 3's fix
+
+```
+pnpm lint
+```
+
+Clean, no output, exit 0.
+
+```
+pnpm format:check
+```
+
+`prettier --write` run on `styles.css` and `app-shell.spec.ts` before this check (the spec file
+needed reformatting after the appended test; `styles.css` did not). `All matched files use
+Prettier code style!`, exit 0.
+
+```
+pnpm typecheck
+```
+
+Clean across every package and both apps, exit 0.
+
+```
+pnpm test
+```
+
+`apps/api`: 215 passed, 40 skipped (unchanged). `apps/web`: **645 passed** (unchanged from Bug
+2's round -- this fix touched only `styles.css`, which jsdom does not load, and the new e2e test,
+which `pnpm test` does not run). Every other package unchanged and green. Exit 0.
+
+```
+pnpm --filter @finaler-draft/web test:coverage
+```
+
+645 passed, exit 0.
+
+```
+pnpm check:bundle-budget
+```
+
+`[bundle-budget] ok` for all three budgeted artifacts -- entry 111.65 kB, lazy editor 115.58 kB,
+CSS 6.31 kB (up marginally from 6.26 kB with the new `:disabled` rules, still well inside the
+20 kB budget). Exit 0.
+
+```
+TEST_DATABASE_URL="$(grep '^DATABASE_URL=' "/Users/nathan/Documents/finaler draft/.env" | cut -d= -f2-)" pnpm --filter @finaler-draft/api test:integration
+```
+
+**40 passed**, unchanged. Exit 0.
+
+```
+TEST_DATABASE_URL="$(grep '^DATABASE_URL=' "/Users/nathan/Documents/finaler draft/.env" | cut -d= -f2-)" pnpm test:system:persistence
+```
+
+**18 passed**, matching baseline. Exit 0.
+
+```
+pnpm build && npx playwright test apps/web/e2e/app-shell.spec.ts
+```
+
+**7 passed** (the six from Bug 1's round plus this round's new button test). Exit 0.

@@ -238,8 +238,15 @@ select:focus-visible,
   font-size: 12px;
 }
 
-.menubar button:hover,
-.tool-button:hover {
+.menubar button:hover {
+  background: var(--surface-06);
+}
+
+/* `:not(:disabled)`, separated from `.menubar button:hover` above (which is never disabled --
+   the File menu trigger and "Dark canvas" toggle have no disabled state to guard against) rather
+   than folded into one shared selector: `.tool-button` alone needs the guard, and combining the
+   two would either scope `.menubar button` unnecessarily or leave `.tool-button` unscoped again. */
+.tool-button:hover:not(:disabled) {
   background: var(--surface-06);
 }
 
@@ -1562,8 +1569,25 @@ select:focus-visible,
   padding: 11px 16px;
 }
 
-.primary-button:hover {
+.primary-button:hover:not(:disabled) {
   background: var(--border-13);
+}
+
+/* Same visual language as `.tool-button:disabled` above -- `cursor: default` plus a muted
+   colour, not merely "no hover" -- adapted for a filled button rather than copied literally:
+   `.tool-button` only ever needed to mute its own foreground (it starts transparent), but
+   `.primary-button` is a solid brand-green fill, so `--text-04` (the same muted-text token
+   `.tool-button:disabled` uses) would be nearly invisible against it without also flattening the
+   fill itself to a neutral surface. `border-color` follows the same swap so the whole control
+   reads as one greyed-out unit, not a green outline around a grey centre. This is the rule the
+   lapse-chooser banner's "Make this one editable" button was silently missing: `cooldownUntil`
+   correctly disabled the element, but nothing here made a disabled instance look any different
+   from an enabled one, or stopped it responding to hover. */
+.primary-button:disabled {
+  cursor: default;
+  border-color: var(--border-05);
+  background: var(--surface-11);
+  color: var(--text-04);
 }
 
 .text-button {
@@ -1577,6 +1601,19 @@ select:focus-visible,
   margin-top: 18px;
   padding: 0;
   text-decoration: underline;
+}
+
+/* `.text-button` has no `:hover` rule to scope (it is styled underline-on-transparent, not a
+   background swap), so `cursor` plus the same `--text-04` muted-text token
+   `.tool-button:disabled` uses is the whole treatment -- transparent background either way, so
+   nothing else needs to change. Real instances: DeletedRow.tsx's "Undo" while a restore is in
+   flight, sign-in.tsx's "Resend verification email" while that request is in flight. `<Link>`
+   instances of this class (e.g. "Forgot password?") are never disabled -- HTML has no `disabled`
+   attribute for an anchor -- so this rule simply never matches them, which is correct. */
+.text-button:disabled {
+  cursor: default;
+  color: var(--text-04);
+  text-decoration: none;
 }
 
 .project-header {
@@ -1883,9 +1920,24 @@ select:focus-visible,
   text-align: left;
 }
 
-.overflow-menu-list button:hover,
-.overflow-menu-list button:focus-visible {
+.overflow-menu-list button:hover:not(:disabled),
+.overflow-menu-list button:focus-visible:not(:disabled) {
   background: var(--surface-05);
+}
+
+/*
+ * Not one of the four classes named in the original report, but the identical defect: this menu
+ * already renders real `disabled` items (`OverflowMenu.tsx`'s own `disabled`/`disabledReason`
+ * props back Export's FDX/DOCX/PDF entries when the projection is invalid, and now "Document
+ * settings…" while the entitlement-driven read-only banner is showing -- App.tsx), and until
+ * this rule existed a disabled menu item was background-transparent either way and still lit up
+ * on hover, exactly like the four the report asked for. `.tool-button:disabled`'s own visual
+ * language again: mute the text, default cursor, no colour change needed beyond that since this
+ * menu is already a transparent-background list.
+ */
+.overflow-menu-list button:disabled {
+  cursor: default;
+  color: var(--text-04);
 }
 
 /*

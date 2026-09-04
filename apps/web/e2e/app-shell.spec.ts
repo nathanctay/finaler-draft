@@ -319,3 +319,58 @@ test('the read-only banner gets its own grid row instead of displacing the toolb
   // the end of the track list.
   expect(measurements.statusbar.bottom).toBeLessThanOrEqual(VIEWPORT.height);
 });
+
+/**
+ * `.primary-button` (and, by the same defect, `.text-button` and `.overflow-menu-list button`
+ * just below this file's own imports) had no `:disabled` rule at all, and their `:hover` rules
+ * were not scoped to `:not(:disabled)`. A `disabled` HTML attribute has no visual effect of its
+ * own -- it only changes behaviour (no click, no focus by Tab) -- so with no author styling for
+ * the state, a disabled instance rendered pixel-identical to an enabled one and still responded
+ * to `:hover`. The lapse-chooser banner's "Make this one editable" button surfaced this first
+ * (`cooldownUntil` correctly applied `disabled`, but the control still looked, and behaved,
+ * fully active), but the report that found it was explicit that this is latent everywhere a
+ * `disabled` state already exists, not a defect in this one button.
+ *
+ * jsdom cannot see any of this -- it has no computed styles worth trusting -- which is why this
+ * lives here rather than as a `toHaveAttribute('disabled', ...)` assertion in a unit test: that
+ * attribute was already correct in App.tsx and the bug shipped anyway.
+ */
+test('a disabled .primary-button is visually distinct from an enabled one and does not respond to hover', async ({
+  page,
+}) => {
+  await page.evaluate(() => {
+    document.body.innerHTML = '';
+    const enabled = document.createElement('button');
+    enabled.className = 'primary-button';
+    enabled.type = 'button';
+    enabled.id = 'enabled-button';
+    enabled.textContent = 'Enabled';
+    const disabled = document.createElement('button');
+    disabled.className = 'primary-button';
+    disabled.type = 'button';
+    disabled.id = 'disabled-button';
+    disabled.disabled = true;
+    disabled.textContent = 'Disabled';
+    document.body.append(enabled, disabled);
+  });
+
+  const atRest = await page.evaluate(() => ({
+    enabledBackground: getComputedStyle(document.getElementById('enabled-button')!).backgroundColor,
+    disabledBackground: getComputedStyle(document.getElementById('disabled-button')!)
+      .backgroundColor,
+    disabledCursor: getComputedStyle(document.getElementById('disabled-button')!).cursor,
+  }));
+
+  // The actual reported defect: a disabled instance rendered visually identical to an enabled
+  // one ("solid, coloured" -- indistinguishable at rest).
+  expect(atRest.disabledBackground).not.toBe(atRest.enabledBackground);
+  // A pointer cursor on a dead control says "click me" just as loudly as a matching hover state.
+  expect(atRest.disabledCursor).not.toBe('pointer');
+
+  // The literal reported symptom: "it still lights up on hover."
+  await page.hover('#disabled-button');
+  const onHover = await page.evaluate(
+    () => getComputedStyle(document.getElementById('disabled-button')!).backgroundColor,
+  );
+  expect(onHover).toBe(atRest.disabledBackground);
+});
