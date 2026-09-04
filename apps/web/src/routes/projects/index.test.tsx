@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionUser } from '../../api.js';
 import {
   clearQueryCache,
+  entitlementSnapshot,
   fetchMock,
   invalidateQueries,
   projectId,
@@ -133,5 +134,90 @@ describe('projects page', () => {
     // control for an action the viewer cannot perform is withheld.
     expect(screen.getByText('Edited elsewhere')).toBeVisible();
     expect(screen.getByText('Reviewed elsewhere')).toBeVisible();
+  });
+
+  describe('the lapse-chooser banner', () => {
+    const projectsData = [{ id: projectId, role: 'owner', title: 'Feature' }];
+    const screenplayA = '317e84fe-704d-40b4-aeea-aec01f628931';
+    const screenplayB = 'ef16e524-c280-48cf-9091-20e57dbf817f';
+
+    function setEntitlement(entitlementData: unknown) {
+      routeState.queries[JSON.stringify(['projects'])] = {
+        data: projectsData,
+        isError: false,
+        isLoading: false,
+      };
+      routeState.queries[JSON.stringify(['entitlement'])] = {
+        data: entitlementData,
+        isError: false,
+        isLoading: false,
+      };
+    }
+
+    it('stays silent for an active subscriber', () => {
+      setEntitlement(entitlementSnapshot({ tier: 'paid' }));
+      render(<ProjectsPage />);
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('stays silent once a restricted account has chosen its editable screenplay', () => {
+      setEntitlement(
+        entitlementSnapshot({
+          tier: 'restricted',
+          editableScreenplayId: screenplayA,
+          candidateScreenplayIds: [screenplayA, screenplayB],
+        }),
+      );
+      render(<ProjectsPage />);
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('stays silent for a restricted account with nothing to choose among', () => {
+      // A single candidate resolves on its own (entitlements.ts's `resolveEditableScreenplayId`)
+      // without ever asking -- there is no choice to surface a banner about.
+      setEntitlement(
+        entitlementSnapshot({
+          tier: 'restricted',
+          editableScreenplayId: null,
+          candidateScreenplayIds: [screenplayA],
+        }),
+      );
+      render(<ProjectsPage />);
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('stays silent when the entitlement fetch itself errors -- advisory, not a gate, so it fails quiet rather than guessing', () => {
+      routeState.queries[JSON.stringify(['projects'])] = {
+        data: projectsData,
+        isError: false,
+        isLoading: false,
+      };
+      routeState.queries[JSON.stringify(['entitlement'])] = {
+        data: undefined,
+        isError: true,
+        isLoading: false,
+      };
+      render(<ProjectsPage />);
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('explains the situation, with no screenplay title and no default, when several screenplays are candidates and none is chosen', () => {
+      setEntitlement(
+        entitlementSnapshot({
+          tier: 'restricted',
+          editableScreenplayId: null,
+          candidateScreenplayIds: [screenplayA, screenplayB],
+        }),
+      );
+      render(<ProjectsPage />);
+      const banner = screen.getByRole('status');
+      expect(banner).toHaveTextContent(/subscription has ended/i);
+      expect(banner).toHaveTextContent(/make this one editable/i);
+      // No title list and no default pick: plan.md forbids the system choosing on the writer's
+      // behalf, and the owner's own design is that the choice happens from inside a screenplay,
+      // not from a list of titles picked here.
+      expect(screen.queryByText(screenplayA)).not.toBeInTheDocument();
+      expect(banner.querySelector('a, button')).toBeNull();
+    });
   });
 });

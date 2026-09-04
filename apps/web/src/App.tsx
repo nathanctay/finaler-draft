@@ -45,7 +45,7 @@ import { SeamCaretExtension } from './seamCaret.js';
 import { SmartTypeGhostExtension } from './smartTypeGhost.js';
 import { SmartTypeList, SmartTypeListExtension } from './smartTypeList.js';
 import { ElementMenu, ElementMenuExtension } from './elementMenu.js';
-import { ApiError, api, type PersistedScreenplay } from './api.js';
+import { ApiError, MessageApiError, api, type PersistedScreenplay } from './api.js';
 import { applyPageGeometryCssVariables } from './pageGeometryCss.js';
 import { TitlePageView } from './titlePageEditor.js';
 import {
@@ -229,7 +229,55 @@ const editorProps = {
   },
 };
 
-export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay }) {
+/**
+ * Set by the route (`routes/projects/$projectId.screenplays.$screenplayId.tsx`) whenever the
+ * signed-in account's entitlement -- not this editor's own schema support, which
+ * `initialContent` above already governs -- forbids editing *this* screenplay right now
+ * (plan.md's "What happens when a subscription lapses": a lapsed account keeps every screenplay
+ * readable and exportable, but only one, chosen, screenplay editable). `undefined` means
+ * entitlement raises no objection, so every existing caller of `App` -- this file's own demo
+ * default and every test that doesn't pass this prop -- keeps its prior, entitlement-unaware
+ * behavior exactly.
+ *
+ * This is deliberately *not* a second read-only mechanism: `editingAllowed` below combines this
+ * with `initialContent !== undefined` into the one flag that actually gates the editor, reusing
+ * the seam that already exists for "this screenplay can't be edited here" rather than growing a
+ * parallel one. `message` and `onMakeEditable` are precomputed by the route, which is the layer
+ * that actually holds the account's entitlement snapshot -- `App` has no way to know whether this
+ * screenplay is even a candidate the account could choose, so it never guesses.
+ */
+export interface EntitlementReadOnly {
+  /** Why this screenplay can't be edited right now, shown verbatim in the read-only banner. */
+  message: string;
+  /**
+   * Present only when this screenplay is a live candidate this account could make its editable
+   * one (an owner/editor role screenplay under the account's own entitlement snapshot, not a
+   * reviewer's, and not some other account's screenplay entirely) -- omitted otherwise, which
+   * hides the action rather than offering a button that could only ever fail with "not found".
+   * Resolves once the account's editable slot has actually changed; rejects (typically a
+   * `MessageApiError` carrying the server's own explanation) on a cooldown or any other failure,
+   * which the banner surfaces inline rather than silently swallowing.
+   */
+  onMakeEditable?: (() => Promise<void>) | undefined;
+  /**
+   * A human-readable local date/time, present only when `onMakeEditable` is also present *and*
+   * the account's own switch-slot cooldown is, right now, still active -- computed by the route
+   * from the same `cooldownEndsAt` `GET /api/entitlement` already returns (entitlements.ts's
+   * `EDITABLE_SLOT_COOLDOWN_MS`, evaluated server-side), never a client-recomputed interval. This
+   * is display data, not enforcement: the button still relies on the server's own 409 as the real
+   * gate (see `onMakeEditable`'s own doc comment on what a rejection means), and a stale or
+   * absent value here only ever costs a possible extra round trip, never a false "you may edit."
+   */
+  cooldownUntil?: string | undefined;
+}
+
+export function App({
+  entitlementReadOnly,
+  initial = legacyInitial,
+}: {
+  entitlementReadOnly?: EntitlementReadOnly | undefined;
+  initial?: PersistedScreenplay;
+}) {
   const [panels, setPanels] = useState<Record<Panel, boolean>>({
     navigator: true,
     inspector: true,
@@ -324,6 +372,12 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   // it describes the clipboard action's own outcome, which can succeed or fail independently of
   // -- and without ever changing -- the save conflict it is trying to rescue the writer from.
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
+  // The read-only banner's own "Make this one editable" action (below). Not part of `saveState`
+  // or `copyStatus`: it describes `entitlementReadOnly.onMakeEditable`'s own outcome, which can
+  // fail (a cooldown, or the account no longer being a candidate) independently of anything else
+  // on this screen, and the banner is the only place that outcome is ever shown.
+  const [makeEditableState, setMakeEditableState] = useState<'idle' | 'pending' | 'error'>('idle');
+  const [makeEditableError, setMakeEditableError] = useState<string>();
   // `editorContentFromScreenplay` throws for canonical features this text-block editor cannot
   // faithfully preserve (more than one title page, notes, dual dialogue, page breaks); `undefined`
   // here means "read-only", same meaning `initialContent` carried before the title page split out
@@ -336,6 +390,11 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     }
   }, [initial.screenplay]);
   const initialContent = initialProjection?.body;
+  // The one flag that actually gates editing: this editor must support the screenplay's
+  // canonical features *and* the account's entitlement must permit editing this specific
+  // screenplay. Either reason alone is enough to force read-only -- there is no case where
+  // `entitlementReadOnly` overrides an already-unsupported schema, or vice versa.
+  const editingAllowed = initialContent !== undefined && entitlementReadOnly === undefined;
   const editorContent = useMemo(() => {
     if (initialContent === undefined || initialContent.content.length > 0) {
       return initialContent;
@@ -556,7 +615,7 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
 
   const editor = useEditor({
     content: editorContent ?? unavailableEditorContent,
-    editable: initialContent !== undefined,
+    editable: editingAllowed,
     editorProps,
     extensions,
     onCreate: ({ editor: editorInstance }) => {
@@ -1036,6 +1095,10 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   // out of state, because `setTitlePageState` is asynchronous and the save this triggers must
   // reflect the edit that just happened, not whatever the closure captured before it.
   const updateTitlePageState = (next: TitlePageState) => {
+    // `TitlePageView`'s own `readOnly` prop (below) already stops the writer's keystrokes from
+    // reaching `onChange` in the first place -- this is the second, independent guard: nothing
+    // here trusts that the caller actually honoured `readOnly`.
+    if (!editingAllowed) return;
     setTitlePageState(next);
     if (!editor) return;
     const nextProjection = projectLocalScreenplay(editor, {
@@ -1075,6 +1138,10 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   // in paginationExtension.ts for why passing it in, not merely reordering the two calls, is what
   // actually fixes it).
   const updateDocumentSettings = (next: DocumentSettings) => {
+    // The "Document settings…" menu item is disabled while read-only (below), so this dialog
+    // should never be reachable in the first place -- this guard is what actually stops it,
+    // rather than only the menu item's own `disabled` attribute.
+    if (!editingAllowed) return;
     setDocumentSettings(next);
     if (!editor) return;
     updatePaginationDocumentSettings(editor, next, () => applyPageGeometryCssVariables(next));
@@ -1167,12 +1234,42 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
   };
 
   const changeElement = (element: ScreenplayElementType) => {
-    if (!editor) {
+    // `disabled` on the `<select>` below already stops a pointer/keyboard user from reaching
+    // this, but `convertActiveScreenplayBlock` dispatches a ProseMirror transaction directly --
+    // unlike the DOM-level typing Tiptap's own `editable: false` blocks -- so this guard is the
+    // one place that actually stops a read-only screenplay's content from changing this way, not
+    // merely a UI affordance mirroring a rule enforced elsewhere.
+    if (!editor || !editingAllowed) {
       return;
     }
     convertActiveScreenplayBlock(editor, element);
     editor.commands.focus(undefined, { scrollIntoView: false });
     syncEditorState(editor);
+  };
+
+  // The read-only banner's "Make this one editable" button. `entitlementReadOnly.onMakeEditable`
+  // is the route's own call through to `PUT /api/entitlement/editable-screenplay`
+  // (api.ts's `switchEditableScreenplay`); this only owns the button's own pending/error
+  // feedback, the same division of responsibility `copyMyVersion` above has with `copyStatus`.
+  // On success there is nothing further to do here: the route re-fetches its own entitlement
+  // query and this component simply stops receiving `entitlementReadOnly` on the next render,
+  // which is what actually makes the editor editable -- this function never flips `editingAllowed`
+  // itself.
+  const makeEditable = () => {
+    if (!entitlementReadOnly?.onMakeEditable) return;
+    setMakeEditableState('pending');
+    setMakeEditableError(undefined);
+    entitlementReadOnly.onMakeEditable().then(
+      () => setMakeEditableState('idle'),
+      (error: unknown) => {
+        setMakeEditableState('error');
+        setMakeEditableError(
+          error instanceof MessageApiError
+            ? error.serverMessage
+            : 'Could not make this screenplay editable. Try again.',
+        );
+      },
+    );
   };
 
   // Shared by all three export menu items below -- FDX, DOCX, and PDF (requirement 2,
@@ -1205,8 +1302,22 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
     });
   };
 
+  // A modifier class, not a hardcoded sixth grid row: `.application`'s `grid-template-rows`
+  // (styles.css) is a fixed five-row track list, and `.readonly-banner` is an extra grid child
+  // only present when `entitlementReadOnly` is set. Without a class marking that, the banner
+  // would silently consume the toolbar's row and shove every row after it down by one --
+  // `has-readonly-banner` is what lets styles.css insert an `auto`-sized row for the banner
+  // specifically when it exists, leaving the five original rows' sizes untouched otherwise.
+  const applicationClassName = [
+    'application',
+    dark && 'dark',
+    entitlementReadOnly && 'has-readonly-banner',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
   return (
-    <main className={dark ? 'application dark' : 'application'}>
+    <main className={applicationClassName}>
       <header className="titlebar">
         {/*
           A plain anchor, not the router's `Link`: App is deliberately rendered as a
@@ -1244,6 +1355,10 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
           <OverflowMenu
             items={[
               {
+                disabled: !editingAllowed,
+                disabledReason: !editingAllowed
+                  ? 'Read-only: this screenplay is not your account’s editable one'
+                  : undefined,
                 label: 'Document settings…',
                 onSelect: () => setSettingsDialogOpen(true),
               },
@@ -1332,16 +1447,57 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
           settings={documentSettings}
         />
       )}
+      {entitlementReadOnly && (
+        // Persistent, not dismissible: plan.md's lapse policy means this state does not resolve
+        // itself, so nothing here ever offers a way to hide it without actually addressing it.
+        // Rendered above the toolbar so it is visible regardless of which panels are open or
+        // closed -- the one thing on this screen every read-only visit must see.
+        <div className="readonly-banner" role="status">
+          <p>{entitlementReadOnly.message}</p>
+          {entitlementReadOnly.onMakeEditable && (
+            <button
+              className="primary-button"
+              disabled={
+                makeEditableState === 'pending' || entitlementReadOnly.cooldownUntil !== undefined
+              }
+              onClick={makeEditable}
+              type="button"
+            >
+              Make this one editable
+            </button>
+          )}
+          {entitlementReadOnly.cooldownUntil !== undefined && (
+            // Known up front, from the same `cooldownEndsAt` GET /api/entitlement already
+            // returns -- the button says so before a click, rather than inviting one that the
+            // server has already told this app it will refuse. See the route's own comment for
+            // why this is not a client-recomputed cooldown: it is exactly the server's own value,
+            // read for display, never for enforcement.
+            <p className="readonly-banner-cooldown">
+              You can switch to a different screenplay again at {entitlementReadOnly.cooldownUntil}.
+            </p>
+          )}
+          {/* Suppressed once `cooldownUntil` arrives: the failed click's own `onMakeEditable`
+              (the route) invalidates entitlement on failure too, so a stale-data race (the button
+              was clickable because this app's last fetch predated the cooldown) resolves into the
+              same up-front explanation above on the very next render, rather than leaving both a
+              raw server error and a redundant cooldown notice on screen at once. */}
+          {makeEditableState === 'error' && entitlementReadOnly.cooldownUntil === undefined && (
+            <p className="field-error" role="alert">
+              {makeEditableError}
+            </p>
+          )}
+        </div>
+      )}
       <section className="toolbar" aria-label="Screenplay tools">
         <ToolButton
-          disabled={!editor?.can().undo()}
+          disabled={!editingAllowed || !editor?.can().undo()}
           label="Undo local change"
           onClick={() => editor?.commands.undo()}
         >
           ↶
         </ToolButton>
         <ToolButton
-          disabled={!editor?.can().redo()}
+          disabled={!editingAllowed || !editor?.can().redo()}
           label="Redo local change"
           onClick={() => editor?.commands.redo()}
         >
@@ -1352,6 +1508,7 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
           <span className="visually-hidden">Active screenplay element</span>
           <select
             aria-label="Active screenplay element"
+            disabled={!editingAllowed}
             onChange={(event) => changeElement(event.target.value as ScreenplayElementType)}
             value={activeElement}
           >
@@ -1600,7 +1757,11 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
                 argued from spec): at zoom 0.5/1.0/1.5 a fixed 48px `margin-top` rendered as
                 24/48/72px and `scrollHeight` scaled exactly in step. */}
             {titlePageState && (
-              <TitlePageView onChange={updateTitlePageState} state={titlePageState} />
+              <TitlePageView
+                onChange={updateTitlePageState}
+                readOnly={!editingAllowed}
+                state={titlePageState}
+              />
             )}
             <article
               className={continuousScroll ? 'page continuous' : 'page'}
@@ -1656,23 +1817,25 @@ export function App({ initial = legacyInitial }: { initial?: PersistedScreenplay
         <span className="status-center" aria-live="polite">
           {initialContent === undefined
             ? 'Text editing is unavailable for this screenplay'
-            : saveState === 'conflict'
-              ? // No claim of preservation: nothing preserves this browser's edits (there is no
-                // localStorage, sessionStorage, or IndexedDB anywhere in apps/web/src -- see
-                // audit/CONSOLIDATED.md item A2 and requirement 1 in
-                // progress/save-conflict-recovery.md). This says only what is actually true --
-                // something else changed this screenplay, this copy has not been saved, and
-                // saving is paused -- and points at the two real actions below rather than an
-                // instruction ("reload") that would destroy the very work it used to claim to
-                // protect.
-                'Save conflict · this screenplay changed elsewhere; this copy is unsaved and saving is paused'
-              : saveState === 'failed'
-                ? 'Save failed · make another edit to retry'
-                : saveState === 'saving'
-                  ? 'Saving…'
-                  : projection.valid
-                    ? `Saved · validated locally · ${wordCount} words · no print pagination`
-                    : `Draft needs attention · ${projection.issues[0] ?? 'Invalid screenplay data.'}`}
+            : entitlementReadOnly
+              ? 'Read-only · make this screenplay editable to save changes here'
+              : saveState === 'conflict'
+                ? // No claim of preservation: nothing preserves this browser's edits (there is no
+                  // localStorage, sessionStorage, or IndexedDB anywhere in apps/web/src -- see
+                  // audit/CONSOLIDATED.md item A2 and requirement 1 in
+                  // progress/save-conflict-recovery.md). This says only what is actually true --
+                  // something else changed this screenplay, this copy has not been saved, and
+                  // saving is paused -- and points at the two real actions below rather than an
+                  // instruction ("reload") that would destroy the very work it used to claim to
+                  // protect.
+                  'Save conflict · this screenplay changed elsewhere; this copy is unsaved and saving is paused'
+                : saveState === 'failed'
+                  ? 'Save failed · make another edit to retry'
+                  : saveState === 'saving'
+                    ? 'Saving…'
+                    : projection.valid
+                      ? `Saved · validated locally · ${wordCount} words · no print pagination`
+                      : `Draft needs attention · ${projection.issues[0] ?? 'Invalid screenplay data.'}`}
         </span>
         {initialContent !== undefined && !projection.valid && (
           // Deliberately not inside `.status-center`, which the narrow-viewport media query

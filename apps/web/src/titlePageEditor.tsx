@@ -15,18 +15,26 @@ type TitlePageFieldName = 'title' | 'credit' | 'source' | 'draft-date' | 'author
  * below only pushes `value` into the DOM when it disagrees (an external change -- undo, or the
  * writer clearing the field elsewhere -- not the writer's own keystroke, which already updated
  * both `ref.current.textContent` and `value` together via `onChange`).
+ *
+ * `readOnly` drops `contentEditable` entirely rather than leaving it `true` with the handlers
+ * merely disconnected: this field never touches the ProseMirror document, so Tiptap's own
+ * `editable: false` (App.tsx) has no effect on it at all -- unlike the body's blocks, a
+ * `contentEditable` div is a second, independent surface a writer's keystrokes could land on, and
+ * this is the one place that actually stops them.
  */
 function TitlePageField({
   ariaLabel,
   className,
   field,
   onChange,
+  readOnly = false,
   value,
 }: {
   ariaLabel: string;
   className?: string;
   field: TitlePageFieldName;
   onChange: (value: string) => void;
+  readOnly?: boolean;
   value: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -40,18 +48,24 @@ function TitlePageField({
   return (
     <div
       aria-label={ariaLabel}
+      aria-readonly={readOnly || undefined}
       className={className}
-      contentEditable
+      contentEditable={!readOnly}
       data-title-page-field={field}
-      onInput={(event) => onChange(event.currentTarget.textContent ?? '')}
-      onKeyDown={(event) => {
-        // A title-page field is one line, unlike the body's blocks: Enter here has no split
-        // target (there is no "next element" convention for a title page), so it is suppressed
-        // rather than inserting a literal newline a single-line field was never meant to hold.
-        if (event.key === 'Enter') {
-          event.preventDefault();
-        }
-      }}
+      onInput={readOnly ? undefined : (event) => onChange(event.currentTarget.textContent ?? '')}
+      onKeyDown={
+        readOnly
+          ? undefined
+          : (event) => {
+              // A title-page field is one line, unlike the body's blocks: Enter here has no split
+              // target (there is no "next element" convention for a title page), so it is
+              // suppressed rather than inserting a literal newline a single-line field was never
+              // meant to hold.
+              if (event.key === 'Enter') {
+                event.preventDefault();
+              }
+            }
+      }
       ref={ref}
       role="textbox"
       suppressContentEditableWarning
@@ -66,6 +80,7 @@ function TitlePageLineList({
   lines,
   listClassName,
   onChange,
+  readOnly = false,
   removeLabel,
 }: {
   addLabel: string;
@@ -74,6 +89,7 @@ function TitlePageLineList({
   lines: string[];
   listClassName: string;
   onChange: (lines: string[]) => void;
+  readOnly?: boolean;
   removeLabel: (index: number) => string;
 }) {
   return (
@@ -91,26 +107,35 @@ function TitlePageLineList({
               next[index] = value;
               onChange(next);
             }}
+            readOnly={readOnly}
             value={line}
           />
-          <button
-            aria-label={removeLabel(index)}
-            className="title-page-line-remove"
-            onClick={() => onChange(lines.filter((_, lineIndex) => lineIndex !== index))}
-            type="button"
-          >
-            ×
-          </button>
+          {/* Hidden, not merely disabled, while read-only: these two controls have no ProseMirror
+              or `contentEditable` layer standing between a click and `onChange` the way the text
+              fields do, so a visible-but-inert button here would be the one remaining place a
+              read-only title page could still be mutated by a click. */}
+          {!readOnly && (
+            <button
+              aria-label={removeLabel(index)}
+              className="title-page-line-remove"
+              onClick={() => onChange(lines.filter((_, lineIndex) => lineIndex !== index))}
+              type="button"
+            >
+              ×
+            </button>
+          )}
         </div>
       ))}
-      <button
-        aria-label={addLabel}
-        className="title-page-line-add"
-        onClick={() => onChange([...lines, ''])}
-        type="button"
-      >
-        + Add line
-      </button>
+      {!readOnly && (
+        <button
+          aria-label={addLabel}
+          className="title-page-line-add"
+          onClick={() => onChange([...lines, ''])}
+          type="button"
+        >
+          + Add line
+        </button>
+      )}
     </div>
   );
 }
@@ -127,13 +152,18 @@ function TitlePageLineList({
  * `persistence.spec.ts`'s and `App.test.tsx`'s structural guards check. Title pages never
  * paginate with the body and are never numbered (plan.md); this component has no way to become
  * pagination input even by accident, because it never touches the ProseMirror document at all.
+ *
+ * `readOnly` is App.tsx's own `editingAllowed` (schema support *and* entitlement, combined) --
+ * this component has no opinion of its own about why it is read-only, only whether it is.
  */
 export function TitlePageView({
   onChange,
+  readOnly = false,
   state,
   style,
 }: {
   onChange: (next: TitlePageState) => void;
+  readOnly?: boolean;
   state: TitlePageState;
   style?: CSSProperties;
 }) {
@@ -145,6 +175,7 @@ export function TitlePageView({
           className="title-page-title"
           field="title"
           onChange={(value) => onChange({ ...state, title: value })}
+          readOnly={readOnly}
           value={state.title}
         />
         <TitlePageField
@@ -152,6 +183,7 @@ export function TitlePageView({
           className="title-page-credit"
           field="credit"
           onChange={(value) => onChange({ ...state, credit: value })}
+          readOnly={readOnly}
           value={state.credit}
         />
         <TitlePageLineList
@@ -161,6 +193,7 @@ export function TitlePageView({
           listClassName="title-page-authors"
           lines={state.authors}
           onChange={(authors) => onChange({ ...state, authors })}
+          readOnly={readOnly}
           removeLabel={(index) => `Remove author line ${index + 1}`}
         />
         <TitlePageField
@@ -168,6 +201,7 @@ export function TitlePageView({
           className="title-page-source"
           field="source"
           onChange={(value) => onChange({ ...state, source: value })}
+          readOnly={readOnly}
           value={state.source}
         />
         <TitlePageField
@@ -175,6 +209,7 @@ export function TitlePageView({
           className="title-page-draft-date"
           field="draft-date"
           onChange={(value) => onChange({ ...state, draftDate: value })}
+          readOnly={readOnly}
           value={state.draftDate}
         />
       </div>
@@ -185,6 +220,7 @@ export function TitlePageView({
         listClassName="title-page-contact"
         lines={state.contact}
         onChange={(contact) => onChange({ ...state, contact })}
+        readOnly={readOnly}
         removeLabel={(index) => `Remove contact line ${index + 1}`}
       />
     </article>

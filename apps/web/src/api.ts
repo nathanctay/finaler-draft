@@ -62,6 +62,11 @@ const entitlementSchema = z.object({
   slotUpdatedAt: z.string().nullable(),
   cooldownEndsAt: z.string().nullable(),
 });
+// Mirrors apps/api/src/app.ts's `switchEditableScreenplayResponseSchema` field for field.
+const switchEditableScreenplayResponseSchema = z.object({
+  screenplayId: z.string(),
+  updatedAt: z.string(),
+});
 const billingSessionResponseSchema = z.object({ url: z.string() });
 // Not a zod schema: nothing here ever validates an incoming `plan` value at runtime (the caller
 // is always this app's own UI, already constrained by this same TypeScript union), so a schema
@@ -358,6 +363,18 @@ export const api = {
     json(`/api/screenplays/${id}/restore`, renameResponseSchema, { method: 'POST' }),
   deletedItems: () => json('/api/deleted', deletedResponseSchema),
   entitlement: () => json('/api/entitlement', entitlementSchema),
+  // `jsonWithServerMessage`, matching `createScreenplay` above: a refusal here carries a real
+  // explanation worth showing verbatim -- 404 for "not a candidate" (app.ts deliberately does not
+  // distinguish that from "does not exist", the same information-hiding convention the rest of
+  // this API already uses) and 409 for the switch-slot cooldown. App.tsx's read-only banner reads
+  // `.serverMessage` directly into its own inline error, the same way the free-tier limit prompt
+  // already does with this helper's other caller.
+  switchEditableScreenplay: (screenplayId: string) =>
+    jsonWithServerMessage(
+      '/api/entitlement/editable-screenplay',
+      switchEditableScreenplayResponseSchema,
+      { body: JSON.stringify({ screenplayId }), method: 'PUT' },
+    ),
   // Redirects the browser to the returned url (Stripe-hosted Checkout or Customer Portal) --
   // callers never inspect these beyond `.url`; see externalRedirect.ts, the one place that
   // navigation actually happens.

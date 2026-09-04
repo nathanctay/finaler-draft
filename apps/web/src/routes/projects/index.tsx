@@ -71,6 +71,39 @@ function ProjectsPage() {
   // Undo before the writer chooses to use it or leave.
   const [deletedProjects, setDeletedProjects] = useState<Record<string, string>>({});
   const projects = useQuery({ queryKey: ['projects'], queryFn: api.projects });
+  // Drives the persistent lapse-chooser banner below: plan.md's "a lapsed account with several
+  // screenplays must be asked which one stays editable" -- shown only when there is genuinely a
+  // choice to make (more than one candidate) and none has been made yet. An active subscriber, a
+  // restricted account with zero or one candidate (nothing to choose among -- `resolveEditable
+  // ScreenplayId`, apps/api/src/entitlements.ts, already resolves that case on its own), and a
+  // restricted account that has already chosen all render nothing here. An errored fetch also
+  // renders nothing: this banner is advisory, not a gate -- every screenplay stays readable and
+  // exportable regardless, so there is nothing unsafe about staying silent until the next
+  // successful fetch, unlike the editor's own fail-safe-to-read-only rule for actual editing.
+  //
+  // This page previously fetched entitlement eagerly for the account menu's own labelling, and
+  // that turned out to cost real backend load: `getSnapshot` runs three parallel SQL queries, and
+  // this is the one page every flow in the system suite touches at least once, which measurably
+  // regressed `test:system:persistence` under Playwright's 3-worker contention
+  // (progress/billing-checkout.md's "A regression, found and fixed"). That fetch was later
+  // deferred to the account menu's own open event, then removed from this page entirely once
+  // `routes/billing.subscription.tsx` took over as the one place entitlement state was shown. The
+  // banner below reintroduces an unconditional fetch here -- there is no interaction to defer it
+  // behind, since a persistent banner must be visible without one -- so `staleTime` is set well
+  // above React Query's zero-second default specifically to blunt the repeat-fetch cost a single
+  // browsing session's several visits to this page would otherwise add back; entitlement changing
+  // (a lapse, or a switch made elsewhere) is not something a writer needs reflected within a
+  // minute of it happening on a page whose own action is "go read the details on another page".
+  const entitlement = useQuery({
+    queryKey: ['entitlement'],
+    queryFn: api.entitlement,
+    staleTime: 60_000,
+  });
+  const showLapseChooserBanner =
+    entitlement.data !== undefined &&
+    entitlement.data.tier === 'restricted' &&
+    entitlement.data.editableScreenplayId === null &&
+    entitlement.data.candidateScreenplayIds.length > 1;
   const create = useMutation({
     mutationFn: () => api.createProject(title),
     onSuccess: () => {
@@ -139,6 +172,23 @@ function ProjectsPage() {
       <section className="project-list">
         <p className="eyebrow">PRIVATE PROJECTS</p>
         <h1>Your writing desk</h1>
+        {showLapseChooserBanner && (
+          // Persistent, not dismissible: this state does not resolve itself, and the owner
+          // explicitly rejected a blocking modal here (it would interrupt someone who only
+          // wanted to read or export) in favor of exactly this -- inform, then let the choice
+          // happen in place. No screenplay title is listed and no default is offered; plan.md
+          // is explicit that the system must never choose on the writer's behalf, or fall back
+          // to the oldest, newest, or largest -- the choice is made from inside the screenplay
+          // the writer actually wants (App.tsx's read-only banner and its "Make this one
+          // editable" action), not from a list of titles picked here.
+          <div className="lapse-chooser-banner" role="status">
+            <p>
+              Your subscription has ended, and none of your screenplays is set as editable yet. Open
+              any screenplay and choose “Make this one editable” to keep writing there — reading and
+              exporting stay available on every screenplay in the meantime.
+            </p>
+          </div>
+        )}
         <form
           className="create-row"
           onSubmit={(event) => {

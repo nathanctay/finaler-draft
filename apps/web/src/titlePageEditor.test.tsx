@@ -125,4 +125,45 @@ describe('TitlePageView', () => {
       contact: ['morgan@example.test', ''],
     });
   });
+
+  describe('readOnly', () => {
+    it('drops contentEditable from every field, not merely leaving it non-functional', () => {
+      render(<TitlePageView onChange={vi.fn()} readOnly state={populatedState()} />);
+
+      expect(screen.getByRole('textbox', { name: 'Title page: title' })).not.toHaveAttribute(
+        'contenteditable',
+        'true',
+      );
+      expect(
+        screen.getByRole('textbox', { name: 'Title page: author line 1' }),
+      ).not.toHaveAttribute('contenteditable', 'true');
+    });
+
+    it('ignores an input event a real browser could still fire on a readOnly field', () => {
+      // Belt and braces: `contentEditable={false}` (above) is what actually stops a writer's own
+      // keystrokes, but `onInput` is also dropped entirely -- this proves the handler itself, not
+      // only the DOM attribute, refuses to report a change while read-only.
+      const onChange = vi.fn();
+      render(<TitlePageView onChange={onChange} readOnly state={populatedState()} />);
+
+      typeInto(screen.getByRole('textbox', { name: 'Title page: title' }), 'Should not land');
+
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    it('hides the add/remove line controls -- the one mutation surface with no contentEditable layer to gate it', () => {
+      const state = { ...emptyState(), authors: ['Morgan Vale'] };
+      render(<TitlePageView onChange={vi.fn()} readOnly state={state} />);
+
+      expect(screen.queryByRole('button', { name: 'Add author line' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Add contact line' })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: 'Remove author line 1' }),
+      ).not.toBeInTheDocument();
+      // The line itself stays fully visible -- read-only, not hidden.
+      expect(screen.getByRole('textbox', { name: 'Title page: author line 1' })).toHaveTextContent(
+        'Morgan Vale',
+      );
+    });
+  });
 });

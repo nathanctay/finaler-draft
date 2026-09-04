@@ -8,6 +8,34 @@ export const screenplayId = '38d8a6db-43f1-4b47-b8fc-c15a96f9ac0e';
 type QueryState = { data: unknown; isError: boolean; isLoading: boolean };
 
 /**
+ * Mirrors apps/api/src/app.ts's `describeEntitlement`/apps/web/src/api.ts's `Entitlement` shape
+ * field for field. `paid` by default -- the shape every test not specifically exercising the free
+ * tier or a lapse should be able to ignore, matching this file's own `fetchMock` default reasoning
+ * for every other endpoint -- with each field overridable for the tests that do care. Any page
+ * with more than one concurrent `useQuery` call needs this wrapped in a `QueryState` and set on
+ * `routeState.queries[JSON.stringify(['entitlement'])]` (see that field's own comment); a bare
+ * shared `routeState.query` is not enough once a second query exists on the same page.
+ */
+export function entitlementSnapshot(
+  overrides: Partial<{
+    tier: 'paid' | 'restricted';
+    editableScreenplayId: string | null;
+    candidateScreenplayIds: string[];
+    slotUpdatedAt: string | null;
+    cooldownEndsAt: string | null;
+  }> = {},
+) {
+  return {
+    tier: 'paid' as const,
+    editableScreenplayId: null,
+    candidateScreenplayIds: [],
+    slotUpdatedAt: null,
+    cooldownEndsAt: null,
+    ...overrides,
+  };
+}
+
+/**
  * Mutable state the route mocks read from. Tests assign to it between renders to
  * drive loading, error, and data states without a real router or query client.
  */
@@ -129,13 +157,56 @@ export async function reactRouterMock(
   };
 }
 
-/** Stands in for the lazily imported editor and counts mounts so remounts are observable. */
+/**
+ * Stands in for the lazily imported editor and counts mounts so remounts are observable. Also
+ * renders `entitlementReadOnly` -- the route's own computed "why is this read-only, and how to
+ * fix it" prop (App.tsx's `EntitlementReadOnly`) -- when present, and exposes its
+ * `onMakeEditable` as a real clickable button, so a route-level test can assert both that the
+ * route computed the right prop and that clicking through to it calls the right thing, without
+ * needing the real (heavier, Tiptap-backed) `App` component at all.
+ */
 export async function editorModuleMock(): Promise<Record<string, unknown>> {
   const react = await vi.importActual<typeof React>('react');
   return {
-    App: ({ initial }: { initial: { title: string } }) => {
+    App: ({
+      entitlementReadOnly,
+      initial,
+    }: {
+      entitlementReadOnly?: {
+        cooldownUntil?: string;
+        message: string;
+        onMakeEditable?: () => Promise<void>;
+      };
+      initial: { title: string };
+    }) => {
       const [mountId] = react.useState(() => ++routeState.editorMounts);
-      return <div data-testid="editor-instance">{`${mountId}:${initial.title}`}</div>;
+      return (
+        <div data-testid="editor-instance">
+          <span>{`${mountId}:${initial.title}`}</span>
+          {entitlementReadOnly && (
+            <div data-testid="entitlement-readonly">
+              <p>{entitlementReadOnly.message}</p>
+              {entitlementReadOnly.onMakeEditable && (
+                <button
+                  disabled={entitlementReadOnly.cooldownUntil !== undefined}
+                  // `.catch(() => {})`, not a bare `void` call: a route test can deliberately
+                  // reject this (to prove the route's own `finally`-invalidate-on-failure runs)
+                  // without that rejection surfacing as an unhandled promise rejection here --
+                  // this stub isn't the thing under test for *how* a rejection is displayed
+                  // (App.test.tsx owns that), only for what the route passes down and does.
+                  onClick={() => void entitlementReadOnly.onMakeEditable!().catch(() => {})}
+                  type="button"
+                >
+                  Make this one editable
+                </button>
+              )}
+              {entitlementReadOnly.cooldownUntil !== undefined && (
+                <p data-testid="cooldown-until">{entitlementReadOnly.cooldownUntil}</p>
+              )}
+            </div>
+          )}
+        </div>
+      );
     },
   };
 }
