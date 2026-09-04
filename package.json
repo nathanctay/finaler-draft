@@ -18,7 +18,8 @@
     "build:packages": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/server-config build && pnpm --filter @finaler-draft/screenplay build && pnpm --filter @finaler-draft/database build && pnpm --filter @finaler-draft/layout build && pnpm --filter @finaler-draft/xml-escape build && pnpm --filter @finaler-draft/fdx build && pnpm --filter @finaler-draft/docx build && pnpm --filter @finaler-draft/pdf build",
     "dev": "pnpm build:packages && pnpm --parallel --stream --filter @finaler-draft/api --filter @finaler-draft/web dev",
     "start": "pnpm --filter @finaler-draft/api start",
-    "build": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/server-config build && pnpm --filter @finaler-draft/screenplay build && pnpm --filter @finaler-draft/database build && pnpm --filter @finaler-draft/layout build && pnpm --filter @finaler-draft/xml-escape build && pnpm --filter @finaler-draft/fdx build && pnpm --filter @finaler-draft/docx build && pnpm --filter @finaler-draft/pdf build && pnpm --filter @finaler-draft/web build && pnpm --filter @finaler-draft/api build",
+    "stripe:listen": "stripe listen --forward-to localhost:${PORT:-3001}/api/webhooks/stripe",
+    "build": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/server-config build && pnpm --filter @finaler-draft/screenplay build && pnpm --filter @finaler-draft/database build && pnpm --filter @finaler-draft/layout build && pnpm --filter @finaler-draft/xml-escape build && pnpm --filter @finaler-draft/fdx build && pnpm --filter @finaler-draft/docx build && pnpm --filter @finaler-draft/pdf build && pnpm --filter @finaler-draft/web build && pnpm --filter @finaler-draft/api build && pnpm --filter @finaler-draft/landing build",
     "typecheck": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/server-config build && pnpm --filter @finaler-draft/screenplay build && pnpm --filter @finaler-draft/database build && pnpm --filter @finaler-draft/layout build && pnpm --filter @finaler-draft/xml-escape build && pnpm --filter @finaler-draft/fdx build && pnpm --filter @finaler-draft/docx build && pnpm --filter @finaler-draft/pdf build && pnpm --filter @finaler-draft/web typecheck && pnpm --filter @finaler-draft/api typecheck && pnpm --filter @finaler-draft/landing typecheck",
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",
@@ -41,6 +42,7 @@
     "globals": "16.3.0",
     "prettier": "3.6.2",
     "prettier-plugin-astro": "0.14.1",
+    "railway": "^3.11.0",
     "typescript": "5.9.2",
     "typescript-eslint": "8.41.0"
   }

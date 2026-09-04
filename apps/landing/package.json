@@ -7,12 +7,14 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
+    "start": "sirv dist --host 0.0.0.0 --port ${PORT:-4321}",
     "typecheck": "astro check",
     "test": "vitest run"
   },
   "dependencies": {
     "@fontsource/ibm-plex-sans": "5.3.0",
-    "astro": "5.18.2"
+    "astro": "5.18.2",
+    "sirv-cli": "3.0.1"
   },
   "devDependencies": {
     "@astrojs/check": "0.9.10",

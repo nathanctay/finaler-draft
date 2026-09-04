@@ -49,14 +49,16 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
     },
     {
-      // apps/landing is a separate static app with no server of its own -- `astro preview` is
-      // the closest equivalent to the api's `start` above (serve the real build, not a dev
-      // server). The command builds first so this works whether or not `pnpm build` already
-      // covered it (it does not today -- apps/landing is not part of the root build chain; see
-      // progress/landing-page.md). `--host 127.0.0.1` is required, not cosmetic: astro preview's
-      // default `localhost` bound this process to `::1` only on this machine, so Playwright's
-      // plain-IPv4 readiness probe against `url` below timed out at 60s against a server that
-      // was, in fact, already up.
+      // apps/landing is a separate static app with no server of its own -- `sirv` (apps/landing's
+      // own `start` script, packages/../apps/landing/package.json) is a real static file server,
+      // the same one Railway runs in production (see progress/deploy-config.md). It replaces
+      // `astro preview`, a Vite dev server: astro preview enforces a Host-header allowlist, which
+      // is exactly what made the Railway deployment return 403 "Blocked request" for its own
+      // domain, and its default `localhost` bind bound this process to `::1` only on this
+      // machine, so Playwright's plain-IPv4 readiness probe against `url` below timed out at 60s
+      // against a server that was, in fact, already up. `--host 127.0.0.1` avoids the same
+      // ambiguity for sirv. The command builds first so this works whether or not `pnpm build`
+      // already covered it (it does now -- apps/landing is part of the root build chain).
       //
       // PUBLIC_APP_IS_LIVE=true is deliberate, not the site's real default (see site.config.ts):
       // header-contrast.spec.ts exists to measure the *computed colour* of the "Open app"
@@ -68,7 +70,7 @@ export default defineConfig({
       // assertions meaningful, same as the api webServer above sets FINALER_SYSTEM_TEST=true for
       // its own reasons.
       command:
-        'PUBLIC_APP_IS_LIVE=true pnpm --filter @finaler-draft/landing build && pnpm --filter @finaler-draft/landing exec astro preview --host 127.0.0.1 --port 4322',
+        'PUBLIC_APP_IS_LIVE=true pnpm --filter @finaler-draft/landing build && pnpm --filter @finaler-draft/landing exec sirv dist --host 127.0.0.1 --port 4322',
       url: 'http://127.0.0.1:4322',
       reuseExistingServer: !process.env.CI,
     },
