@@ -30,6 +30,14 @@ function readOrigin(envValue: string | undefined, fallback: string, varName: str
   return parsed.origin;
 }
 
+function readBoolean(envValue: string | undefined, fallback: boolean, varName: string): boolean {
+  const trimmed = envValue?.trim().toLowerCase();
+  if (!trimmed) return fallback;
+  if (trimmed === 'true' || trimmed === '1') return true;
+  if (trimmed === 'false' || trimmed === '0') return false;
+  throw new Error(`${varName} must be "true", "false", "1", or "0" if set: got "${trimmed}"`);
+}
+
 /**
  * The origin of the deployed app (the `app.` subdomain), e.g. "https://app.example.com". Every
  * link to the app on this site points here and nowhere else -- the landing page makes no API call
@@ -49,13 +57,29 @@ export const APP_ORIGIN = readOrigin(
 );
 
 /**
+ * Whether the app at `APP_ORIGIN` is actually live. The owner intends to deploy this site before
+ * the app exists, specifically to have a URL to give Stripe -- so there is a real, expected window
+ * where `APP_ORIGIN` resolves to nothing. Defaults to `false` deliberately: an unset
+ * `PUBLIC_APP_IS_LIVE` must never be read as "live," because that is exactly the state this site
+ * ships in first. Every template that would otherwise link to `APP_ORIGIN` must check this first
+ * and either omit the link or say plainly that the app isn't live yet -- never render a link that
+ * goes nowhere. Flipping this to `true` (with `PUBLIC_APP_ORIGIN` pointing at the real deployment)
+ * is the entire cutover: no template changes, no new build.
+ */
+export const APP_IS_LIVE = readBoolean(
+  import.meta.env.PUBLIC_APP_IS_LIVE,
+  false,
+  'PUBLIC_APP_IS_LIVE',
+);
+
+/**
  * The single label every link to the app uses, on the header, the hero, and the pricing card
- * alike. The owner asked for "Dashboard" when signed in and "Sign in" otherwise; doing that from
- * a static site would mean either a credentialed cross-origin request to the API or a
- * non-sensitive session-hint cookie read client-side, and the owner chose neither -- see the note
- * on `APP_ORIGIN` above. One neutral label sidesteps the question entirely: the app itself already
- * routes a visitor to sign-in or to their dashboard depending on session state, so this label is
- * never wrong and this site never needs to know which one applies.
+ * alike, whenever `APP_IS_LIVE` is true. The owner asked for "Dashboard" when signed in and "Sign
+ * in" otherwise; doing that from a static site would mean either a credentialed cross-origin
+ * request to the API or a non-sensitive session-hint cookie read client-side, and the owner chose
+ * neither -- see the note on `APP_ORIGIN` above. One neutral label sidesteps the question
+ * entirely: the app itself already routes a visitor to sign-in or to their dashboard depending on
+ * session state, so this label is never wrong and this site never needs to know which one applies.
  */
 export const APP_LINK_LABEL = 'Open app';
 

@@ -1,5 +1,5 @@
 ---
-import { PRODUCT_NAME, APP_ORIGIN, APP_LINK_LABEL } from '../site.config.ts';
+import { PRODUCT_NAME, APP_ORIGIN, APP_IS_LIVE, APP_LINK_LABEL } from '../site.config.ts';
 
 // Derived, not hardcoded, so a rename never leaves a stale initial behind -- see site.config.ts.
 const monogram = PRODUCT_NAME.trim().charAt(0).toUpperCase();
@@ -12,6 +12,12 @@ const monogram = PRODUCT_NAME.trim().charAt(0).toUpperCase();
   </a>
   <nav class="site-nav" aria-label="Primary">
     <a href="/#pricing">Pricing</a>
-    <a class="button button-ghost" href={APP_ORIGIN}>{APP_LINK_LABEL}</a>
+    {
+      APP_IS_LIVE && (
+        <a class="button button-ghost" href={APP_ORIGIN}>
+          {APP_LINK_LABEL}
+        </a>
+      )
+    }
   </nav>
 </header>

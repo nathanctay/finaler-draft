@@ -377,3 +377,180 @@ playwright test --project=landing
                            new test this round added -- see mutation-testing note above for the
                            failing run against the reintroduced defect).
 ```
+
+## Follow-up: content, the pre-launch app link, and a browser-test fix
+
+The page read as bare -- essentially a name, a tagline, and a price. This pass writes the content,
+makes the app link (and everything that depends on the app existing) conditional on configuration
+rather than a hardcoded assumption, and fixes a real regression the conditional link caused in the
+browser suite from the prior round.
+
+### Claims: what the page says, and where each one comes from
+
+Every capability claim was checked against the owner's own source-verified list, not invented or
+drawn from a competitor's vocabulary. Nothing in `ProductOverview.astro`'s feature list or
+`StatusSection.astro`'s built/planned split names anything not on that list.
+
+**Hero** (`index.astro`): keeps `TAGLINE` verbatim. Adds one lede sentence naming what the product
+_is_ -- "a screenwriting application: a structured editor for real screenplay elements, correct
+pagination, and exports that hold up" -- because the tagline alone doesn't say that to someone
+outside the project.
+
+**"What it does"** (new `ProductOverview.astro`, section id `product`): leads with
+differentiation (a structured editor with real elements, not a generic document with formatting
+applied) and interchange (FDX), before any feature list. A dedicated "product commitment"
+paragraph restates plan.md's free-tier export principle in this page's own words -- not a direct
+quote of plan.md's "hostage situation" phrase, but the same idea: a screenwriting tool you can't
+get your own pages out of isn't offering a free tier at all. The feature list (`<dl>` of eight
+term/description pairs) maps one-to-one to the owner's "built and working today" list: structured
+elements, keyboard-first authoring, deterministic pagination, SmartType, Navigator, title
+pages/scene numbers/document settings, zoom/page views, export. Accounts/projects/soft-delete and
+subscriptions are real but were left out of this list deliberately -- account-management plumbing
+a visitor already expects a SaaS product to have, not a differentiator worth a line.
+
+**Pricing** (`PricingTable.astro`): the Free card's collaboration bullet from the prior round was
+removed. plan.md's free-tier text describes collaboration as part of the _designed_ free tier, but
+collaboration is not built yet, and this round's brief was explicit that only shipped capabilities
+belong in claims -- pricing bullets are exactly the kind of unmarked, undifferentiated list a
+planned feature must not appear in (see the "planned items" note below). The intro line now states
+plainly that free is a real tier, not a trial: "one full screenplay, the whole authoring toolkit,
+export included."
+
+**Status** (new `StatusSection.astro`, section id `status`): one honest paragraph that the product
+is in active development and not yet deployed -- no invented launch date. Names exactly one
+planned feature: real-time collaboration, built on Yjs, marked with a visually distinct "Planned"
+badge (`.planned-item`/`.planned-badge`, styled with a dashed border and an accent-coloured pill,
+unlike anything in the shipped feature list). Revision history and FDX import were considered and
+cut: revision history has no comparable near-term commitment to point to, and FDX import is the
+single claim most likely to draw a direct "does it import from Final Draft?" from exactly the kind
+of visitor this page is written for -- fewer, better-supported claims over a complete roadmap dump,
+per the brief's own instruction.
+
+### What I was tempted to claim and cut
+
+- **"No watermark, no time limit" on free-tier export.** The owner's shipped list confirms export
+  itself works on every tier; it says nothing about watermarking or time limits. Asserting their
+  _absence_ would have been inventing a claim about something never confirmed either way. Cut in
+  favor of the plainer claim actually sourced: export ships free, full stop.
+- **Revision history**, mentioned above -- cut for the same "no comparable timeline" reason
+  collaboration was kept in.
+- **FDX import**, likewise -- the owner said to leave it out entirely rather than disclose it as a
+  gap, and that is what shipped: it is not named anywhere on the page, not even as a "not yet"
+  line.
+- **Any specific launch date.** Not written, not implied by a countdown or a season name -- "in
+  active development and not yet deployed" is the entire claim.
+
+### The app link, made conditional
+
+`site.config.ts` gained `APP_IS_LIVE` (env `PUBLIC_APP_IS_LIVE`, parsed by a new `readBoolean`
+helper alongside the existing `readOrigin`), **defaulting to `false`**. That default is the point:
+the owner intends to deploy this site before the app exists specifically to have a URL for Stripe,
+so an unset flag must never be read as "live." Every place that used to link unconditionally to
+`APP_ORIGIN` now checks it first:
+
+- `Header.astro`: the nav's app link renders only when `APP_IS_LIVE`; otherwise the nav is just
+  "Pricing."
+- `index.astro`'s hero: the primary "Open app" button is present only when live; "See pricing"
+  becomes the hero's sole (and now primary-styled) action otherwise, rather than a hero with one
+  dead button and one live one.
+- `PricingTable.astro`'s Pro card: the CTA link becomes a plain, non-interactive
+  `<p class="plan-note">Available when the app launches.</p>` when not live -- replaced with
+  honest copy, not just removed, so the card doesn't look broken with no action at all.
+
+**The tie-in the brief asked me to consider**: whether "the same configuration that controls the
+pre-launch state" could also control planned-feature presentation, rather than relying on a human
+to remember to update copy at cutover. `APP_IS_LIVE` now does both jobs. The hero's "Coming soon"
+eyebrow and the entire `StatusSection` (which is where the one planned feature, collaboration, is
+named) are both gated on `!APP_IS_LIVE` in `index.astro`, with a comment on each explaining why:
+collaboration ships _before_ this app is deployed, so by the time `APP_IS_LIVE` could ever be
+true, calling it "planned" would already be false. Rather than leave that stale claim rendered
+forever after cutover, the whole section disappears with the banner the moment the flag flips --
+a missing section is a loud, visible prompt for whoever deploys the app to add real "what's next"
+copy if there is any; a stale claim silently left in place is not. Verified both directions with a
+real `astro build`: default config renders no app links, "Coming soon," and the Status/Planned
+section; `PUBLIC_APP_IS_LIVE=true PUBLIC_APP_ORIGIN=https://app.example.com` renders three
+`https://app.example.com` "Open app" links and none of the pre-launch copy.
+
+### The Playwright regression this caused, and the fix
+
+Gating the header's "Open app" button on `APP_IS_LIVE` (default `false`) meant the button no
+longer exists in the DOM the landing preview serves by default -- and `header-contrast.spec.ts`'s
+border-colour assertion, written when the button always rendered, had nothing left to measure.
+`playwright test --project=landing` went from 4/4 to 2 passed / 2 failed, both the border check,
+in both colour schemes. This was caught, not self-diagnosed: a session interruption left the
+mutation-testing pass for the app-link guard mid-flight, and the coordinator both restored the
+in-progress mutation revert and ran the browser suite to confirm the regression.
+
+**Fix, matching the coordinator's suggested split**: `playwright.config.ts`'s `landing` webServer
+command now builds with `PUBLIC_APP_IS_LIVE=true` --
+
+```
+PUBLIC_APP_IS_LIVE=true pnpm --filter @finaler-draft/landing build && pnpm --filter @finaler-draft/landing exec astro preview --host 127.0.0.1 --port 4322
+```
+
+-- giving `header-contrast.spec.ts` a real button to measure again. This is deliberate, not the
+site's actual default: the browser suite's whole reason to exist is measuring _computed colour_,
+which only exists when there's an element to compute it on, while the complementary case -- no
+link at all while `APP_IS_LIVE` is false, the state this site actually ships in -- is already
+covered at the render layer, where an element's _absence_ is trivial to assert without a browser
+(`index.render.test.ts`'s "renders no link to the app while APP_IS_LIVE is false" test, added this
+round). Each layer tests what it's good at, rather than the browser project trying to special-case
+a state its own assertions have nothing to check.
+
+Did not delete or skip the border assertion, per the coordinator's explicit instruction -- it is
+the exact seam (`.button-ghost`'s `border-color: currentColor`) that made the original dark-mode
+bug bite two things instead of one, and remains real coverage of that inheritance path.
+
+**Verified end-to-end, both directions**: rebuilt with the fixed command, `playwright
+test --project=landing` -- 4/4 passed (both colour schemes, both the text-colour and border-colour
+assertions). Then reintroduced the original token bug
+(`--text-on-chrome: #101820;` inside the dark-mode block, byte-identical to the first round's
+defect) and reran: both dark-mode tests failed, both light-mode tests stayed green, confirming the
+fixed pipeline still catches the regression it exists to catch. Reverted and confirmed
+byte-identical restoration via `diff`. Confirmed `--project=chromium --list` still resolves the
+same 36 tests across 4 files, unaffected by the `webServer` command change.
+
+### Tests added this round
+
+- `site.config.test.ts`: `APP_IS_LIVE` defaults to `false` when unset; `readBoolean` parses
+  `true`/`1`/`false`/`0` (case-insensitive) correctly; throws on an unrecognized value (`"yes"`).
+- `index.render.test.ts`: rewritten to match the new content and the conditional link. The load-
+  bearing one -- "renders no link to the app while APP_IS_LIVE is false, and says so honestly
+  instead" -- opens with `expect(APP_IS_LIVE).toBe(false)` as a precondition (not a false-positive
+  guard: if a future default ever flipped this to `true`, the test would silently stop testing
+  what its name says it tests, so it asserts the precondition instead of assuming it), then checks
+  no `href` starts with `APP_ORIGIN`, `APP_LINK_LABEL` never appears, and the Pro card's honest
+  substitute text does. A second new test confirms "Coming soon" and the "Planned" /
+  "Real-time collaboration" status render together, and that "revision history" and "FDX import"
+  do not appear anywhere on the page.
+- `header-contrast.spec.ts`: unchanged in content: the fix was in how its webServer builds, not in
+  the spec itself.
+
+Landing unit suite: 23 -> 31 tests (5 files, unchanged file count). Mutation-tested the app-link
+guard directly (not just observed via the coordinator's confirmation): reverted `Header.astro`'s
+`APP_IS_LIVE &&` guard to an unconditional render, reran `index.render.test.ts` -- the "renders no
+link" test failed with the exact shape of the regression (`expected true to be false`); reverted.
+
+### Gates, this round
+
+```
+pnpm lint              -- exit 0
+pnpm format:check       -- exit 0
+pnpm typecheck          -- exit 0
+pnpm test               -- exit 0; apps/landing: 5 files, 31 tests passed (was 23); apps/web 645,
+                           apps/api 215 (+40 skipped integration), packages/layout 72, packages/pdf
+                           61 -- all unchanged.
+pnpm check:bundle-budget
+                        -- exit 0; unaffected, same three numbers as every prior round.
+```
+
+```
+TEST_DATABASE_URL="$(grep '^DATABASE_URL=' ".../.env" | cut -d= -f2-)" pnpm test:system:persistence
+                        -- exit 0; 18/18 passed, unaffected.
+```
+
+```
+playwright test --project=landing
+                        -- exit 0; 4/4 passed after the webServer fix (was 2 passed / 2 failed
+                           immediately after the app-link change, before the fix -- see above).
+```

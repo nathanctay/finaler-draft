@@ -1,5 +1,11 @@
 ---
-import { PRICE_MONTHLY, PRICE_ANNUAL, APP_ORIGIN, APP_LINK_LABEL } from '../site.config.ts';
+import {
+  PRICE_MONTHLY,
+  PRICE_ANNUAL,
+  APP_ORIGIN,
+  APP_IS_LIVE,
+  APP_LINK_LABEL,
+} from '../site.config.ts';
 import { formatPricePerInterval } from '../lib/money.ts';
 
 const monthly = formatPricePerInterval(PRICE_MONTHLY);
@@ -8,7 +14,10 @@ const annual = formatPricePerInterval(PRICE_ANNUAL);
 
 <section id="pricing" class="pricing" aria-labelledby="pricing-heading">
   <h2 id="pricing-heading">Pricing</h2>
-  <p class="pricing-intro">Start free. Upgrade when one screenplay isn't enough.</p>
+  <p class="pricing-intro">
+    Free is a real tier, not a trial -- one full screenplay, the whole authoring toolkit, export
+    included. Upgrade when one screenplay isn't enough.
+  </p>
   <div class="pricing-grid">
     <article class="plan-card" aria-labelledby="plan-free-heading">
       <h3 id="plan-free-heading">Free</h3>
@@ -18,9 +27,6 @@ const annual = formatPricePerInterval(PRICE_ANNUAL);
           One fully editable screenplay — the complete authoring toolkit, not a limited preview
         </li>
         <li>Export to PDF, Final Draft (FDX), and Word (DOCX)</li>
-        <li>
-          Collaborate on a screenplay shared with you — it becomes your one editable screenplay
-        </li>
       </ul>
     </article>
     <article class="plan-card plan-card-pro" aria-labelledby="plan-pro-heading">
@@ -31,7 +37,15 @@ const annual = formatPricePerInterval(PRICE_ANNUAL);
         <li>Everything in Free</li>
         <li>Unlimited editable screenplays</li>
       </ul>
-      <a class="button button-primary" href={APP_ORIGIN}>{APP_LINK_LABEL} to upgrade</a>
+      {
+        APP_IS_LIVE ? (
+          <a class="button button-primary" href={APP_ORIGIN}>
+            {APP_LINK_LABEL} to upgrade
+          </a>
+        ) : (
+          <p class="plan-note">Available when the app launches.</p>
+        )
+      }
     </article>
   </div>
 </section>

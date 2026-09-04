@@ -262,6 +262,59 @@ main {
   margin-top: 28px;
 }
 
+/* Product overview */
+
+.product {
+  padding: clamp(32px, 6vw, 64px) 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.product h2 {
+  text-align: center;
+  font-size: clamp(24px, 4vw, 32px);
+  margin: 0 0 24px;
+}
+
+.product-lede,
+.product-commitment {
+  max-width: 640px;
+  margin: 0 auto 16px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 16px;
+}
+
+.product-commitment {
+  margin-bottom: 32px;
+}
+
+.feature-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 20px;
+}
+
+.feature {
+  background: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+}
+
+.feature dt {
+  font-weight: 650;
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+
+.feature dd {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
 /* Pricing */
 
 .pricing {
@@ -338,6 +391,67 @@ main {
 
 .plan-card-pro {
   border-color: var(--surface-accent);
+}
+
+/* The Pro card's honest stand-in for its CTA button while APP_IS_LIVE is false -- see
+   PricingTable.astro. Same position (margin-top: auto) as the button it replaces, so the card's
+   height doesn't jump between the two states. */
+.plan-note {
+  margin: auto 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* Status */
+
+.status {
+  padding: clamp(32px, 6vw, 64px) 0;
+  border-top: 1px solid var(--border-subtle);
+  max-width: 640px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.status h2 {
+  font-size: clamp(24px, 4vw, 32px);
+  margin: 0 0 16px;
+}
+
+.status p {
+  color: var(--text-secondary);
+  font-size: 16px;
+  margin: 0 0 12px;
+}
+
+/* A visually distinct marker for a planned (not-yet-built) claim, deliberately unlike anything in
+   ProductOverview.astro's shipped feature list -- see StatusSection.astro's own comment for why
+   this distinction is load-bearing rather than decorative. */
+.planned-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  text-align: left;
+  max-width: 480px;
+  margin: 20px auto 0;
+  padding: 14px 18px;
+  background: var(--surface-panel);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.planned-badge {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-accent);
+  color: var(--text-on-accent);
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 /* Legal document pages */

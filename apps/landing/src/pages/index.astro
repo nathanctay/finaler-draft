@@ -1,26 +1,43 @@
 ---
 import Layout from '../layouts/Layout.astro';
+import ProductOverview from '../components/ProductOverview.astro';
 import PricingTable from '../components/PricingTable.astro';
-import { PRODUCT_NAME, TAGLINE, APP_ORIGIN, APP_LINK_LABEL } from '../site.config.ts';
+import { PRODUCT_NAME, TAGLINE, APP_ORIGIN, APP_IS_LIVE, APP_LINK_LABEL } from '../site.config.ts';
 
-const description = `${PRODUCT_NAME} is screenwriting software with proper industry-standard formatting, a fast keyboard-driven writing flow, and PDF, Final Draft, and Word export.`;
+const description = `${PRODUCT_NAME} is a screenwriting application: a structured editor for real screenplay elements, correct pagination, and PDF, FDX, and DOCX export -- available free.`;
 ---
 
 <Layout title={`${PRODUCT_NAME} — ${TAGLINE}`} description={description}>
   <section class="hero">
-    <p class="eyebrow">Coming soon</p>
+    {
+      // Gated on the same APP_IS_LIVE flag as the app link and StatusSection below, not left as
+      // unconditional text: "Coming soon" is what currently licenses mentioning a planned
+      // feature (collaboration, in StatusSection) at all -- see that component's own comment.
+      // The day this flips true, the banner and the planned-feature framing it licenses both
+      // disappear together, in the same code path, rather than depending on whoever deploys the
+      // app to also remember to come back here and edit copy.
+      !APP_IS_LIVE && <p class="eyebrow">Coming soon</p>
+    }
     <h1>{PRODUCT_NAME}</h1>
     <p class="tagline">{TAGLINE}</p>
     <p class="hero-body">
-      A screenwriting application built around proper industry-standard formatting, a fast
-      keyboard-driven writing flow, and exports that hold up: PDF, Final Draft (FDX), and Word
-      (DOCX).
+      {PRODUCT_NAME} is a screenwriting application: a structured editor for real screenplay elements,
+      correct pagination, and exports that hold up.
     </p>
     <div class="hero-actions">
-      <a class="button button-primary" href={APP_ORIGIN}>{APP_LINK_LABEL}</a>
-      <a class="button button-secondary" href="#pricing">See pricing</a>
+      {
+        APP_IS_LIVE && (
+          <a class="button button-primary" href={APP_ORIGIN}>
+            {APP_LINK_LABEL}
+          </a>
+        )
+      }
+      <a class={APP_IS_LIVE ? 'button button-secondary' : 'button button-primary'} href="#pricing">
+        See pricing
+      </a>
     </div>
   </section>
 
+  <ProductOverview />
   <PricingTable />
 </Layout>

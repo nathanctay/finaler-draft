@@ -57,8 +57,18 @@ export default defineConfig({
       // default `localhost` bound this process to `::1` only on this machine, so Playwright's
       // plain-IPv4 readiness probe against `url` below timed out at 60s against a server that
       // was, in fact, already up.
+      //
+      // PUBLIC_APP_IS_LIVE=true is deliberate, not the site's real default (see site.config.ts):
+      // header-contrast.spec.ts exists to measure the *computed colour* of the "Open app"
+      // button's border, which only exists in the DOM when APP_IS_LIVE is true. The complementary
+      // case -- no app link at all while APP_IS_LIVE is false, which is this site's actual
+      // shipping default -- is already covered where it belongs, at the render layer
+      // (apps/landing/src/pageTests/index.render.test.ts), which can assert an element's *absence*
+      // without a browser. This project stays free to build with whatever config makes its own
+      // assertions meaningful, same as the api webServer above sets FINALER_SYSTEM_TEST=true for
+      // its own reasons.
       command:
-        'pnpm --filter @finaler-draft/landing build && pnpm --filter @finaler-draft/landing exec astro preview --host 127.0.0.1 --port 4322',
+        'PUBLIC_APP_IS_LIVE=true pnpm --filter @finaler-draft/landing build && pnpm --filter @finaler-draft/landing exec astro preview --host 127.0.0.1 --port 4322',
       url: 'http://127.0.0.1:4322',
       reuseExistingServer: !process.env.CI,
     },

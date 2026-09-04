@@ -1,0 +1,67 @@
+---
+import { PRODUCT_NAME } from '../site.config.ts';
+
+// Every item here maps to something already built and working, per the owner's own audit against
+// source. Nothing planned appears in this list -- see StatusSection.astro for what's still ahead
+// and marked as such.
+const FEATURES = [
+  {
+    term: 'Structured elements',
+    description:
+      'Scene headings, action, character, and dialogue are real, distinct parts of the document -- not styled paragraphs in a generic text box.',
+  },
+  {
+    term: 'Keyboard-first',
+    description:
+      'Enter and Tab move between elements the way a screenwriter expects, with an element menu there when you need it.',
+  },
+  {
+    term: 'Correct pagination',
+    description: 'Deterministic layout on the industry-standard character grid, page after page.',
+  },
+  {
+    term: 'SmartType',
+    description: 'Completion for scene headings and character cues, drawn from your own script.',
+  },
+  {
+    term: 'Navigator',
+    description: 'Jump by scene or by character without losing your place in the manuscript.',
+  },
+  {
+    term: 'Title pages & settings',
+    description: 'A real title page, scene numbers, and the document settings a script needs.',
+  },
+  {
+    term: 'Zoom & page views',
+    description: 'Fit to page, fit to width, and the view modes desktop authoring software has.',
+  },
+  {
+    term: 'Export',
+    description: 'PDF, Final Draft (FDX), and Word (DOCX) -- on every tier, including free.',
+  },
+];
+---
+
+<section id="product" class="product" aria-labelledby="product-heading">
+  <h2 id="product-heading">What it does</h2>
+  <p class="product-lede">
+    {PRODUCT_NAME} is a real structured editor, not a text box wearing screenplay formatting: every element
+    is a distinct, addressable part of the document, paginated deterministically on the industry-standard
+    character grid, and interchangeable with the rest of the industry through Final Draft's FDX format.
+  </p>
+  <p class="product-commitment">
+    Export is available on every tier, including free. A screenwriting tool you can't get your own
+    pages out of isn't offering a free tier -- it's holding your work hostage until you pay. PDF,
+    Final Draft (FDX), and Word (DOCX) export ship on every plan from day one.
+  </p>
+  <dl class="feature-list">
+    {
+      FEATURES.map((feature) => (
+        <div class="feature">
+          <dt>{feature.term}</dt>
+          <dd>{feature.description}</dd>
+        </div>
+      ))
+    }
+  </dl>
+</section>

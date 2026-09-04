@@ -51,6 +51,36 @@ describe('SITE_URL', () => {
   });
 });
 
+describe('APP_IS_LIVE', () => {
+  it('defaults to false when PUBLIC_APP_IS_LIVE is unset', async () => {
+    // The load-bearing default: this site is meant to deploy before the app does, and an unset
+    // flag must never be read as "the app is live."
+    vi.stubEnv('PUBLIC_APP_IS_LIVE', '');
+    const { APP_IS_LIVE } = await import('./site.config.js');
+    expect(APP_IS_LIVE).toBe(false);
+  });
+
+  it.each([
+    ['true', true],
+    ['1', true],
+    ['false', false],
+    ['0', false],
+    ['TRUE', true],
+    ['False', false],
+  ])('parses PUBLIC_APP_IS_LIVE=%s as %s', async (envValue, expected) => {
+    vi.stubEnv('PUBLIC_APP_IS_LIVE', envValue);
+    const { APP_IS_LIVE } = await import('./site.config.js');
+    expect(APP_IS_LIVE).toBe(expected);
+  });
+
+  it('throws for a value that is neither a recognized true nor false spelling', async () => {
+    vi.stubEnv('PUBLIC_APP_IS_LIVE', 'yes');
+    await expect(import('./site.config.js')).rejects.toThrow(
+      /must be "true", "false", "1", or "0"/,
+    );
+  });
+});
+
 describe('APP_LINK_LABEL', () => {
   it('is a single neutral label, never implying a signed-in or signed-out state', async () => {
     const { APP_LINK_LABEL } = await import('./site.config.js');
