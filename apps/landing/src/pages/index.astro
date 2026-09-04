@@ -1,0 +1,26 @@
+---
+import Layout from '../layouts/Layout.astro';
+import PricingTable from '../components/PricingTable.astro';
+import { PRODUCT_NAME, TAGLINE, APP_ORIGIN, APP_LINK_LABEL } from '../site.config.ts';
+
+const description = `${PRODUCT_NAME} is screenwriting software with proper industry-standard formatting, a fast keyboard-driven writing flow, and PDF, Final Draft, and Word export.`;
+---
+
+<Layout title={`${PRODUCT_NAME} — ${TAGLINE}`} description={description}>
+  <section class="hero">
+    <p class="eyebrow">Coming soon</p>
+    <h1>{PRODUCT_NAME}</h1>
+    <p class="tagline">{TAGLINE}</p>
+    <p class="hero-body">
+      A screenwriting application built around proper industry-standard formatting, a fast
+      keyboard-driven writing flow, and exports that hold up: PDF, Final Draft (FDX), and Word
+      (DOCX).
+    </p>
+    <div class="hero-actions">
+      <a class="button button-primary" href={APP_ORIGIN}>{APP_LINK_LABEL}</a>
+      <a class="button button-secondary" href="#pricing">See pricing</a>
+    </div>
+  </section>
+
+  <PricingTable />
+</Layout>

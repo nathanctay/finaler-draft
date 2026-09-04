@@ -19,7 +19,7 @@
     "dev": "pnpm build:packages && pnpm --parallel --stream --filter @finaler-draft/api --filter @finaler-draft/web dev",
     "start": "pnpm --filter @finaler-draft/api start",
     "build": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/server-config build && pnpm --filter @finaler-draft/screenplay build && pnpm --filter @finaler-draft/database build && pnpm --filter @finaler-draft/layout build && pnpm --filter @finaler-draft/xml-escape build && pnpm --filter @finaler-draft/fdx build && pnpm --filter @finaler-draft/docx build && pnpm --filter @finaler-draft/pdf build && pnpm --filter @finaler-draft/web build && pnpm --filter @finaler-draft/api build",
-    "typecheck": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/server-config build && pnpm --filter @finaler-draft/screenplay build && pnpm --filter @finaler-draft/database build && pnpm --filter @finaler-draft/layout build && pnpm --filter @finaler-draft/xml-escape build && pnpm --filter @finaler-draft/fdx build && pnpm --filter @finaler-draft/docx build && pnpm --filter @finaler-draft/pdf build && pnpm --filter @finaler-draft/web typecheck && pnpm --filter @finaler-draft/api typecheck",
+    "typecheck": "pnpm --filter @finaler-draft/config build && pnpm --filter @finaler-draft/server-config build && pnpm --filter @finaler-draft/screenplay build && pnpm --filter @finaler-draft/database build && pnpm --filter @finaler-draft/layout build && pnpm --filter @finaler-draft/xml-escape build && pnpm --filter @finaler-draft/fdx build && pnpm --filter @finaler-draft/docx build && pnpm --filter @finaler-draft/pdf build && pnpm --filter @finaler-draft/web typecheck && pnpm --filter @finaler-draft/api typecheck && pnpm --filter @finaler-draft/landing typecheck",
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -35,10 +35,12 @@
     "@playwright/test": "1.55.0",
     "@types/node": "24.3.0",
     "eslint": "9.34.0",
+    "eslint-plugin-astro": "1.7.0",
     "eslint-plugin-react-hooks": "5.2.0",
     "eslint-plugin-react-refresh": "0.4.20",
     "globals": "16.3.0",
     "prettier": "3.6.2",
+    "prettier-plugin-astro": "0.14.1",
     "typescript": "5.9.2",
     "typescript-eslint": "8.41.0"
   }
