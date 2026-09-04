@@ -1,0 +1,532 @@
+/*
+ * The landing page's own token set -- related to, but not copied from, apps/web/src/styles.css.
+ * It borrows that stylesheet's cues (IBM Plex Sans, a near-black-blue header, teal-green accents,
+ * a plain square monogram) so the page reads as the same product, without importing the app's
+ * stylesheet wholesale: this page has no editor chrome, no menubar, no dark-mode toggle, and
+ * needs none of the ~2500 lines that serve those. Dark mode here follows the OS preference
+ * (`prefers-color-scheme`) rather than a stored toggle, because this page carries no per-user
+ * state to remember one in.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  --surface-page: #fbfbf7;
+  --surface-raised: #ffffff;
+  --surface-panel: #f2f5f2;
+  /* The header/skip-link bar: a fixed dark chrome surface, present in both colour schemes -- not
+     a "page surface" that inverts with the theme. Its shade may still differ slightly per scheme
+     (see the dark-mode block below); `--text-on-chrome` is its paired text/border colour and, for
+     the reason in its own comment below, must not vary the same way. */
+  --surface-chrome: #1e2936;
+  --surface-accent: #276252;
+  --surface-accent-hover: #1d4f43;
+
+  --text-primary: #202722;
+  --text-secondary: #4b544d;
+  --text-muted: #697268;
+  /* Text/border colour for content sitting on `--surface-chrome`. Always light, in both colour
+     schemes, because `--surface-chrome` is always dark: this token is not redefined in the
+     dark-mode block below, deliberately -- it previously was, to the same value as
+     `--surface-chrome` itself, which painted the header's text in its own background colour. */
+  --text-on-chrome: #f4f7f8;
+  --text-on-accent: #ffffff;
+
+  --border-subtle: #d5d9d2;
+  --border-default: #bfc8cd;
+  --border-focus: #2379bb;
+
+  --shadow-card: 0 1px 2px rgba(38, 53, 42, 0.08), 0 8px 24px rgba(38, 53, 42, 0.08);
+
+  --radius-sm: 2px;
+  --radius-md: 8px;
+
+  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  --content-width: 960px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface-page: #182029;
+    --surface-raised: #212c35;
+    --surface-panel: #253039;
+    --surface-chrome: #101820;
+    --surface-accent: #3a8f74;
+    --surface-accent-hover: #4aa886;
+
+    --text-primary: #e3e8eb;
+    --text-secondary: #b7c2c7;
+    --text-muted: #8b98a0;
+    /* --text-on-chrome is intentionally absent here -- see its comment in the :root block above. */
+
+    --border-subtle: #344049;
+    --border-default: #445159;
+    --border-focus: #5fb2ea;
+
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.35);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+  background: var(--surface-page);
+  font-synthesis: none;
+  line-height: 1.55;
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.2;
+  font-weight: 650;
+}
+
+a {
+  color: inherit;
+}
+
+a:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  top: -48px;
+  left: 8px;
+  z-index: 10;
+  padding: 10px 16px;
+  background: var(--surface-chrome);
+  color: var(--text-on-chrome);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  transition: top 0.15s ease;
+}
+
+.skip-link:focus {
+  top: 8px;
+}
+
+/* Site header */
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 16px clamp(16px, 4vw, 48px);
+  background: var(--surface-chrome);
+  color: var(--text-on-chrome);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 650;
+  font-size: 16px;
+  text-decoration: none;
+  color: inherit;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-focus);
+  border-radius: var(--radius-sm);
+  font-family: Georgia, serif;
+  font-size: 14px;
+}
+
+.site-nav {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  font-size: 14px;
+}
+
+.site-nav a:not(.button) {
+  text-decoration: none;
+}
+
+.site-nav a:not(.button):hover {
+  text-decoration: underline;
+}
+
+/* Buttons */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 20px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.button-primary {
+  background: var(--surface-accent);
+  color: var(--text-on-accent);
+}
+
+.button-primary:hover {
+  background: var(--surface-accent-hover);
+}
+
+.button-secondary {
+  background: transparent;
+  border-color: var(--border-default);
+  color: var(--text-primary);
+}
+
+.button-secondary:hover {
+  background: var(--surface-panel);
+}
+
+.button-ghost {
+  background: transparent;
+  border-color: currentColor;
+  color: inherit;
+  padding: 8px 16px;
+}
+
+.button-ghost:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Main regions */
+
+main {
+  display: block;
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 0 clamp(16px, 4vw, 48px);
+}
+
+.hero {
+  padding: clamp(48px, 10vw, 96px) 0 clamp(32px, 6vw, 64px);
+  text-align: center;
+}
+
+.eyebrow {
+  margin: 0 0 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: clamp(32px, 6vw, 52px);
+}
+
+.tagline {
+  margin: 12px 0 0;
+  font-size: clamp(18px, 3vw, 22px);
+  color: var(--text-secondary);
+}
+
+.hero-body {
+  max-width: 640px;
+  margin: 20px auto 0;
+  color: var(--text-secondary);
+  font-size: 16px;
+}
+
+.hero-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 28px;
+}
+
+/* Product overview */
+
+.product {
+  padding: clamp(32px, 6vw, 64px) 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.product h2 {
+  text-align: center;
+  font-size: clamp(24px, 4vw, 32px);
+  margin: 0 0 24px;
+}
+
+.product-lede,
+.product-commitment {
+  max-width: 640px;
+  margin: 0 auto 16px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 16px;
+}
+
+.product-commitment {
+  margin-bottom: 32px;
+}
+
+.feature-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 20px;
+}
+
+.feature {
+  background: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+}
+
+.feature dt {
+  font-weight: 650;
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+
+.feature dd {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* Pricing */
+
+.pricing {
+  padding: clamp(32px, 6vw, 64px) 0;
+}
+
+.pricing h2 {
+  text-align: center;
+  font-size: clamp(24px, 4vw, 32px);
+  margin: 0 0 8px;
+}
+
+.pricing-intro {
+  text-align: center;
+  color: var(--text-secondary);
+  max-width: 560px;
+  margin: 0 auto 32px;
+}
+
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 24px;
+}
+
+.plan-card {
+  background: var(--surface-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.plan-card h3 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.plan-price {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 650;
+}
+
+.plan-price-or {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.plan-price-note {
+  margin: -8px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.plan-card ul {
+  margin: 4px 0 0;
+  padding-left: 20px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.plan-card .button {
+  margin-top: auto;
+  align-self: flex-start;
+}
+
+.plan-card-pro {
+  border-color: var(--surface-accent);
+}
+
+/* The Pro card's honest stand-in for its CTA button while APP_IS_LIVE is false -- see
+   PricingTable.astro. Same position (margin-top: auto) as the button it replaces, so the card's
+   height doesn't jump between the two states. */
+.plan-note {
+  margin: auto 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* Status */
+
+.status {
+  padding: clamp(32px, 6vw, 64px) 0;
+  border-top: 1px solid var(--border-subtle);
+  max-width: 640px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.status h2 {
+  font-size: clamp(24px, 4vw, 32px);
+  margin: 0 0 16px;
+}
+
+.status p {
+  color: var(--text-secondary);
+  font-size: 16px;
+  margin: 0 0 12px;
+}
+
+/* A visually distinct marker for a planned (not-yet-built) claim, deliberately unlike anything in
+   ProductOverview.astro's shipped feature list -- see StatusSection.astro's own comment for why
+   this distinction is load-bearing rather than decorative. */
+.planned-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  text-align: left;
+  max-width: 480px;
+  margin: 20px auto 0;
+  padding: 14px 18px;
+  background: var(--surface-panel);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.planned-badge {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-accent);
+  color: var(--text-on-accent);
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Legal document pages */
+
+.legal-doc {
+  padding: clamp(32px, 6vw, 56px) 0 clamp(48px, 8vw, 80px);
+  max-width: 720px;
+}
+
+.legal-doc h1 {
+  font-size: clamp(26px, 4vw, 34px);
+  margin: 0 0 8px;
+}
+
+.legal-updated {
+  color: var(--text-muted);
+  font-size: 14px;
+  margin: 0 0 24px;
+}
+
+.legal-doc :is(h2, h3) {
+  margin-top: 32px;
+}
+
+.legal-doc p,
+.legal-doc li {
+  color: var(--text-secondary);
+}
+
+/* Site footer */
+
+.site-footer {
+  margin-top: 48px;
+  padding: 24px clamp(16px, 4vw, 48px) 40px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.legal-nav ul {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+}
+
+.legal-nav a {
+  text-decoration: none;
+  color: var(--text-secondary);
+}
+
+.legal-nav a:hover {
+  text-decoration: underline;
+}
+
+.copyright {
+  margin: 0;
+}
+
+@media (max-width: 560px) {
+  .site-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .site-nav {
+    width: 100%;
+    justify-content: space-between;
+  }
+}

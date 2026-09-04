@@ -1,0 +1,23 @@
+---
+import { PRODUCT_NAME, APP_ORIGIN, APP_IS_LIVE, APP_LINK_LABEL } from '../site.config.ts';
+
+// Derived, not hardcoded, so a rename never leaves a stale initial behind -- see site.config.ts.
+const monogram = PRODUCT_NAME.trim().charAt(0).toUpperCase();
+---
+
+<header class="site-header">
+  <a class="brand" href="/" aria-label={`${PRODUCT_NAME} — home`}>
+    <span class="brand-mark" aria-hidden="true">{monogram}</span>
+    <span class="brand-name">{PRODUCT_NAME}</span>
+  </a>
+  <nav class="site-nav" aria-label="Primary">
+    <a href="/#pricing">Pricing</a>
+    {
+      APP_IS_LIVE && (
+        <a class="button button-ghost" href={APP_ORIGIN}>
+          {APP_LINK_LABEL}
+        </a>
+      )
+    }
+  </nav>
+</header>

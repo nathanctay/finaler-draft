@@ -1,0 +1,28 @@
+---
+import { getCollection } from 'astro:content';
+import { PRODUCT_NAME } from '../site.config.ts';
+import { legalNavItems } from '../lib/legalNav.ts';
+
+const legalEntries = await getCollection('legal');
+const legalLinks = legalNavItems(
+  legalEntries.map((entry) => ({ id: entry.id, title: entry.data.title })),
+);
+const year = new Date().getFullYear();
+---
+
+<footer class="site-footer">
+  {
+    legalLinks.length > 0 && (
+      <nav class="legal-nav" aria-label="Legal">
+        <ul>
+          {legalLinks.map((item) => (
+            <li>
+              <a href={item.href}>{item.title}</a>
+            </li>
+          ))}
+        </ul>
+      </nav>
+    )
+  }
+  <p class="copyright">© {year} {PRODUCT_NAME}</p>
+</footer>

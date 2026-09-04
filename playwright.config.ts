@@ -41,11 +41,47 @@ export default defineConfig({
     // run and is the difference between diagnosing the next occurrence and re-rolling for it.
     trace: 'retain-on-failure',
   },
-  webServer: {
-    command:
-      'FINALER_SYSTEM_TEST=true NODE_ENV=production PORT=4173 pnpm --filter @finaler-draft/api start',
-    url: 'http://127.0.0.1:4173',
-    reuseExistingServer: !process.env.CI,
-  },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  webServer: [
+    {
+      command:
+        'FINALER_SYSTEM_TEST=true NODE_ENV=production PORT=4173 pnpm --filter @finaler-draft/api start',
+      url: 'http://127.0.0.1:4173',
+      reuseExistingServer: !process.env.CI,
+    },
+    {
+      // apps/landing is a separate static app with no server of its own -- `astro preview` is
+      // the closest equivalent to the api's `start` above (serve the real build, not a dev
+      // server). The command builds first so this works whether or not `pnpm build` already
+      // covered it (it does not today -- apps/landing is not part of the root build chain; see
+      // progress/landing-page.md). `--host 127.0.0.1` is required, not cosmetic: astro preview's
+      // default `localhost` bound this process to `::1` only on this machine, so Playwright's
+      // plain-IPv4 readiness probe against `url` below timed out at 60s against a server that
+      // was, in fact, already up.
+      //
+      // PUBLIC_APP_IS_LIVE=true is deliberate, not the site's real default (see site.config.ts):
+      // header-contrast.spec.ts exists to measure the *computed colour* of the "Open app"
+      // button's border, which only exists in the DOM when APP_IS_LIVE is true. The complementary
+      // case -- no app link at all while APP_IS_LIVE is false, which is this site's actual
+      // shipping default -- is already covered where it belongs, at the render layer
+      // (apps/landing/src/pageTests/index.render.test.ts), which can assert an element's *absence*
+      // without a browser. This project stays free to build with whatever config makes its own
+      // assertions meaningful, same as the api webServer above sets FINALER_SYSTEM_TEST=true for
+      // its own reasons.
+      command:
+        'PUBLIC_APP_IS_LIVE=true pnpm --filter @finaler-draft/landing build && pnpm --filter @finaler-draft/landing exec astro preview --host 127.0.0.1 --port 4322',
+      url: 'http://127.0.0.1:4322',
+      reuseExistingServer: !process.env.CI,
+    },
+  ],
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    {
+      // Its own project, not folded into "chromium": a distinct testDir (apps/landing/e2e) and
+      // baseURL (the landing webServer above, not the api's). `fullyParallel`, `retries`,
+      // `reporter`, and the shared `use` block (trace, font-hinting flag) above still apply.
+      name: 'landing',
+      testDir: './apps/landing/e2e',
+      use: { ...devices['Desktop Chrome'], baseURL: 'http://127.0.0.1:4322' },
+    },
+  ],
 });

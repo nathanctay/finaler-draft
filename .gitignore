@@ -11,6 +11,9 @@ build/
 .eslintcache
 *.tsbuildinfo
 
+# Astro's generated content-collection types cache (apps/landing)
+.astro/
+
 # Test, coverage, and browser automation artifacts
 coverage/
 playwright-report/

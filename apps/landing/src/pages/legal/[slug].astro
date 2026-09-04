@@ -1,0 +1,36 @@
+---
+import { getCollection, render, type CollectionEntry } from 'astro:content';
+import Layout from '../../layouts/Layout.astro';
+import { PRODUCT_NAME } from '../../site.config.ts';
+
+// One static page per legal document that actually exists (src/content/legal/*.md). No entries
+// means no pages -- that is the mechanism behind "do not link to a page that says nothing": the
+// URL genuinely does not exist until real copy is dropped in, rather than existing but empty.
+export async function getStaticPaths() {
+  const entries = await getCollection('legal');
+  return entries.map((entry) => ({
+    params: { slug: entry.id },
+    props: { entry },
+  }));
+}
+
+interface Props {
+  entry: CollectionEntry<'legal'>;
+}
+
+const { entry } = Astro.props;
+const { Content } = await render(entry);
+const updated = entry.data.updatedOn.toLocaleDateString('en-US', {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+});
+---
+
+<Layout title={`${entry.data.title} — ${PRODUCT_NAME}`} description={entry.data.title}>
+  <article class="legal-doc">
+    <h1>{entry.data.title}</h1>
+    <p class="legal-updated">Last updated {updated}</p>
+    <Content />
+  </article>
+</Layout>
