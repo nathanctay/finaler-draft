@@ -14,15 +14,17 @@ import {
 } from './index.js';
 
 /**
- * This file covers exactly the surface that has no other direct test anywhere else in the
- * repository: the Yjs seams `createScreenplayEditorInit` builds and `apps/collab` (the Hocuspocus
- * server) relies on to seed and project a document with no live browser `Editor`/DOM involved at
- * all. `apps/web/src/screenplayEditor.test.ts` (via the re-export shim) already exercises the
- * element-conversion/splitting behaviour that moved unchanged into this package, and
+ * This file covers the surface that has no other direct test anywhere in the repository: the Yjs
+ * seams `createScreenplayEditorInit` builds and `apps/collab` (the Hocuspocus server) relies on to
+ * seed and project a document with no live browser `Editor`/DOM involved at all.
+ * `editing.test.ts` (this directory's other test file) covers the element-conversion, splitting,
+ * leading-space, `projectDocumentScreenplay`, and paste-sanitisation behaviour -- moved here from
+ * `apps/web/src/screenplayEditor.test.ts` alongside the code itself, so its coverage is credited to
+ * this package rather than to the `apps/web` re-export shim it used to import through. And
  * `apps/collab/src/database.test.ts` already exercises this package's functions indirectly through
  * `createFetch`/`createStore`'s own fake-pool tests -- but nothing anywhere calls
  * `getScreenplayEditorSchema`, `projectYDocScreenplay`, or the undo/redo command wrappers directly
- * and asserts on their own contract, which is what belongs in this package's own test suite.
+ * and asserts on their own contract, which is what belongs in this file.
  */
 
 const simpleContent: EditorContent = {

@@ -222,7 +222,8 @@ test('a writer can create, autosave, and reload a private screenplay', async ({ 
 /**
  * `progress/paste-sanitization.md`: pasting used to make the screenplay stop saving, with almost
  * nothing to tell the writer. This is the required real-browser proof -- jsdom cannot parse HTML
- * or drive a real clipboard the way a browser does, and `screenplayEditor.test.ts`'s unit tests
+ * or drive a real clipboard the way a browser does, and
+ * `packages/screenplay-editor/src/editing.test.ts`'s unit tests
  * (which use `EditorView.pasteHTML`/`pasteText` and a real `serializeForClipboard` round trip,
  * but still inside jsdom) are the mechanism, not the property the owner actually lost. The
  * property is this: the edit reaches the server. A green "projection is valid" assertion proves

@@ -36,7 +36,8 @@ import {
  * running API for session cookies, and two browser contexts on top of the same claim, without
  * testing a different code path. What a Playwright test *would* additionally prove -- that the
  * Tiptap editor visually renders a remote peer's keystrokes -- is exactly what
- * `canonicalRoundTrip.test.ts` and `screenplayEditor.test.ts` already cover for the editor half,
+ * `canonicalRoundTrip.test.ts` and `packages/screenplay-editor/src/editing.test.ts` already cover
+ * for the editor half,
  * and `y-prosemirror`'s own `ySyncPlugin` is third-party code this slice does not need to
  * re-prove; the collaboration *server*'s authorization behaviour is what is actually new here, and
  * this test drives it directly, over a real socket, with no shortcut through an in-process

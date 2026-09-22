@@ -97,7 +97,8 @@ function blur(editor: Editor): void {
 /**
  * Simulates a keystroke's two real stages, in the order a real browser produces them: `keydown`
  * first (through `view.someProp('handleKeyDown', ...)`, the same dispatch path
- * `screenplayEditor.test.ts`'s `pressKey` already uses -- this is what records the motion's shape
+ * `packages/screenplay-editor/src/editing.test.ts`'s `pressKey` already uses -- this is what
+ * records the motion's shape
  * in the plugin's private `pendingKeyMotion`), then the selection actually landing at `pos`. jsdom
  * has no native contentEditable caret movement (the reason `resolveSeamDom`'s DOM measurement is
  * left to the e2e suite), so the second stage is a plain `setSelection` transaction standing in

@@ -8,7 +8,18 @@ import {
   projectDocumentScreenplay,
   type EditorContent,
   type ScreenplayElementType,
-} from './screenplayEditor.js';
+} from './index.js';
+
+/**
+ * Moved here from `apps/web/src/screenplayEditor.test.ts` when the code these tests exercise
+ * (element conversion, splitting, the leading-space guard, `projectDocumentScreenplay`, and paste
+ * sanitisation) moved to this package. They kept importing from the `apps/web` re-export shim
+ * after the move, which still ran them but credited their coverage to that one-line shim file, not
+ * to this package's `index.ts` where the code actually lives -- `packages/screenplay-editor` was
+ * shipping with a fraction of the coverage the code had on `main`. `index.test.ts` (this
+ * directory's other test file) is unaffected: it already covered exactly the Yjs-facing seams that
+ * have no other direct test, and continues to.
+ */
 
 /** Every test editor here is Yjs-backed (`createLocalScreenplayEditorInit` requires content), but
  * none of them exercise collaboration itself -- a fresh, local, unconnected `Y.Doc` seeded with
@@ -210,7 +221,7 @@ describe('Enter', () => {
  * the block's text in `()` unless it is already wrapped; converting a parenthetical away strips a
  * leading `(` and trailing `)` only if both are present. Once written, the parentheses are
  * ordinary text -- there is nothing here exercising Backspace or Delete, because nothing in
- * `screenplayEditor.ts` treats them specially any more.
+ * `index.ts` treats them specially any more.
  */
 describe('parentheticals own their parentheses', () => {
   it('wraps an empty block in () with the caret between them on conversion to parenthetical', () => {
@@ -417,7 +428,7 @@ describe('projectDocumentScreenplay', () => {
 });
 
 /**
- * `ScreenplayPasteSanitizer` (screenplayEditor.ts): the fix for `progress/paste-sanitization.md`.
+ * `ScreenplayPasteSanitizer` (index.ts): the fix for `progress/paste-sanitization.md`.
  * These drive `EditorView.pasteHTML`/`pasteText`, the real paste pipeline (`transformPastedHTML`,
  * `DOMParser.fromSchema`, `transformPasted`), not a hand-rolled substitute -- the only thing not
  * exercised here is the browser's own HTML parser and the OS clipboard, which is what
@@ -578,7 +589,7 @@ describe('paste sanitisation', () => {
    * behaviour for an open slice edge (unchanged, and out of this scope's remit -- see
    * `regeneratePastedIds`'s doc comment), so this only asserts the property this slice actually
    * guards: the ids already in the document and every id the paste introduces are pairwise
-   * distinct, and every text-carrying block. `screenplayEditor.ts`'s duplicate-id defect fails
+   * distinct, and every text-carrying block. `index.ts`'s duplicate-id defect fails
    * exactly this assertion without `ScreenplayPasteSanitizer` in place.
    */
   it('regenerates ids for a real cross-block clipboard round trip, with no duplicate surviving the paste', () => {

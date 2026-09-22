@@ -16,7 +16,8 @@
     "test:coverage": "vitest run --coverage",
     "db:generate": "node ./scripts/run-drizzle.mjs generate",
     "db:migrate": "node ./scripts/run-drizzle.mjs migrate",
-    "db:studio": "node ./scripts/run-drizzle.mjs studio"
+    "db:studio": "node ./scripts/run-drizzle.mjs studio",
+    "db:check-migrations": "node ./dist/checkMigrationsCli.js"
   },
   "dependencies": {
     "drizzle-kit": "0.31.10",

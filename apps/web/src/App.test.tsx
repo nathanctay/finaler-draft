@@ -661,8 +661,9 @@ describe('local semantic screenplay editor', () => {
 
     // At the END of the cue, which is what makes this Enter a transition to the next element
     // rather than a split of this one. Enter inside a block keeps the element on both halves (see
-    // screenplayEditor.test.ts), so a caret one character in would leave a second character block
-    // here and prove nothing about the character-to-dialogue transition this assertion is for.
+    // packages/screenplay-editor/src/editing.test.ts), so a caret one character in would leave a
+    // second character block here and prove nothing about the character-to-dialogue transition
+    // this assertion is for.
     const cueBlock = editor.state.doc.child(2);
     editor.view.dispatch(
       editor.state.tr.setSelection(
@@ -1725,7 +1726,8 @@ describe('title page editing', () => {
 
 /**
  * Requirement 2, `progress/paste-sanitization.md`: an invalid projection can never again be
- * silent. `ScreenplayPasteSanitizer` (screenplayEditor.ts) closes the paste route these tests
+ * silent. `ScreenplayPasteSanitizer` (`packages/screenplay-editor/src/index.ts`) closes the paste
+ * route these tests
  * used to reproduce this through, so this file's other invalid-projection test (`'surfaces
  * unsupported and schema-invalid projections without dropping their nodes'`, above) reaches
  * `projectLocalScreenplay` directly with a hand-built fake editor for exactly that reason -- there
