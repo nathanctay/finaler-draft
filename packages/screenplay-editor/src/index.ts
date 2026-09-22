@@ -7,7 +7,7 @@ import {
   type Editor,
 } from '@tiptap/core';
 import { Plugin, TextSelection, type Transaction } from '@tiptap/pm/state';
-import { Fragment, Slice, type Node as ProseMirrorNode } from '@tiptap/pm/model';
+import { Fragment, Slice, type Node as ProseMirrorNode, type ResolvedPos } from '@tiptap/pm/model';
 import type * as Y from 'yjs';
 import {
   redoCommand,
@@ -108,23 +108,31 @@ function createStableId(): string {
   return crypto.randomUUID();
 }
 
-function getActiveBlock(editor: Editor): ActiveScreenplayBlock | undefined {
-  const { $from } = editor.state.selection;
-
-  for (let depth = $from.depth; depth > 0; depth -= 1) {
-    const node = $from.node(depth);
+/**
+ * The `screenplayBlock` ancestor of `pos`, if any -- shared by `getActiveBlock` (below, which
+ * always asks about the selection's `$from`) and `splitScreenplayBlock`'s cross-block case (which
+ * separately needs the block containing `$to`, the far edge of a selection that spans more than
+ * one block).
+ */
+function blockAt(pos: ResolvedPos): ActiveScreenplayBlock | undefined {
+  for (let depth = pos.depth; depth > 0; depth -= 1) {
+    const node = pos.node(depth);
     if (node.type.name === 'screenplayBlock' && isScreenplayElementType(node.attrs.element)) {
       return {
         element: node.attrs.element,
         id: node.attrs.id,
         nodeSize: node.nodeSize,
-        position: $from.before(depth),
+        position: pos.before(depth),
         text: node.textContent,
       };
     }
   }
 
   return undefined;
+}
+
+function getActiveBlock(editor: Editor): ActiveScreenplayBlock | undefined {
+  return blockAt(editor.state.selection.$from);
 }
 
 export function getActiveScreenplayBlock(editor: Editor): ActiveScreenplayBlock | undefined {
@@ -220,6 +228,25 @@ export function convertActiveScreenplayBlock(
  * element in the convention, which meant splitting a paragraph of action mid-sentence silently
  * retyped the remainder as something else. Offset 0 counts as "anywhere else": it splits an empty
  * block off above and leaves the text where it was, and that text is still the element it was.
+ *
+ * **A selection that reaches past `activeBlock`'s own end** -- the caret started in one block and
+ * the selection extends into a later one, or swallows one or more whole blocks in between -- is
+ * handled here rather than declined. It used to decline (`return false`), which sent Enter to
+ * `@tiptap/core`'s own built-in fallback (`createParagraphNear` / `liftEmptyBlock` / `splitBlock`,
+ * bundled unconditionally with every `Editor`): that fallback deletes the selected range, which
+ * ProseMirror's own join logic merges into a single node, and then calls `tr.split` on it with no
+ * explicit node types -- `tr.split`'s documented default when none are given is to copy the split
+ * node's own type and attrs onto *both* resulting halves, `id` included. Two `screenplayBlock`
+ * nodes would come out sharing one stable id: `screenplayIdSchema`'s uniqueness rule then rejects
+ * the document and saving stops (see `progress/enter-duplicate-ids.md`). Handling it here instead
+ * costs little: it is the same prefix/suffix split as the single-block case, just with the suffix
+ * read from `endBlock`'s text instead of `activeBlock`'s, and `endBlock`'s own element preserved
+ * (or replaced by `elementWhenSplittingAtEnd`, by the same "at its end" rule) rather than copied
+ * from `activeBlock`. `preservedBlock` always keeps `activeBlock`'s own id; `newBlock` always mints
+ * a fresh one with `createStableId()`, so there is no path through this function that can produce
+ * a duplicate. Any block strictly between `activeBlock` and `endBlock` is inside the replaced
+ * range and so is removed entirely, along with its id -- exactly what "the writer selected across
+ * several elements and pressed Enter" means.
  */
 function splitScreenplayBlock(
   editor: Editor,
@@ -235,29 +262,31 @@ function splitScreenplayBlock(
     return false;
   }
 
+  const { selection } = editor.state;
   const blockContentStart = activeBlock.position + 1;
-  const blockContentEnd = activeBlock.position + activeBlock.nodeSize - 1;
-  if (
-    editor.state.selection.from < blockContentStart ||
-    editor.state.selection.to > blockContentEnd
-  ) {
+  if (selection.from < blockContentStart) {
     return false;
   }
 
+  const activeBlockContentEnd = activeBlock.position + activeBlock.nodeSize - 1;
+  const endBlock = selection.to <= activeBlockContentEnd ? activeBlock : blockAt(selection.$to);
+  if (!endBlock) {
+    return false;
+  }
+
+  const endBlockContentStart = endBlock.position + 1;
   const selectionStartOffset = Math.min(
-    Math.max(editor.state.selection.from - blockContentStart, 0),
+    Math.max(selection.from - blockContentStart, 0),
     activeBlock.text.length,
   );
   const selectionEndOffset = Math.min(
-    Math.max(editor.state.selection.to - blockContentStart, selectionStartOffset),
-    activeBlock.text.length,
+    Math.max(selection.to - endBlockContentStart, 0),
+    endBlock.text.length,
   );
   const prefix = activeBlock.text.slice(0, selectionStartOffset);
-  const suffix = activeBlock.text.slice(selectionEndOffset);
+  const suffix = endBlock.text.slice(selectionEndOffset);
   const element =
-    selectionEndOffset === activeBlock.text.length
-      ? elementWhenSplittingAtEnd
-      : activeBlock.element;
+    selectionEndOffset === endBlock.text.length ? elementWhenSplittingAtEnd : endBlock.element;
   const preservedBlock = existingNode.type.create(
     { element: activeBlock.element, id: activeBlock.id },
     prefix === '' ? undefined : editor.schema.text(prefix),
@@ -276,11 +305,10 @@ function splitScreenplayBlock(
 
   const transaction = editor.state.tr.replaceWith(
     activeBlock.position,
-    activeBlock.position + activeBlock.nodeSize,
-    preservedBlock,
+    endBlock.position + endBlock.nodeSize,
+    Fragment.from([preservedBlock, newBlock]),
   );
   const insertionPosition = activeBlock.position + preservedBlock.nodeSize;
-  transaction.insert(insertionPosition, newBlock);
   transaction.setSelection(TextSelection.create(transaction.doc, insertionPosition + 1));
   // Every command in `prosemirror-commands` (`splitBlock` included) marks its own transaction with
   // `.scrollIntoView()`; this hand-rolled split never did. ProseMirror only scrolls a transaction
@@ -595,7 +623,18 @@ export const ScreenplayBlockNode = Node.create({
       Enter: () => {
         const activeBlock = getActiveBlock(this.editor);
         if (activeBlock) {
-          return splitScreenplayBlock(this.editor, nextElementOnEnter[activeBlock.element]);
+          // Deliberately `true` regardless of what `splitScreenplayBlock` reports, not a passed-
+          // through `return`. Once the caret is inside a real `screenplayBlock`, Enter must never
+          // fall through to `@tiptap/core`'s own built-in Enter fallback (`createParagraphNear` /
+          // `liftEmptyBlock` / `splitBlock`, bundled unconditionally with every `Editor`) -- see
+          // `splitScreenplayBlock`'s own comment for the duplicate-id failure that fallback
+          // produces on an ordinary cross-block selection. `splitScreenplayBlock` now handles every
+          // selection shape reachable from here; its remaining `return false`s guard conditions
+          // that cannot actually occur given an `activeBlock` found via this same selection, and
+          // swallowing the keystroke on one of them (an inert Enter) is a far safer failure mode
+          // than handing it to a fallback that can corrupt the document.
+          splitScreenplayBlock(this.editor, nextElementOnEnter[activeBlock.element]);
+          return true;
         }
 
         if (this.editor.state.doc.childCount === 0) {
@@ -612,7 +651,20 @@ export const ScreenplayBlockNode = Node.create({
           return true;
         }
 
-        return false;
+        // The caret is at the document's own top level -- before the first block's content, not
+        // inside any block (`getActiveBlock`'s depth-walk finds nothing; see its own comment and
+        // `editing.test.ts`'s `selectAtDocumentBoundary`/`selectBeforeFirstBlock`, both real,
+        // reachable positions, not test artifice). Tab and Space already decline here and leave
+        // the document untouched. Enter cannot merely decline the same way: returning `false` used
+        // to fall through to the same `@tiptap/core` fallback named above, which -- finding no
+        // textblock at this position either -- called `createParagraphNear`, inserting a brand-new
+        // `screenplayBlock` with none of this node's attribute defaults overridden, so its `id`
+        // defaulted to `null`. `mapBlock` requires a string id, so a `null` one makes the whole
+        // canonical projection invalid and the document silently stops persisting -- the exact
+        // failure this fix exists to close (`progress/enter-duplicate-ids.md`). Claiming the key
+        // here and dispatching nothing keeps the same "document untouched" outcome Tab and Space
+        // already have at this position, just without leaving the fallback able to act instead.
+        return true;
       },
       Tab: () => {
         const activeBlock = getActiveBlock(this.editor);
@@ -762,6 +814,14 @@ function regeneratePastedIds(fragment: Fragment): Fragment {
  * paste and drop paths with a `uiEvent` meta, and no other edit in this editor copies a block's
  * attrs onto a second node: `splitScreenplayBlock` mints a fresh id for the half it creates, and
  * `convertActiveScreenplayBlock` changes one node in place.
+ *
+ * That "no other edit" claim used to have a hole: `@tiptap/core`'s own built-in Enter fallback
+ * (bundled unconditionally with every `Editor`) is not code in this file, but it ran *as* an edit
+ * in this editor whenever `ScreenplayBlockNode`'s own `Enter` entry declined -- which it did for a
+ * selection spanning two blocks -- and it copied attrs the same way a mid-block paste split used
+ * to. `splitScreenplayBlock`'s own comment has the mechanism and the fix: that entry now claims
+ * every selection shape reachable from an active block, so this gate never needs widening for
+ * Enter specifically (see `progress/enter-duplicate-ids.md`).
  *
  * The first block carrying a given id keeps it and every later one is reissued, which is document
  * order and nothing more -- there is no sense in which one half of a split is more the original
