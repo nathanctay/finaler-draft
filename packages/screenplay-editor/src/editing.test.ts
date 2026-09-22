@@ -1,14 +1,41 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Editor } from '@tiptap/core';
 import { TextSelection } from '@tiptap/pm/state';
-import { DEFAULT_DOCUMENT_SETTINGS } from '@finaler-draft/screenplay';
+import {
+  DEFAULT_DOCUMENT_SETTINGS,
+  SCREENPLAY_SCHEMA_VERSION,
+  safeParseScreenplay,
+  type Screenplay,
+} from '@finaler-draft/screenplay';
 import {
   convertActiveScreenplayBlock,
   createLocalScreenplayEditorInit,
+  displayElement,
+  editorContentFromScreenplay,
+  findScreenplayBlockPosition,
+  getActiveScreenplayBlock,
   projectDocumentScreenplay,
+  projectEditorScreenplay,
+  projectLocalScreenplay,
   type EditorContent,
   type ScreenplayElementType,
 } from './index.js';
+
+/**
+ * Position 0 -- the document's own top level, before the first block's content -- is a real,
+ * reachable caret position (`selectBeforeFirstBlock` in the paste tests further down relies on
+ * this too), and `getActiveBlock`'s depth-walk finds no `screenplayBlock` ancestor there:
+ * `$from.depth` is 0, so the loop in `getActiveBlock` never runs at all. Every keymap entry in
+ * `ScreenplayBlockNode` (`Enter`, `Tab`, `Space`) and both of `getActiveScreenplayBlock`'s and
+ * `convertActiveScreenplayBlock`'s own `if (!activeBlock)` guards exist for exactly this state --
+ * a document that has content, just none the caret is currently inside. This block of describes
+ * (through `editorContentFromScreenplay`, below) closes gaps `apps/web/src/screenplayEditor.test.ts`
+ * left uncovered even before the code moved here -- see the coverage report cited in this
+ * package's PR for the exact line ranges each one closes.
+ */
+function selectAtDocumentBoundary(editor: Editor): void {
+  editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 0)));
+}
 
 /**
  * Moved here from `apps/web/src/screenplayEditor.test.ts` when the code these tests exercise
@@ -733,6 +760,433 @@ describe('paste sanitisation', () => {
       id: originalId,
       text: 'INT.REALLY BIG HOUSE - DAY',
     });
+    editor.destroy();
+    mount.remove();
+  });
+});
+
+/**
+ * `displayElement` turns a canonical element name into the label a writer reads -- in the toolbar's
+ * element selector, in the element menu, and in the status bar. The canonical names are the wire
+ * format (`scene_heading`) and must never change; what this function produces is presentation only,
+ * which is exactly why it is worth pinning: a change here is invisible to every schema test and
+ * every projection test, and would surface only as wrong words on screen.
+ */
+describe('displayElement', () => {
+  it('turns each canonical element name into its title-cased label', () => {
+    const labels = (
+      [
+        'scene_heading',
+        'action',
+        'character',
+        'dialogue',
+        'parenthetical',
+        'transition',
+        'shot',
+      ] as const satisfies readonly ScreenplayElementType[]
+    ).map((element) => displayElement(element));
+
+    expect(labels).toEqual([
+      'Scene Heading',
+      'Action',
+      'Character',
+      'Dialogue',
+      'Parenthetical',
+      'Transition',
+      'Shot',
+    ]);
+  });
+
+  it('title-cases every underscore-separated word, not just the first', () => {
+    // The whole reason this is not a single `[0].toUpperCase()`: `scene_heading` is the one
+    // multi-word element today, and a regression that dropped the split would still produce a
+    // plausible-looking "Scene_heading" rather than an obvious failure.
+    expect(displayElement('scene_heading')).toBe('Scene Heading');
+    expect(displayElement('scene_heading')).not.toContain('_');
+  });
+});
+
+describe('no active block', () => {
+  it('getActiveScreenplayBlock and convertActiveScreenplayBlock report no active block at the document boundary', () => {
+    const { editor, mount } = buildEditor([{ element: 'action', text: 'Some action.' }]);
+    selectAtDocumentBoundary(editor);
+
+    expect(getActiveScreenplayBlock(editor)).toBeUndefined();
+    expect(convertActiveScreenplayBlock(editor, 'character')).toBe(false);
+    // A declined conversion must not have touched the document.
+    expect(blocksOf(editor)).toEqual([{ element: 'action', text: 'Some action.' }]);
+
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * Tab and Space only, not Enter: `@tiptap/core` registers its own built-in `Enter` fallback
+   * (`handleEnter`, bundled unconditionally with every `Editor` regardless of `extensions`) that
+   * runs after this extension's own `Enter` entry declines, and it does not leave the document
+   * alone the way this test's name would otherwise imply -- see `nonEmptyEditorContent`'s sibling
+   * note below and this file's own report for why that combination is flagged, not asserted on,
+   * here.
+   */
+  it('Tab and Space decline to act at the document boundary, leaving the document untouched', () => {
+    const { editor, mount } = buildEditor([{ element: 'action', text: 'Some action.' }]);
+    selectAtDocumentBoundary(editor);
+
+    expect(pressKey(editor, 'Tab')).toBe(false);
+    expect(pressKey(editor, ' ')).toBe(false);
+    expect(blocksOf(editor)).toEqual([{ element: 'action', text: 'Some action.' }]);
+
+    editor.destroy();
+    mount.remove();
+  });
+});
+
+/**
+ * The other side of `nonEmptyEditorContent` (`index.test.ts`): that helper exists precisely
+ * because a genuinely empty document -- `content: []`, no blocks at all -- is a real state a
+ * caller can hand this editor, and `Enter`'s own keymap entry has to cope with one directly, not
+ * only through a caller that pre-seeds a block. This is the one case none of the `Enter` tests
+ * above reach, since `buildEditor` always seeds at least one block.
+ */
+describe('Enter on a completely empty document', () => {
+  it('inserts a single empty action block and places the caret inside it', () => {
+    const mount = document.createElement('div');
+    document.body.append(mount);
+    const editor = new Editor({
+      element: mount,
+      ...editorInitFor({ type: 'screenplayDocument', content: [] }),
+    });
+    expect(editor.state.doc.childCount).toBe(0);
+
+    const handled = pressKey(editor, 'Enter');
+
+    expect(handled).toBe(true);
+    expect(blocksOf(editor)).toEqual([{ element: 'action', text: '' }]);
+    expect(editor.state.selection.from).toBe(1);
+    expect(editor.state.selection.to).toBe(1);
+
+    editor.destroy();
+    mount.remove();
+  });
+});
+
+/**
+ * NOT COVERED, DELIBERATELY: `splitScreenplayBlock`'s own bounds guard (`if (... selection.to >
+ * blockContentEnd) return false`) is reachable -- press Enter with a selection that starts inside
+ * one block and extends into the next -- and declining is exactly what this guard does. But
+ * driving that through the real keymap (`someProp('handleKeyDown')`, as every other test in this
+ * file does) does not leave the document alone the way "declining" would suggest: this extension's
+ * own `Enter` entry returns `false`, and ProseMirror's dispatch then falls through to
+ * `@tiptap/core`'s own built-in `Enter` keymap (`handleEnter` -- `createParagraphNear` /
+ * `liftEmptyBlock` / `splitBlock`, bundled unconditionally with every `Editor`), which *does* act:
+ * it deletes the selected range across both blocks and then splits the merged remainder, and
+ * ProseMirror's generic `splitBlock` copies the original node's full `attrs` -- `id` included --
+ * onto both resulting halves. The result, confirmed by direct inspection while writing this test,
+ * is two `screenplayBlock` nodes sharing one stable id: the exact "Stable id ... must be globally
+ * unique" failure `ScreenplayPasteSanitizer` exists to prevent, produced here by an ordinary
+ * cross-block Enter with no paste or drop involved at all -- so `ScreenplayPasteSanitizer`'s own
+ * `appendTransaction` guard, which only runs for a transaction carrying a `paste`/`drop` `uiEvent`
+ * meta, never sees it and never repairs it.
+ *
+ * That is a real, separate defect from anything this coverage pass was scoped to fix, and asserting
+ * on its output here -- either the duplicate id as "expected," or a document-unchanged shape that
+ * is not actually what happens -- would misrepresent it as correct. Reported to the owner instead
+ * of worked around; see this file's accompanying report. Coverage-wise, this leaves
+ * `splitScreenplayBlock`'s bounds-guard body itself uncovered (its own `if (!activeBlock)` /
+ * `if (!existingNode)` guards immediately above it are separately unreachable in practice: both
+ * recompute a fact the `Enter` keymap entry already established before ever calling
+ * `splitScreenplayBlock`, from the same unchanged editor state).
+ */
+
+/**
+ * The Tab keymap entry's own element-specific branches. `'parentheticals own their parentheses'`
+ * above already reaches the `dialogue` -> `parenthetical` branch through this same real keymap;
+ * these two cover the `action` -> `character` branch and the "nothing to convert" fallback for
+ * every other element, which no test above reaches through the keymap itself (only through
+ * `convertActiveScreenplayBlock` called directly).
+ */
+describe('Tab', () => {
+  it('converts an action block to character', () => {
+    const { editor, mount } = buildEditor([{ element: 'action', text: 'Some action.' }]);
+    setSelectionInFirstBlock(editor, 0);
+
+    const handled = pressKey(editor, 'Tab');
+
+    expect(handled).toBe(true);
+    expect(blocksOf(editor)).toEqual([{ element: 'character', text: 'Some action.' }]);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('does nothing for an element Tab has no conversion for', () => {
+    const { editor, mount } = buildEditor([{ element: 'scene_heading', text: 'INT. ROOM - DAY' }]);
+    setSelectionInFirstBlock(editor, 0);
+
+    const handled = pressKey(editor, 'Tab');
+
+    expect(handled).toBe(false);
+    expect(blocksOf(editor)).toEqual([{ element: 'scene_heading', text: 'INT. ROOM - DAY' }]);
+    editor.destroy();
+    mount.remove();
+  });
+});
+
+describe('projectEditorScreenplay / projectLocalScreenplay', () => {
+  it('projects straight from an Editor, matching projectDocumentScreenplay(editor.state.doc, options) exactly', () => {
+    const sceneHeadingId = '00000000-0000-4000-8000-000000000305';
+    const mount = document.createElement('div');
+    document.body.append(mount);
+    const editor = new Editor({
+      element: mount,
+      ...editorInitFor({
+        type: 'screenplayDocument',
+        content: [
+          {
+            type: 'screenplayBlock',
+            attrs: { element: 'scene_heading', id: sceneHeadingId },
+            content: [{ type: 'text', text: 'INT. STUDY - DAY' }],
+          },
+        ],
+      }),
+    });
+
+    const viaEditor = projectEditorScreenplay(editor, { title: 'Editor Projection' });
+    const viaLocalAlias = projectLocalScreenplay(editor, { title: 'Editor Projection' });
+    const viaDoc = projectDocumentScreenplay(editor.state.doc, { title: 'Editor Projection' });
+
+    // `projectLocalScreenplay` is documented as a plain alias, not a second implementation that
+    // could quietly drift from the first.
+    expect(projectLocalScreenplay).toBe(projectEditorScreenplay);
+    expect(viaEditor).toEqual(viaDoc);
+    expect(viaLocalAlias).toEqual(viaDoc);
+
+    editor.destroy();
+    mount.remove();
+  });
+});
+
+/**
+ * `editorContentFromScreenplay`'s own contract, one level below the full canonical<->editor
+ * round-trip identity `canonicalRoundTrip.test.ts` (`apps/web`) already proves in depth: what this
+ * adds is direct coverage of the function itself, in this package, rather than only through the
+ * `apps/web` re-export shim every one of that file's 84 tests still imports through.
+ */
+describe('editorContentFromScreenplay', () => {
+  function validScreenplay(overrides: Partial<Screenplay> = {}): Screenplay {
+    const result = safeParseScreenplay({
+      annotations: [],
+      blocks: [],
+      documentSettings: DEFAULT_DOCUMENT_SETTINGS,
+      id: '00000000-0000-4000-8000-000000000401',
+      schemaVersion: SCREENPLAY_SCHEMA_VERSION,
+      title: 'A Screenplay',
+      titlePages: [],
+      ...overrides,
+    });
+    if (!result.success) {
+      throw new Error(`fixture itself is invalid: ${JSON.stringify(result.error.issues)}`);
+    }
+    return result.data;
+  }
+
+  it('maps title page, scene number, and block text through, omitting content for an empty block', () => {
+    const titlePage = { id: '00000000-0000-4000-8000-000000000402', title: 'My Screenplay' };
+    const screenplay = validScreenplay({
+      titlePages: [titlePage],
+      blocks: [
+        {
+          id: '00000000-0000-4000-8000-000000000403',
+          type: 'scene_heading',
+          text: 'INT. HOUSE - DAY',
+          sceneNumber: '12A',
+        },
+        { id: '00000000-0000-4000-8000-000000000404', type: 'action', text: '' },
+      ],
+    });
+
+    const result = editorContentFromScreenplay(screenplay);
+
+    // `toEqual`, not `toBe`: `safeParseScreenplay` (zod) returns a freshly parsed object graph,
+    // not the literal `titlePage` passed in above, so this checks the value survived unchanged,
+    // not object identity that was never promised.
+    expect(result.titlePage).toEqual(titlePage);
+    expect(result.body).toEqual({
+      type: 'screenplayDocument',
+      content: [
+        {
+          type: 'screenplayBlock',
+          attrs: {
+            element: 'scene_heading',
+            id: '00000000-0000-4000-8000-000000000403',
+            sceneNumber: '12A',
+          },
+          content: [{ type: 'text', text: 'INT. HOUSE - DAY' }],
+        },
+        {
+          type: 'screenplayBlock',
+          attrs: { element: 'action', id: '00000000-0000-4000-8000-000000000404' },
+        },
+      ],
+    });
+  });
+
+  it('returns titlePage: undefined for a screenplay with no title page, rather than throwing', () => {
+    const screenplay = validScreenplay({ titlePages: [] });
+    expect(editorContentFromScreenplay(screenplay).titlePage).toBeUndefined();
+  });
+
+  it('refuses a screenplay with more than one title page', () => {
+    const screenplay = validScreenplay({
+      titlePages: [
+        { id: '00000000-0000-4000-8000-000000000405' },
+        { id: '00000000-0000-4000-8000-000000000406' },
+      ],
+    });
+    expect(() => editorContentFromScreenplay(screenplay)).toThrow(
+      /not editable in the text-block editor/i,
+    );
+  });
+
+  it('refuses a screenplay with any annotations', () => {
+    const screenplay = validScreenplay({
+      blocks: [{ id: '00000000-0000-4000-8000-000000000407', type: 'action', text: 'Beat.' }],
+      annotations: [
+        {
+          id: '00000000-0000-4000-8000-000000000408',
+          type: 'note',
+          text: 'A note.',
+          anchor: {
+            blockId: '00000000-0000-4000-8000-000000000407',
+            startOffset: 0,
+            endOffset: 1,
+          },
+        },
+      ],
+    });
+    expect(() => editorContentFromScreenplay(screenplay)).toThrow(
+      /not editable in the text-block editor/i,
+    );
+  });
+
+  it('refuses a screenplay containing a page_break block', () => {
+    const screenplay = validScreenplay({
+      blocks: [{ id: '00000000-0000-4000-8000-000000000409', type: 'page_break' }],
+    });
+    expect(() => editorContentFromScreenplay(screenplay)).toThrow(
+      /not editable in the text-block editor/i,
+    );
+  });
+
+  it('refuses a screenplay containing a dual_dialogue block', () => {
+    const screenplay = validScreenplay({
+      blocks: [
+        {
+          id: '00000000-0000-4000-8000-000000000410',
+          type: 'dual_dialogue',
+          left: {
+            id: '00000000-0000-4000-8000-000000000411',
+            blocks: [
+              { id: '00000000-0000-4000-8000-000000000412', type: 'character', text: 'ADA' },
+              { id: '00000000-0000-4000-8000-000000000413', type: 'dialogue', text: 'Hi.' },
+            ],
+          },
+          right: {
+            id: '00000000-0000-4000-8000-000000000414',
+            blocks: [
+              { id: '00000000-0000-4000-8000-000000000415', type: 'character', text: 'BEN' },
+              { id: '00000000-0000-4000-8000-000000000416', type: 'dialogue', text: 'Hey.' },
+            ],
+          },
+        },
+      ],
+    });
+    expect(() => editorContentFromScreenplay(screenplay)).toThrow(
+      /not editable in the text-block editor/i,
+    );
+  });
+});
+
+/**
+ * `projectDocumentScreenplay`'s two distinct rejection paths: an editor node this function cannot
+ * even map (`'invalid screenplay block'`/`'Unsupported local editor node'`, covered by the "paste
+ * sanitisation" tests above indirectly and by `canonicalRoundTrip.test.ts` directly), and --
+ * separately -- a document every node of which maps cleanly but whose *assembled* screenplay
+ * `safeParseScreenplay` itself still rejects. A duplicate stable id is the only way to reach the
+ * second path without going through the paste pipeline: `ScreenplayPasteSanitizer` only ever runs
+ * on a paste or drop transaction, so a document authored with a repeated id from the start (never
+ * pasted) reaches `safeParseScreenplay` with two clean blocks and fails there instead.
+ */
+describe('projectDocumentScreenplay: rejection from safeParseScreenplay itself', () => {
+  it('reports the schema rejection, not a mapping failure, for a document whose blocks all map but collide on id', () => {
+    const duplicateId = '00000000-0000-4000-8000-000000000417';
+    const mount = document.createElement('div');
+    document.body.append(mount);
+    const editor = new Editor({
+      element: mount,
+      ...editorInitFor({
+        type: 'screenplayDocument',
+        content: [
+          {
+            type: 'screenplayBlock',
+            attrs: { element: 'action', id: duplicateId },
+            content: [{ type: 'text', text: 'First.' }],
+          },
+          {
+            type: 'screenplayBlock',
+            attrs: { element: 'action', id: duplicateId },
+            content: [{ type: 'text', text: 'Second.' }],
+          },
+        ],
+      }),
+    });
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+
+    expect(projection.valid).toBe(false);
+    if (projection.valid) throw new Error('expected an invalid projection');
+    expect(projection.issues.some((issue) => issue.includes('must be globally unique'))).toBe(true);
+
+    editor.destroy();
+    mount.remove();
+  });
+});
+
+/**
+ * `findScreenplayBlockPosition` has no other direct test anywhere in the repository -- every
+ * caller (`seamCaret.ts`, `elementMenu.tsx`) exercises it only as one step inside a larger caret-
+ * or menu-positioning behaviour, never asserts on the position it returns in isolation.
+ */
+describe('findScreenplayBlockPosition', () => {
+  it('returns the position of the block with the given id, and undefined for an id not in the document', () => {
+    const firstId = '00000000-0000-4000-8000-000000000501';
+    const secondId = '00000000-0000-4000-8000-000000000502';
+    const mount = document.createElement('div');
+    document.body.append(mount);
+    const editor = new Editor({
+      element: mount,
+      ...editorInitFor({
+        type: 'screenplayDocument',
+        content: [
+          {
+            type: 'screenplayBlock',
+            attrs: { element: 'action', id: firstId },
+            content: [{ type: 'text', text: 'First.' }],
+          },
+          {
+            type: 'screenplayBlock',
+            attrs: { element: 'action', id: secondId },
+            content: [{ type: 'text', text: 'Second.' }],
+          },
+        ],
+      }),
+    });
+
+    expect(findScreenplayBlockPosition(editor, firstId)).toBe(0);
+    // Position of the second block: the first block's own size (its opening/closing tokens plus
+    // "First." as text) further along the document.
+    expect(findScreenplayBlockPosition(editor, secondId)).toBe(editor.state.doc.child(0).nodeSize);
+    expect(findScreenplayBlockPosition(editor, 'not-a-real-id')).toBeUndefined();
+
     editor.destroy();
     mount.remove();
   });
