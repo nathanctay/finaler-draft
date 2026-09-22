@@ -108,6 +108,19 @@ function blocksOf(editor: Editor): Array<{ element: unknown; text: string }> {
 }
 
 /**
+ * Every top-level block's `id` attribute, in document order, untyped (`unknown`) on purpose: the
+ * defect this closes is a `screenplayBlock` whose `id` is `null` rather than a string, and a test
+ * asserting document integrity has to be able to see that, not have it coerced away.
+ */
+function idsOf(editor: Editor): unknown[] {
+  const ids: unknown[] = [];
+  editor.state.doc.forEach((node) => {
+    ids.push(node.attrs.id);
+  });
+  return ids;
+}
+
+/**
  * Sets a selection inside the first (and, in the tests using this, only) block, `[from, to)`
  * characters into its text -- a collapsed caret when `to` is omitted. Shared by the parenthetical
  * and leading-space tests below, which need a caret or a range positioned precisely, not just at
@@ -820,14 +833,6 @@ describe('no active block', () => {
     mount.remove();
   });
 
-  /**
-   * Tab and Space only, not Enter: `@tiptap/core` registers its own built-in `Enter` fallback
-   * (`handleEnter`, bundled unconditionally with every `Editor` regardless of `extensions`) that
-   * runs after this extension's own `Enter` entry declines, and it does not leave the document
-   * alone the way this test's name would otherwise imply -- see `nonEmptyEditorContent`'s sibling
-   * note below and this file's own report for why that combination is flagged, not asserted on,
-   * here.
-   */
   it('Tab and Space decline to act at the document boundary, leaving the document untouched', () => {
     const { editor, mount } = buildEditor([{ element: 'action', text: 'Some action.' }]);
     selectAtDocumentBoundary(editor);
@@ -835,6 +840,48 @@ describe('no active block', () => {
     expect(pressKey(editor, 'Tab')).toBe(false);
     expect(pressKey(editor, ' ')).toBe(false);
     expect(blocksOf(editor)).toEqual([{ element: 'action', text: 'Some action.' }]);
+
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * Enter does not join Tab and Space above in merely declining: `@tiptap/core` registers its own
+   * built-in `Enter` fallback (`handleEnter` -- `createParagraphNear` / `liftEmptyBlock` /
+   * `splitBlock`, bundled unconditionally with every `Editor` regardless of `extensions`), and it
+   * runs whenever this extension's own `Enter` entry returns `false`. At this exact position --
+   * `getActiveBlock`'s depth-walk finds no `screenplayBlock` ancestor, so `$from.parent` is the
+   * `screenplayDocument` node itself -- Tiptap's `createParagraphNear` finds no inline content at
+   * either edge of the selection and inserts a brand-new `screenplayBlock` via `type.createAndFill()`,
+   * which fills every attribute from its schema default rather than from anything this editor
+   * chose. `id`'s default is `null` (`ScreenplayBlockNode.addAttributes()`), so the inserted block
+   * has no id at all: `mapBlock` requires a string id and returns `undefined` for one that has none,
+   * which makes the whole canonical projection invalid and the document silently stops persisting
+   * -- confirmed by reverting the `Enter` entry's document-boundary branch to `return false` and
+   * watching this test fail with exactly that inserted null-id block. `progress/enter-duplicate-ids.md`
+   * has the full mechanism and the fix (`ScreenplayBlockNode`'s `Enter` entry now returns `true`
+   * unconditionally here, claiming the key and dispatching nothing, so Tiptap's fallback is never
+   * reached).
+   */
+  it('claims Enter at the document boundary, leaving the document untouched rather than inserting a null-id block', () => {
+    const { editor, mount } = buildEditor([
+      { element: 'action', text: 'Some action.' },
+      { element: 'action', text: 'More action.' },
+    ]);
+    selectAtDocumentBoundary(editor);
+
+    const handled = pressKey(editor, 'Enter');
+
+    expect(handled).toBe(true);
+    // No block inserted, no existing block touched -- same "document untouched" outcome Tab and
+    // Space already have at this position.
+    expect(blocksOf(editor)).toEqual([
+      { element: 'action', text: 'Some action.' },
+      { element: 'action', text: 'More action.' },
+    ]);
+    const ids = idsOf(editor);
+    expect(ids).toEqual(['block-0', 'block-1']);
+    expect(ids.every((id) => typeof id === 'string')).toBe(true);
 
     editor.destroy();
     mount.remove();
@@ -871,32 +918,68 @@ describe('Enter on a completely empty document', () => {
 });
 
 /**
- * NOT COVERED, DELIBERATELY: `splitScreenplayBlock`'s own bounds guard (`if (... selection.to >
- * blockContentEnd) return false`) is reachable -- press Enter with a selection that starts inside
- * one block and extends into the next -- and declining is exactly what this guard does. But
- * driving that through the real keymap (`someProp('handleKeyDown')`, as every other test in this
- * file does) does not leave the document alone the way "declining" would suggest: this extension's
- * own `Enter` entry returns `false`, and ProseMirror's dispatch then falls through to
- * `@tiptap/core`'s own built-in `Enter` keymap (`handleEnter` -- `createParagraphNear` /
- * `liftEmptyBlock` / `splitBlock`, bundled unconditionally with every `Editor`), which *does* act:
- * it deletes the selected range across both blocks and then splits the merged remainder, and
- * ProseMirror's generic `splitBlock` copies the original node's full `attrs` -- `id` included --
- * onto both resulting halves. The result, confirmed by direct inspection while writing this test,
- * is two `screenplayBlock` nodes sharing one stable id: the exact "Stable id ... must be globally
- * unique" failure `ScreenplayPasteSanitizer` exists to prevent, produced here by an ordinary
- * cross-block Enter with no paste or drop involved at all -- so `ScreenplayPasteSanitizer`'s own
- * `appendTransaction` guard, which only runs for a transaction carrying a `paste`/`drop` `uiEvent`
- * meta, never sees it and never repairs it.
+ * `splitScreenplayBlock`'s cross-block case: a selection that starts inside one block and extends
+ * into a later one used to make the function's bounds guard decline (`return false`), and driving
+ * that through the real keymap (`someProp('handleKeyDown')`, as every other test in this file does)
+ * did not leave the document alone the way "declining" would suggest -- this extension's own
+ * `Enter` entry returned `false` too, and ProseMirror's dispatch fell through to `@tiptap/core`'s
+ * own built-in `Enter` keymap (`handleEnter` -- `createParagraphNear` / `liftEmptyBlock` /
+ * `splitBlock`, bundled unconditionally with every `Editor`), which deleted the selected range
+ * across both blocks and then split the merged remainder with `tr.split`'s default of copying the
+ * original node's full `attrs` -- `id` included -- onto both resulting halves. Two `screenplayBlock`
+ * nodes would come out sharing one stable id: the exact "Stable id ... must be globally unique"
+ * failure `ScreenplayPasteSanitizer` exists to prevent for paste and drop, reached here by an
+ * ordinary cross-block Enter with neither -- so `ScreenplayPasteSanitizer`'s own `appendTransaction`
+ * guard, gated on a `paste`/`drop` `uiEvent` meta, never saw it and never repaired it.
+ * `progress/enter-duplicate-ids.md` has the full mechanism.
  *
- * That is a real, separate defect from anything this coverage pass was scoped to fix, and asserting
- * on its output here -- either the duplicate id as "expected," or a document-unchanged shape that
- * is not actually what happens -- would misrepresent it as correct. Reported to the owner instead
- * of worked around; see this file's accompanying report. Coverage-wise, this leaves
- * `splitScreenplayBlock`'s bounds-guard body itself uncovered (its own `if (!activeBlock)` /
- * `if (!existingNode)` guards immediately above it are separately unreachable in practice: both
- * recompute a fact the `Enter` keymap entry already established before ever calling
- * `splitScreenplayBlock`, from the same unchanged editor state).
+ * `splitScreenplayBlock` now handles this shape directly instead of declining it (see its own
+ * comment), so this test drives the same real keymap path and asserts the fix: every resulting
+ * block has a distinct, non-null, string id, the block spanned by the selection's start keeps its
+ * own id and element, and the new block created from the tail gets a freshly minted one.
  */
+describe('Enter across a selection spanning two blocks', () => {
+  it("splits at the selection boundary without duplicating either block's id", () => {
+    const { editor, mount } = buildEditor([
+      { element: 'action', text: 'ABCDE' },
+      { element: 'action', text: 'FGHIJ' },
+    ]);
+    const firstPosition = findScreenplayBlockPosition(editor, 'block-0');
+    const secondPosition = findScreenplayBlockPosition(editor, 'block-1');
+    if (firstPosition === undefined || secondPosition === undefined) {
+      throw new Error('expected both seeded blocks to be present');
+    }
+    // From offset 2 of the first block ("AB|CDE") to offset 3 of the second ("FGH|IJ") -- the
+    // caret starts inside `block-0` and the selection reaches past its end into `block-1`, the
+    // exact shape `splitScreenplayBlock`'s bounds guard used to decline.
+    const selection = TextSelection.create(
+      editor.state.doc,
+      firstPosition + 1 + 2,
+      secondPosition + 1 + 3,
+    );
+    editor.view.dispatch(editor.state.tr.setSelection(selection));
+
+    const handled = pressKey(editor, 'Enter');
+
+    expect(handled).toBe(true);
+    // The prefix before the selection stays with `block-0`'s own id and element; the suffix after
+    // it becomes a new block. `block-1` itself -- entirely inside the replaced range -- is gone.
+    expect(blocksOf(editor)).toEqual([
+      { element: 'action', text: 'AB' },
+      { element: 'action', text: 'IJ' },
+    ]);
+    const ids = idsOf(editor);
+    expect(ids).toHaveLength(2);
+    expect(ids.every((id) => typeof id === 'string')).toBe(true);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids[0]).toBe('block-0');
+    expect(ids[1]).not.toBe('block-0');
+    expect(ids[1]).not.toBe('block-1');
+
+    editor.destroy();
+    mount.remove();
+  });
+});
 
 /**
  * The Tab keymap entry's own element-specific branches. `'parentheticals own their parentheses'`
