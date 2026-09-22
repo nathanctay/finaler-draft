@@ -4,7 +4,7 @@ import { Editor } from '@tiptap/core';
 import { TextSelection } from '@tiptap/pm/state';
 import {
   projectEditorScreenplay,
-  screenplayExtensions,
+  createLocalScreenplayEditorInit,
   type ScreenplayElementType,
 } from './screenplayEditor.js';
 import { SmartTypeGhostExtension, smartTypeGhostPluginKey } from './smartTypeGhost.js';
@@ -53,17 +53,18 @@ const RANKED_LOCATIONS = ['ATTIC', 'ATRIUM', 'ALLEY', 'APARTMENT'] as const;
 function buildEditor(blocks: readonly Block[]) {
   const mount = document.createElement('div');
   document.body.append(mount);
+  const seeded = createLocalScreenplayEditorInit({
+    type: 'screenplayDocument' as const,
+    content: blocks.map((block, index) => ({
+      type: 'screenplayBlock' as const,
+      attrs: { element: block.element, id: blockId(index) },
+      ...(block.text === '' ? {} : { content: [{ type: 'text', text: block.text }] }),
+    })),
+  });
   return new Editor({
-    content: {
-      type: 'screenplayDocument' as const,
-      content: blocks.map((block, index) => ({
-        type: 'screenplayBlock' as const,
-        attrs: { element: block.element, id: blockId(index) },
-        ...(block.text === '' ? {} : { content: [{ type: 'text', text: block.text }] }),
-      })),
-    },
+    content: seeded.content,
     element: mount,
-    extensions: [...screenplayExtensions, SmartTypeGhostExtension, SmartTypeListExtension],
+    extensions: [...seeded.extensions, SmartTypeGhostExtension, SmartTypeListExtension],
   });
 }
 

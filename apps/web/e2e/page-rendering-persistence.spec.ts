@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page, type Request } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { paginateScreenplay, type AuthoredLine, type LayoutResult } from '@finaler-draft/layout';
 import type { ScreenplayBlock } from '@finaler-draft/screenplay';
 import {
@@ -9,6 +9,7 @@ import {
   PAGE_WIDTH_IN,
 } from '@finaler-draft/screenplay/pageFormat';
 import { PAGE_GAP_IN, pageStackMinHeightIn } from '../src/pagination.js';
+import { PERSISTED_POLL_TIMEOUT_MS } from './persistedPollTimeout.js';
 import { requireCourierPrime } from './requireCourierPrime.js';
 import { signIn, verifyEmail } from './testMail.js';
 
@@ -319,6 +320,54 @@ async function measureSeam(page: Page, blockId: string) {
   );
 }
 
+/** The screenplay id this file's own `createAndOpenScreenplay` always navigates to. */
+function screenplayIdFromUrl(page: Page): string {
+  const screenplayId = /\/screenplays\/([0-9a-f-]+)/u.exec(page.url())?.[1];
+  if (!screenplayId) {
+    throw new Error(`Could not find a screenplay id in ${page.url()}.`);
+  }
+  return screenplayId;
+}
+
+/**
+ * The replacement for this file's old `page.waitForResponse` on the whole-document `PUT` --
+ * deleted along with the REST save path itself (progress/collaboration-slice-1.md: "Yjs as source
+ * of truth"). There is no request left to wait on; a save is now `apps/collab`'s own debounced
+ * `onStoreDocument` (`apps/collab/src/database.ts`'s `createStore`), which writes
+ * `document_yjs_state` and, in the same transaction, projects `canonical_screenplay` -- the exact
+ * column `GET /api/screenplays/:id` still reads, unchanged by this slice. Polling that real,
+ * database-backed route until `isReady` is satisfied is therefore a direct proof that a specific
+ * edit reached Postgres, not merely that this tab's own socket reports "synced" (this file's own
+ * module comment on why those are genuinely different moments) -- and it fails exactly the way the
+ * old wait did if persistence itself broke: `isReady` never becomes true, `expect.poll` times out,
+ * the test fails loudly instead of reading stale content.
+ *
+ * Returns the exact blocks the satisfying poll saw, so a caller that already knows what it is
+ * waiting for never has to re-fetch to get it.
+ */
+async function waitForPersistedBlocks(
+  page: Page,
+  screenplayId: string,
+  isReady: (blocks: readonly ScreenplayBlock[]) => boolean,
+): Promise<ScreenplayBlock[]> {
+  let latest: ScreenplayBlock[] = [];
+  await expect
+    .poll(
+      async () => {
+        const response = await page.request.get(`/api/screenplays/${screenplayId}`);
+        expect(response.ok()).toBe(true);
+        const { screenplay } = (await response.json()) as {
+          screenplay: { blocks: ScreenplayBlock[] };
+        };
+        latest = screenplay.blocks;
+        return isReady(latest);
+      },
+      { timeout: PERSISTED_POLL_TIMEOUT_MS },
+    )
+    .toBe(true);
+  return latest;
+}
+
 test.describe('page rendering: real editor, real DOM', () => {
   test('every block lands where the model predicts, every break anchors as the model says, and the last partial page still paints in full', async ({
     page,
@@ -343,29 +392,28 @@ test.describe('page rendering: real editor, real DOM', () => {
       }
     }
 
-    const savedUpdate = page.waitForResponse(
-      (response) =>
-        response.request().method() === 'PUT' &&
-        response.url().includes('/api/screenplays/') &&
-        response.status() === 200,
-    );
-    await savedUpdate;
-
     // Read the real canonical document back through the real API -- the only way to know the
     // real block ids (the editor generates them; this test never authors one), and therefore the
-    // only way to compute what the model actually predicts for this exact document.
-    const screenplayId = /\/screenplays\/([0-9a-f-]+)/u.exec(page.url())?.[1];
-    if (!screenplayId) {
-      throw new Error(`Could not find a screenplay id in ${page.url()}.`);
+    // only way to compute what the model actually predicts for this exact document. Waiting for
+    // it to reflect the fixture is what proves this typing round-tripped through `apps/collab`'s
+    // debounced save into Postgres (`waitForPersistedBlocks`'s own doc comment).
+    const screenplayId = screenplayIdFromUrl(page);
+    const lastFixtureBlock = blocks[blocks.length - 1];
+    if (!lastFixtureBlock || !('text' in lastFixtureBlock)) {
+      throw new Error('Fixture is missing its last text block.');
     }
-    const persisted = await page.request.get(`/api/screenplays/${screenplayId}`);
-    expect(persisted.ok()).toBe(true);
-    const { screenplay } = (await persisted.json()) as {
-      screenplay: { blocks: ScreenplayBlock[] };
-    };
-    const blocksById = new Map(screenplay.blocks.map((block) => [block.id, block]));
+    const persistedBlocks = await waitForPersistedBlocks(page, screenplayId, (candidate) => {
+      const last = candidate[candidate.length - 1];
+      return (
+        candidate.length === blocks.length &&
+        !!last &&
+        'text' in last &&
+        last.text === lastFixtureBlock.text
+      );
+    });
+    const blocksById = new Map(persistedBlocks.map((block) => [block.id, block]));
 
-    const layout = paginateScreenplay(screenplay.blocks);
+    const layout = paginateScreenplay(persistedBlocks);
     expect(layout.pages.length).toBeGreaterThanOrEqual(4);
     // Sanity on the fixture actually producing both anchor shapes, against the real model output
     // (not assumed) -- see fourPageMixedAnchorFixture's doc comment.
@@ -404,12 +452,12 @@ test.describe('page rendering: real editor, real DOM', () => {
 
         return { blockTops, heightIn: pageRect.height / 96, widgetInfo };
       },
-      { blockIds: screenplay.blocks.map((block) => block.id), breakCount: layout.pages.length - 1 },
+      { blockIds: persistedBlocks.map((block) => block.id), breakCount: layout.pages.length - 1 },
     );
 
     // Every block's real top matches where the model says its first authored line sits --
     // requirement 2's "every block", not only page-top blocks.
-    screenplay.blocks.forEach((block, index) => {
+    persistedBlocks.forEach((block, index) => {
       const { pageIndex, lineIndex } = blockOrigin(layout, block.id);
       const expected = expectedTopIn(pageIndex, lineIndex);
       const actual = measured.blockTops[index];
@@ -486,13 +534,19 @@ test.describe('page rendering: real editor, real DOM', () => {
       }
     }
 
-    const initialSave = page.waitForResponse(
-      (response) =>
-        response.request().method() === 'PUT' &&
-        response.url().includes('/api/screenplays/') &&
-        response.status() === 200,
-    );
-    await initialSave;
+    const lastFixtureBlock = blocks[blocks.length - 1];
+    if (!lastFixtureBlock || !('text' in lastFixtureBlock)) {
+      throw new Error('Fixture is missing its last text block.');
+    }
+    await waitForPersistedBlocks(page, screenplayIdFromUrl(page), (candidate) => {
+      const last = candidate[candidate.length - 1];
+      return (
+        candidate.length === blocks.length &&
+        !!last &&
+        'text' in last &&
+        last.text === lastFixtureBlock.text
+      );
+    });
 
     const readFirstBreakNumberOffsetIn = () =>
       page.evaluate(() => {
@@ -692,7 +746,7 @@ test.describe('page rendering: real editor, real DOM', () => {
     page,
   }) => {
     test.setTimeout(60_000);
-    await createAndOpenScreenplay(page);
+    const { canvas } = await createAndOpenScreenplay(page);
     await requireCourierPrime(page);
 
     // A speech that cannot fit at the foot of page 1 moves to page 2 whole, leaving page 1 short.
@@ -700,36 +754,53 @@ test.describe('page rendering: real editor, real DOM', () => {
     // spacer height genuinely changes whenever page 1's fill changes, even though no block crosses
     // the boundary. When page 1 is full instead, the remainder barely moves and the defect below
     // is invisible -- which is why the other page-frame test in this file did not catch it.
-    const screenplayId = /screenplays\/([0-9a-f-]+)/.exec(page.url())?.[1];
-    expect(screenplayId).toBeTruthy();
-    const existing = (await (
-      await page.request.get(`/api/screenplays/${screenplayId}`)
-    ).json()) as {
-      version: number;
-      screenplay: Record<string, unknown>;
-    };
-    const seeded = [
+    //
+    // Built by typing into the real editor, not by seeding a canonical document directly through
+    // `page.request.put` (there is no such route to seed through any more -- the whole-document
+    // `PUT` this used to send is deleted along with `version`/`expectedVersion`, per
+    // progress/collaboration-slice-1.md's "Yjs as source of truth"; screenplay content now reaches
+    // Postgres only through the real Yjs socket a keystroke drives). Ids are left to the editor
+    // rather than authored here: nothing below reads them, only text and position.
+    const screenplayId = screenplayIdFromUrl(page);
+    const seedLines: ReadonlyArray<{ text: string; element?: 'character' | 'dialogue' }> = [
       ...Array.from({ length: 26 }, (_, index) => ({
-        id: crypto.randomUUID(),
-        type: 'action',
         text: `Action line ${index} of the first page.`,
       })),
-      { id: crypto.randomUUID(), type: 'character', text: 'ADA' },
-      { id: crypto.randomUUID(), type: 'dialogue', text: 'y'.repeat(35 * 3 + 1) },
+      { text: 'ADA', element: 'character' },
+      { text: 'y'.repeat(35 * 3 + 1), element: 'dialogue' },
     ];
-    // `page.request` is Playwright's own API client, not the browser page, so it sends no `Origin`
-    // header of its own -- and the API now refuses unsafe methods that arrive without one (CSRF
-    // hardening, `app.ts`'s origin guard: safe methods may omit it, unsafe ones may not). A real
-    // browser always sends it on a PUT, so setting it here makes this seeding request behave like
-    // the application it stands in for, rather than relaxing the rule to accommodate a test client.
-    const seedResponse = await page.request.put(`/api/screenplays/${screenplayId}`, {
-      data: {
-        expectedVersion: existing.version,
-        screenplay: { ...existing.screenplay, blocks: seeded },
-      },
-      headers: { origin: new URL(page.url()).origin },
+    await canvas.click();
+    for (let index = 0; index < seedLines.length; index += 1) {
+      const line = seedLines[index];
+      if (!line) continue;
+      if (line.element) {
+        await page.getByLabel('Active screenplay element').selectOption({
+          label: line.element === 'character' ? 'Character' : 'Dialogue',
+        });
+      }
+      await page.keyboard.insertText(line.text);
+      if (index < seedLines.length - 1) {
+        await page.keyboard.press('Enter');
+      }
+    }
+    const lastSeedLine = seedLines[seedLines.length - 1];
+    if (!lastSeedLine) {
+      throw new Error('Seed fixture is empty.');
+    }
+    // Waiting for the last typed block to reach Postgres before reloading is what makes the
+    // reload below meaningful: `apps/collab`'s `fetch` (database.ts) rehydrates a reconnecting
+    // socket from `document_yjs_state`, written in the same transaction as the
+    // `canonical_screenplay` this polls -- so once this poll is satisfied, the fresh connection a
+    // reload opens is guaranteed to see this exact fixture, not a stale or partial one.
+    await waitForPersistedBlocks(page, screenplayId, (candidate) => {
+      const last = candidate[candidate.length - 1];
+      return (
+        candidate.length === seedLines.length &&
+        !!last &&
+        'text' in last &&
+        last.text === lastSeedLine.text
+      );
     });
-    expect(seedResponse.ok()).toBe(true);
     await page.reload();
     await expect(page.getByRole('textbox', { name: 'Screenplay editing canvas' })).toBeVisible();
     await expect(page.locator('.page-break-number')).toBeVisible();
@@ -816,7 +887,9 @@ test.describe('page rendering: real editor, real DOM', () => {
   test('a ghost completion, and the list opened over it, move no line, no page, and nothing in the canonical screenplay', async ({
     page,
   }) => {
-    test.setTimeout(60_000);
+    // Two `waitForPersistedBlocks`/inline polls at `PERSISTED_POLL_TIMEOUT_MS` each -- 60_000
+    // does not leave enough room if both land near their worst case.
+    test.setTimeout(90_000);
     const { canvas } = await createAndOpenScreenplay(page);
     await requireCourierPrime(page);
     await canvas.click();
@@ -850,13 +923,11 @@ test.describe('page rendering: real editor, real DOM', () => {
       await page.keyboard.insertText(filler);
     }
 
-    const saved = page.waitForResponse(
-      (response) =>
-        response.request().method() === 'PUT' &&
-        response.url().includes('/api/screenplays/') &&
-        response.status() === 200,
-    );
-    await saved;
+    const lastFiller = linesOfLength(ACTION_BUDGET, 40);
+    await waitForPersistedBlocks(page, screenplayIdFromUrl(page), (candidate) => {
+      const last = candidate[candidate.length - 1];
+      return candidate.length === 4 && !!last && 'text' in last && last.text === lastFiller;
+    });
     await page.waitForTimeout(400);
 
     const measure = () => measurePage(page);
@@ -901,10 +972,7 @@ test.describe('page rendering: real editor, real DOM', () => {
 
     // ...and nothing about the canonical screenplay either -- read back through the real API,
     // with the ghost still on screen.
-    const screenplayId = /\/screenplays\/([0-9a-f-]+)/u.exec(page.url())?.[1];
-    if (!screenplayId) {
-      throw new Error(`Could not find a screenplay id in ${page.url()}.`);
-    }
+    const screenplayId = screenplayIdFromUrl(page);
     const persisted = await page.request.get(`/api/screenplays/${screenplayId}`);
     expect(persisted.ok()).toBe(true);
     const { screenplay } = (await persisted.json()) as {
@@ -1006,14 +1074,14 @@ test.describe('page rendering: real editor, real DOM', () => {
     ).toBe(accepted);
 
     /*
-     * Not `page.waitForResponse` on "the next PUT (200)": the space typed just above is itself a
-     * real document edit and already scheduled its own 600ms debounced save (`scheduleSave`/
-     * `saveLatest`, App.tsx) before Tab ever accepted the ghost. On a loaded runner that earlier
-     * save's own clock can fire independently of Tab's, landing an intermediate PUT that still
-     * carries only the typed space -- not the accepted completion -- which a bare "wait for the
-     * next PUT" would mistake for the accept's own save (the identical race diagnosed for the
-     * element-menu test, progress/element-menu-save-race.md). Poll the persisted document itself
-     * rather than betting on which response lands next.
+     * There is no single request left to wait on for "the accept's own save": the space typed just
+     * above is itself a real document edit, and `apps/collab`'s debounced `onStoreDocument` fires
+     * on its own schedule regardless of what this tab's connection does next (App.tsx's own
+     * `syncEditorState` comment on why nothing here schedules a save any more). Whichever debounced
+     * flush happens to land first, only the *eventual* persisted state is what this assertion is
+     * about -- exactly the race `progress/element-menu-save-race.md` diagnosed under the old
+     * whole-document `PUT`, still real under Yjs's own debounce for the identical reason. Poll the
+     * persisted document itself rather than betting on which flush lands next.
      */
     await expect
       .poll(
@@ -1026,7 +1094,7 @@ test.describe('page rendering: real editor, real DOM', () => {
           const heading = screenplay.blocks[1];
           return heading && 'text' in heading ? heading.text : undefined;
         },
-        { timeout: 10_000 },
+        { timeout: PERSISTED_POLL_TIMEOUT_MS },
       )
       .toBe(accepted);
 
@@ -1065,7 +1133,9 @@ test.describe('page rendering: real editor, real DOM', () => {
   test('an open element menu moves no line and no page, and only an explicit choice reaches the document', async ({
     page,
   }) => {
-    test.setTimeout(60_000);
+    // Two inline polls at `PERSISTED_POLL_TIMEOUT_MS` each -- same reasoning as the ghost-
+    // completion test above.
+    test.setTimeout(90_000);
     const { canvas } = await createAndOpenScreenplay(page);
     await requireCourierPrime(page);
     await canvas.click();
@@ -1077,13 +1147,11 @@ test.describe('page rendering: real editor, real DOM', () => {
       await page.keyboard.insertText(filler);
     }
 
-    const fixtureSaved = page.waitForResponse(
-      (response) =>
-        response.request().method() === 'PUT' &&
-        response.url().includes('/api/screenplays/') &&
-        response.status() === 200,
-    );
-    await fixtureSaved;
+    const lastFiller = linesOfLength(ACTION_BUDGET, 20);
+    await waitForPersistedBlocks(page, screenplayIdFromUrl(page), (candidate) => {
+      const last = candidate[candidate.length - 1];
+      return candidate.length === 3 && !!last && 'text' in last && last.text === lastFiller;
+    });
     await page.waitForTimeout(400);
 
     // The first Enter, at the end of a block with text in it: the writer starting the next
@@ -1202,24 +1270,21 @@ test.describe('page rendering: real editor, real DOM', () => {
     // What actually reached the canonical screenplay across all of that: one more block than the
     // fixture had, empty, carrying the one type that was explicitly chosen. No text, and no second
     // empty block from any of the six Enters above.
-    const screenplayId = /\/screenplays\/([0-9a-f-]+)/u.exec(page.url())?.[1];
-    if (!screenplayId) {
-      throw new Error(`Could not find a screenplay id in ${page.url()}.`);
-    }
+    const screenplayId = screenplayIdFromUrl(page);
 
     /*
-     * Not `page.waitForResponse` on "the next PUT (200)": autosave is a genuine debounce
-     * (`scheduleSave`/`saveLatest`, App.tsx) that resets on every change but always sends whatever
-     * `latestProjection` is current when it actually fires -- not what was current when it was
-     * scheduled. The very first Enter above (the one that created this empty block) already
-     * scheduled a save of its own well before this point. On a loaded runner, that save's own
-     * 600ms clock can elapse -- independent of the "s" choice just made -- and land an intermediate
-     * PUT still carrying `action`, which a bare "wait for the next PUT" mistakes for the choice's
-     * save (reproduced directly: forcing that ordering makes this assertion fail with
-     * `Received: "action"`, the identical failure this replaced -- see
-     * progress/element-menu-save-race.md). However many PUTs land or in whatever order, only the
-     * server's eventual state is the thing being asserted on, so poll it directly instead of
-     * betting on a single response.
+     * There is no single request left to wait on for "the choice's own save": `apps/collab`'s
+     * debounced `onStoreDocument` resets on every change but always persists whatever the Yjs
+     * document holds when it actually fires -- not what it held when the debounce was scheduled.
+     * The very first Enter above (the one that created this empty block) already put a flush on
+     * that clock well before this point, and on a loaded runner it can elapse independently of the
+     * "s" choice just made, persisting an intermediate state still carrying `action` -- which a
+     * bare "wait for the next flush" mistakes for the choice's own save (reproduced directly:
+     * forcing that ordering makes this assertion fail with `Received: "action"`, the identical
+     * failure diagnosed under the old whole-document `PUT` in progress/element-menu-save-race.md,
+     * still real under Yjs's own debounce for the identical reason). However many flushes land or
+     * in whatever order, only the server's eventual state is the thing being asserted on, so poll
+     * it directly instead of betting on a single one.
      */
     await expect
       .poll(
@@ -1231,7 +1296,7 @@ test.describe('page rendering: real editor, real DOM', () => {
           };
           return screenplay.blocks[screenplay.blocks.length - 1]?.type;
         },
-        { timeout: 10_000 },
+        { timeout: PERSISTED_POLL_TIMEOUT_MS },
       )
       .toBe('scene_heading');
 
@@ -1275,6 +1340,10 @@ test.describe('page rendering: real editor, real DOM', () => {
   test('typing across a page boundary leaves the caret at the same screen position an equivalent same-page edit would have', async ({
     page,
   }) => {
+    // One `waitForPersistedBlocks` poll at `PERSISTED_POLL_TIMEOUT_MS` (see that constant's own
+    // doc comment): the global 30_000ms default (`playwright.persistence.config.ts`) would leave
+    // this test almost no room for its own typing/measurement work in a worst-case poll.
+    test.setTimeout(60_000);
     const { canvas } = await createAndOpenScreenplay(page);
     await requireCourierPrime(page);
     await canvas.click();
@@ -1286,14 +1355,12 @@ test.describe('page rendering: real editor, real DOM', () => {
     expect(paginateScreenplay(singleActionBlock(56)).pages.length).toBe(2);
 
     // One line of room left on page 1 (54 of the 55 lines it holds).
-    await page.keyboard.insertText(linesOfLength(ACTION_BUDGET, 54));
-    const fixtureSaved = page.waitForResponse(
-      (response) =>
-        response.request().method() === 'PUT' &&
-        response.url().includes('/api/screenplays/') &&
-        response.status() === 200,
-    );
-    await fixtureSaved;
+    const seedText = linesOfLength(ACTION_BUDGET, 54);
+    await page.keyboard.insertText(seedText);
+    await waitForPersistedBlocks(page, screenplayIdFromUrl(page), (candidate) => {
+      const only = candidate[0];
+      return candidate.length === 1 && !!only && 'text' in only && only.text === seedText;
+    });
     await page.waitForTimeout(400);
     expect(await page.locator('.page-break-widget').count()).toBe(0);
 
@@ -1537,7 +1604,9 @@ test.describe('page rendering: real editor, real DOM', () => {
   test('a caret drawn at a mid-block page seam moves no line and no page, leaves the real selection alone, and leaves the end of page 1 alone', async ({
     page,
   }) => {
-    test.setTimeout(90_000);
+    // 90s plus the 11s deliberate wait behaviour 2's own comment adds below (past `apps/collab`'s
+    // real 10s maxDebounce, to prove a negative that no request is left to watch for).
+    test.setTimeout(105_000);
     const { canvas } = await createAndOpenScreenplay(page);
     await requireCourierPrime(page);
 
@@ -1551,25 +1620,24 @@ test.describe('page rendering: real editor, real DOM', () => {
         await page.keyboard.press('Enter');
       }
     }
-    await page.waitForResponse(
-      (response) =>
-        response.request().method() === 'PUT' &&
-        response.url().includes('/api/screenplays/') &&
-        response.status() === 200,
-    );
+    const screenplayId = screenplayIdFromUrl(page);
+    const lastFixtureBlock = blocks[blocks.length - 1];
+    if (!lastFixtureBlock || !('text' in lastFixtureBlock)) {
+      throw new Error('Fixture is missing its last text block.');
+    }
+    const persistedBlocks = await waitForPersistedBlocks(page, screenplayId, (candidate) => {
+      const last = candidate[candidate.length - 1];
+      return (
+        candidate.length === blocks.length &&
+        !!last &&
+        'text' in last &&
+        last.text === lastFixtureBlock.text
+      );
+    });
     await page.waitForTimeout(400);
 
-    const screenplayId = /\/screenplays\/([0-9a-f-]+)/u.exec(page.url())?.[1];
-    if (!screenplayId) {
-      throw new Error(`Could not find a screenplay id in ${page.url()}.`);
-    }
-    const persisted = await page.request.get(`/api/screenplays/${screenplayId}`);
-    expect(persisted.ok()).toBe(true);
-    const { screenplay } = (await persisted.json()) as {
-      screenplay: { blocks: ScreenplayBlock[] };
-    };
-    const blocksById = new Map(screenplay.blocks.map((block) => [block.id, block]));
-    const layout = paginateScreenplay(screenplay.blocks);
+    const blocksById = new Map(persistedBlocks.map((block) => [block.id, block]));
+    const layout = paginateScreenplay(persistedBlocks);
 
     // The seam this test is about, taken from the real model rather than from the DOM: the first
     // break whose last authored line does NOT end its block, which is exactly the branch
@@ -1635,15 +1703,19 @@ test.describe('page rendering: real editor, real DOM', () => {
      * does not move (it is the same document position either way, and ProseMirror still renders it
      * upstream); a caret is drawn at the downstream DOM position instead, and the native one is
      * suppressed for that block and no other.
+     *
+     * The negative claim under test across behaviours 2 through 6 below: drawing, moving and
+     * clearing this cosmetic caret never touches the document. There is no request left to watch
+     * for this the way the old whole-document `PUT` was watched (deleted along with the REST save
+     * path) -- the equivalent proof under Yjs is checked once, right before behaviour 4's real
+     * edit: wait past `apps/collab`'s real `maxDebounce` (10s, left at Hocuspocus's own default --
+     * `server.ts`'s own comment on why), then confirm the persisted projection for this exact
+     * block is still `seam.text`, unchanged. If any cosmetic interaction below had dispatched a
+     * real ProseMirror transaction, that edit would have reached Postgres well within that wait
+     * regardless of how the regular 2s debounce happened to be timed -- so this fails exactly the
+     * way the old request-watch would have, just on the document's own eventual state rather than
+     * on a request in flight.
      */
-    let sawSave = false;
-    const watchSaves = (request: Request) => {
-      if (request.method() === 'PUT' && request.url().includes('/api/screenplays/')) {
-        sawSave = true;
-      }
-    };
-    page.on('request', watchSaves);
-
     await page.mouse.click(geometry.downstream.left + 2, geometry.downstream.top + 4);
     await expect(seamCaret).toHaveCount(1);
     await expect(suppressed).toHaveCount(1);
@@ -1812,30 +1884,38 @@ test.describe('page rendering: real editor, real DOM', () => {
       delay: 80,
     });
     await expect(seamCaret).toHaveCount(1);
-    expect(sawSave).toBe(false);
-    page.off('request', watchSaves);
 
-    const typed = page.waitForResponse(
-      (response) =>
-        response.request().method() === 'PUT' &&
-        response.url().includes('/api/screenplays/') &&
-        response.status() === 200,
+    // The wait behaviour 2's own comment describes: past `apps/collab`'s real 10s `maxDebounce`,
+    // confirm nothing behaviours 2 through 6 did reached Postgres.
+    await page.waitForTimeout(11_000);
+    const stillPristine = await page.request.get(`/api/screenplays/${screenplayId}`);
+    expect(stillPristine.ok()).toBe(true);
+    const { screenplay: unedited } = (await stillPristine.json()) as {
+      screenplay: { blocks: ScreenplayBlock[] };
+    };
+    const uneditedBlock = unedited.blocks.find((block) => block.id === seam.blockId);
+    expect(uneditedBlock && 'text' in uneditedBlock ? uneditedBlock.text : undefined).toBe(
+      seam.text,
     );
+
+    const expectedEditedText = `${seam.text.slice(0, seam.offset)}Z${seam.text.slice(seam.offset)}`;
     await page.keyboard.insertText('Z');
     // An edit clears the drawn caret: the seam is a consequence of where the text falls, and the
     // text just moved.
     await expect(seamCaret).toHaveCount(0);
     await expect(suppressed).toHaveCount(0);
-    await typed;
 
-    const afterTyping = await page.request.get(`/api/screenplays/${screenplayId}`);
-    expect(afterTyping.ok()).toBe(true);
-    const { screenplay: edited } = (await afterTyping.json()) as {
-      screenplay: { blocks: ScreenplayBlock[] };
-    };
-    const editedBlock = edited.blocks.find((block) => block.id === seam.blockId);
+    const editedBlocks = await waitForPersistedBlocks(page, screenplayId, (candidate) => {
+      const candidateEdited = candidate.find((block) => block.id === seam.blockId);
+      return (
+        !!candidateEdited &&
+        'text' in candidateEdited &&
+        candidateEdited.text === expectedEditedText
+      );
+    });
+    const editedBlock = editedBlocks.find((block) => block.id === seam.blockId);
     const editedText = editedBlock && 'text' in editedBlock ? editedBlock.text : '';
-    expect(editedText).toBe(`${seam.text.slice(0, seam.offset)}Z${seam.text.slice(seam.offset)}`);
+    expect(editedText).toBe(expectedEditedText);
   });
 });
 
@@ -1901,14 +1981,12 @@ test.describe('zoom modes: real editor, real DOM', () => {
     await canvas.click();
     await page.keyboard.insertText(linesOfLength(ACTION_BUDGET, 55));
     await page.keyboard.press('Enter');
-    const savedUpdate = page.waitForResponse(
-      (response) =>
-        response.request().method() === 'PUT' &&
-        response.url().includes('/api/screenplays/') &&
-        response.status() === 200,
-    );
-    await page.keyboard.insertText(linesOfLength(ACTION_BUDGET, 5));
-    await savedUpdate;
+    const secondBlockText = linesOfLength(ACTION_BUDGET, 5);
+    await page.keyboard.insertText(secondBlockText);
+    await waitForPersistedBlocks(page, screenplayIdFromUrl(page), (candidate) => {
+      const last = candidate[candidate.length - 1];
+      return candidate.length === 2 && !!last && 'text' in last && last.text === secondBlockText;
+    });
     await expect(page.locator('.page-break-widget')).toHaveCount(1);
 
     /**

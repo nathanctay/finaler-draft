@@ -40,6 +40,7 @@ import { Extension, type Editor } from '@tiptap/core';
 import { Plugin, PluginKey } from '@tiptap/pm/state';
 import { DecorationSet, type EditorView } from '@tiptap/pm/view';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
+import { ySyncPluginKey } from 'y-prosemirror';
 import { paginateScreenplay } from '@finaler-draft/layout';
 import { DEFAULT_DOCUMENT_SETTINGS, type DocumentSettings } from '@finaler-draft/screenplay';
 import { LINES_PER_INCH, PAGE_WIDTH_IN } from '@finaler-draft/screenplay/pageFormat';
@@ -446,6 +447,21 @@ export const PaginationExtension = Extension.create<PaginationExtensionOptions>(
             const recomputed = tr.getMeta(paginationPluginKey) as PaginationState | undefined;
             if (recomputed) {
               return recomputed;
+            }
+            // `y-prosemirror`'s `ySyncPlugin` performs one forced-rerender transaction right
+            // after the view mounts -- a full-document `tr.replace(0, size, contentFromY)`, even
+            // when that content is identical to what seeded the editor's starting state (see
+            // `createScreenplayEditorInit`'s doc comment in screenplay-editor for why this
+            // transaction is unavoidable). To `Decoration.map`, a full-range replace is
+            // indistinguishable from deleting the entire old document and inserting a whole new
+            // one, so every decoration this plugin anchored in its own `init()` -- every page
+            // break, spacer, and page number -- would be silently dropped rather than remapped.
+            // Recomputing synchronously here, rather than mapping, is the fix; it does not
+            // reintroduce the per-keystroke synchronous cost this module's own header comment
+            // warns against, because `ySyncPluginKey.getState(tr)` is only ever set on this one
+            // mount-time transaction, never on an ordinary edit.
+            if (tr.docChanged && tr.getMeta(ySyncPluginKey) !== undefined) {
+              return computePaginationState(tr.doc, paginationState.documentSettings);
             }
             return tr.docChanged
               ? {

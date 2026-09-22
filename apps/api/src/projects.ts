@@ -17,11 +17,7 @@ export const renameInput = z.object({ title: projectTitle }).strict();
 export const createScreenplayInput = z
   .object({ title: projectTitle, screenplay: screenplaySchema })
   .strict();
-export const updateScreenplayInput = z
-  .object({ expectedVersion: z.number().int().positive(), screenplay: screenplaySchema })
-  .strict();
 export type CreateScreenplayInput = z.infer<typeof createScreenplayInput>;
-export type UpdateScreenplayInput = z.infer<typeof updateScreenplayInput>;
 
 type RenameResult = { id: string; title: string } | 'forbidden' | 'missing';
 type DeleteResult = { id: string } | 'forbidden' | 'missing';
@@ -43,22 +39,19 @@ export interface ProjectStore {
   listScreenplays(
     actorId: string,
     projectId: string,
-  ): Promise<Array<{ id: string; title: string; version: number; updatedAt: string }>>;
+  ): Promise<Array<{ id: string; title: string; updatedAt: string }>>;
   createScreenplay(
     actorId: string,
     projectId: string,
     input: CreateScreenplayInput,
-  ): Promise<{ id: string; version: number }>;
+  ): Promise<{ id: string }>;
   getScreenplay(
     actorId: string,
     screenplayId: string,
-  ): Promise<
-    | { id: string; projectId: string; title: string; version: number; screenplay: Screenplay }
-    | 'missing'
-  >;
+  ): Promise<{ id: string; projectId: string; title: string; screenplay: Screenplay } | 'missing'>;
   // Renames only the screenplay row's `title` (the listing/display field). It deliberately never
-  // touches `canonicalScreenplay`, `canonicalHash`, or `version` — see the comment on
-  // `renameScreenplay` below for why the two title fields are intentionally independent.
+  // touches `canonicalScreenplay` or `canonicalHash` — see the comment on `renameScreenplay` below
+  // for why the two title fields are intentionally independent.
   renameScreenplay(actorId: string, screenplayId: string, title: string): Promise<RenameResult>;
   // Soft delete only. Same authorisation as editing the screenplay (owner or editor), since
   // deletion here is reversible and sits within a project both roles already collaborate on.
@@ -88,11 +81,6 @@ export interface ProjectStore {
       projectTitle: string;
     }>;
   }>;
-  updateScreenplay(
-    actorId: string,
-    screenplayId: string,
-    input: UpdateScreenplayInput,
-  ): Promise<{ version: number } | 'forbidden' | 'conflict' | 'invalid' | 'missing'>;
 }
 
 // Takes the already-serialized JSON, not the screenplay object, so every caller stringifies it
@@ -121,9 +109,9 @@ async function lockScreenplayRow(
   client: Pick<PoolClient, 'query'>,
   screenplayId: string,
   deleted = false,
-): Promise<{ projectId: string; version: number } | 'missing'> {
+): Promise<{ projectId: string } | 'missing'> {
   const result = await client.query(
-    `select s.project_id as "projectId", s.version
+    `select s.project_id as "projectId"
        from screenplays s
        join projects p on p.id = s.project_id
       where s.id = $1
@@ -133,7 +121,7 @@ async function lockScreenplayRow(
     [screenplayId],
   );
   if (result.rowCount !== 1) return 'missing';
-  return result.rows[0] as { projectId: string; version: number };
+  return result.rows[0] as { projectId: string };
 }
 
 export function createPostgresProjectStore(pool: Pool): ProjectStore {
@@ -277,7 +265,7 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
     },
     async listScreenplays(actorId, projectId) {
       const result = await pool.query(
-        'select s.id, s.title, s.version, s.updated_at as "updatedAt" from screenplays s join project_members m on m.project_id = s.project_id join projects p on p.id = s.project_id where s.project_id = $1 and m.user_id = $2 and s.deleted_at is null and p.deleted_at is null order by s.updated_at desc',
+        'select s.id, s.title, s.updated_at as "updatedAt" from screenplays s join project_members m on m.project_id = s.project_id join projects p on p.id = s.project_id where s.project_id = $1 and m.user_id = $2 and s.deleted_at is null and p.deleted_at is null order by s.updated_at desc',
         [projectId, actorId],
       );
       return result.rows.map((row) => ({
@@ -306,12 +294,12 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
         const screenplay = { ...input.screenplay, id: screenplayId };
         const canonicalJson = JSON.stringify(screenplay);
         const result = await client.query(
-          'insert into screenplays (id, project_id, title, canonical_screenplay, canonical_hash) values ($1, $2, $3, $4::jsonb, $5) returning id, version',
+          'insert into screenplays (id, project_id, title, canonical_screenplay, canonical_hash) values ($1, $2, $3, $4::jsonb, $5) returning id',
           [screenplayId, projectId, input.title, canonicalJson, canonicalHash(canonicalJson)],
         );
         await client.query('update projects set updated_at = now() where id = $1', [projectId]);
         await client.query('commit');
-        return result.rows[0] as { id: string; version: number };
+        return result.rows[0] as { id: string };
       } catch (error) {
         await client.query('rollback');
         throw error;
@@ -321,7 +309,7 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
     },
     async getScreenplay(actorId, screenplayId) {
       const result = await pool.query(
-        `select s.id, s.project_id as "projectId", s.title, s.version,
+        `select s.id, s.project_id as "projectId", s.title,
                 s.canonical_screenplay as screenplay
            from screenplays s
            join projects p on p.id = s.project_id
@@ -336,13 +324,11 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
         projectId: string;
         screenplay: unknown;
         title: string;
-        version: number;
       };
       return {
         id: row.id,
         projectId: row.projectId,
         title: row.title,
-        version: row.version,
         screenplay: screenplaySchema.parse(row.screenplay),
       };
     },
@@ -367,14 +353,13 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
           await client.query('rollback');
           return 'forbidden';
         }
-        // Deliberately touches only the screenplay row's `title`, not `canonicalScreenplay`,
-        // `canonicalHash`, or `version`. Those two title fields are intentionally independent:
-        // the row title is listing/display metadata, while any in-document title lives inside the
-        // version-guarded canonical document and can only change through `updateScreenplay`'s
-        // optimistic-concurrency path. Coupling them would force this metadata-only rename to
-        // either bump `version` for a document nobody edited, or mutate canonical content outside
-        // the guarded update path — the latter breaks the invariant that `canonicalHash`
-        // identifies a screenplay for exports and revisions.
+        // Deliberately touches only the screenplay row's `title`, not `canonicalScreenplay` or
+        // `canonicalHash`. Those two title fields are intentionally independent: the row title is
+        // listing/display metadata, while any in-document title lives inside the canonical
+        // document, which is now a projection of the Yjs document `apps/collab` maintains (see
+        // `progress/collaboration-slice-1.md`) and is never written from this REST path. Coupling
+        // them would mean this metadata-only rename could race the collaboration server's own
+        // debounced projection write.
         const result = await client.query(
           'update screenplays set title = $1, updated_at = now() where id = $2 returning id, title',
           [title, screenplayId],
@@ -504,52 +489,6 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
             deletedAt: new Date(row.deletedAt as Date).toISOString(),
           })),
         };
-      } catch (error) {
-        await client.query('rollback');
-        throw error;
-      } finally {
-        client.release();
-      }
-    },
-    async updateScreenplay(actorId, screenplayId, input) {
-      const client = await pool.connect();
-      try {
-        await client.query('begin');
-        const screenplay = await lockScreenplayRow(client, screenplayId);
-        if (screenplay === 'missing') {
-          await client.query('rollback');
-          return 'missing';
-        }
-        const membership = await client.query(
-          'select role from project_members where project_id = $1 and user_id = $2 for update',
-          [screenplay.projectId, actorId],
-        );
-        if (!membership.rowCount) {
-          await client.query('rollback');
-          return 'missing';
-        }
-        if (!canEdit(membership.rows[0]?.role)) {
-          await client.query('rollback');
-          return 'forbidden';
-        }
-        if (input.screenplay.id !== screenplayId) {
-          await client.query('rollback');
-          return 'invalid';
-        }
-        if (screenplay.version !== input.expectedVersion) {
-          await client.query('rollback');
-          return 'conflict';
-        }
-        const canonicalJson = JSON.stringify(input.screenplay);
-        const result = await client.query(
-          'update screenplays set canonical_screenplay = $1::jsonb, canonical_hash = $2, version = version + 1, updated_at = now() where id = $3 returning version',
-          [canonicalJson, canonicalHash(canonicalJson), screenplayId],
-        );
-        await client.query('update projects set updated_at = now() where id = $1', [
-          screenplay.projectId,
-        ]);
-        await client.query('commit');
-        return { version: result.rows[0]?.version as number };
       } catch (error) {
         await client.query('rollback');
         throw error;

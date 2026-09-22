@@ -3,7 +3,7 @@ import { Editor } from '@tiptap/core';
 import { TextSelection } from '@tiptap/pm/state';
 import type { ScreenplayBlock } from '@finaler-draft/screenplay';
 import { BODY_WIDTH_IN, MARGIN_TOP_IN } from '@finaler-draft/screenplay/pageFormat';
-import { screenplayExtensions } from './screenplayEditor.js';
+import { createLocalScreenplayEditorInit, type EditorContent } from './screenplayEditor.js';
 import { PaginationExtension, paginationPluginKey } from './paginationExtension.js';
 import { SeamCaretExtension, seamCaretPluginKey, setSeamCaretDownstream } from './seamCaret.js';
 
@@ -35,7 +35,10 @@ function speechSplitBlocks(): ScreenplayBlock[] {
   ];
 }
 
-function docContentFor(blocks: readonly ScreenplayBlock[]) {
+// `speechSplitBlocks` above never produces a `dual_dialogue` or `page_break` block, both of
+// which this editor's schema cannot represent -- the cast is a fixture-shape guarantee, not a
+// loophole around real validation, which still happens downstream in `projectDocumentScreenplay`.
+function docContentFor(blocks: readonly ScreenplayBlock[]): EditorContent {
   return {
     type: 'screenplayDocument' as const,
     content: blocks.map((block) => ({
@@ -45,16 +48,17 @@ function docContentFor(blocks: readonly ScreenplayBlock[]) {
         ? { content: [{ type: 'text', text: block.text }] }
         : {}),
     })),
-  };
+  } as EditorContent;
 }
 
 function buildEditor(blocks: readonly ScreenplayBlock[]) {
   const mount = document.createElement('div');
   document.body.append(mount);
+  const seeded = createLocalScreenplayEditorInit(docContentFor(blocks));
   const editor = new Editor({
-    content: docContentFor(blocks),
+    content: seeded.content,
     element: mount,
-    extensions: [...screenplayExtensions, PaginationExtension, SeamCaretExtension],
+    extensions: [...seeded.extensions, PaginationExtension, SeamCaretExtension],
   });
   return { editor, mount };
 }
@@ -149,10 +153,11 @@ function stubRect(element: Element, rect: DOMRect): void {
 function buildEditorWithoutPagination(blocks: readonly ScreenplayBlock[]) {
   const mount = document.createElement('div');
   document.body.append(mount);
+  const seeded = createLocalScreenplayEditorInit(docContentFor(blocks));
   const editor = new Editor({
-    content: docContentFor(blocks),
+    content: seeded.content,
     element: mount,
-    extensions: [...screenplayExtensions, SeamCaretExtension],
+    extensions: [...seeded.extensions, SeamCaretExtension],
   });
   return { editor, mount };
 }
@@ -171,10 +176,11 @@ function buildEditorInRegion(blocks: readonly ScreenplayBlock[]) {
   document.body.append(region);
   const mount = document.createElement('div');
   region.append(mount);
+  const seeded = createLocalScreenplayEditorInit(docContentFor(blocks));
   const editor = new Editor({
-    content: docContentFor(blocks),
+    content: seeded.content,
     element: mount,
-    extensions: [...screenplayExtensions, PaginationExtension, SeamCaretExtension],
+    extensions: [...seeded.extensions, PaginationExtension, SeamCaretExtension],
   });
   return { editor, region };
 }

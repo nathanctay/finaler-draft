@@ -16,14 +16,12 @@ const screenplaySummarySchema = z.object({
   id: z.string().uuid(),
   title: z.string(),
   updatedAt: z.string(),
-  version: z.number().int().positive(),
 });
 const screenplayResponseSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
   screenplay: screenplaySchema,
   title: z.string(),
-  version: z.number().int().positive(),
 });
 // Better Auth's `/sign-up/email` and `/sign-in/email` both return `{token, user}` (installed
 // `api/routes/sign-up.mjs`/`sign-in.mjs`). Only `signUp` below reads `token`: now that
@@ -327,32 +325,19 @@ export const api = {
   createScreenplay: (projectId: string, title: string, screenplay: Screenplay) =>
     jsonWithServerMessage(
       `/api/projects/${projectId}/screenplays`,
-      z.object({ id: z.string().uuid(), version: z.number() }),
+      z.object({ id: z.string().uuid() }),
       {
         body: JSON.stringify({ screenplay, title }),
         method: 'POST',
       },
     ),
   screenplay: (id: string) => json(`/api/screenplays/${id}`, screenplayResponseSchema),
-  // `keepalive` lets the browser complete this request even if the page that started it is gone
-  // by the time the response would arrive, at the cost of a 64 KB total request-body cap (Fetch
-  // spec) -- used only by App.tsx's `pagehide` flush, the one exit that genuinely might be a page
-  // teardown; its unmount and `visibilitychange` flushes pass `false` deliberately, since neither
-  // is the page going away and a real screenplay routinely exceeds that cap
-  // (progress/save-conflict-recovery.md). Never used on the ordinary debounced path. `fetch`'s
-  // `keepalive` is what `RequestInit` calls it; `request()` passes it through unchanged, same as
-  // every other field on `init`.
-  saveScreenplay: (
-    id: string,
-    expectedVersion: number,
-    screenplay: Screenplay,
-    options?: { keepalive?: boolean },
-  ) =>
-    json(`/api/screenplays/${id}`, z.object({ version: z.number().int().positive() }), {
-      body: JSON.stringify({ expectedVersion, screenplay }),
-      keepalive: options?.keepalive ?? false,
-      method: 'PUT',
-    }),
+  // The whole-document `PUT /api/screenplays/:id` this app used to autosave through is deleted
+  // (collaboration slice 1: the canonical screenplay is a projection of the Yjs document
+  // `apps/collab` maintains, not a thing this client `PUT`s -- see
+  // `progress/collaboration-slice-1.md`). A screenplay's body now persists by virtue of the
+  // editor being bound to that Yjs document (`App.tsx`'s `createScreenplayEditorInit`); there is
+  // no explicit save call to make, and so no `api.saveScreenplay` here anymore.
   deleteProject: (id: string) =>
     json(`/api/projects/${id}`, deleteResponseSchema, { method: 'DELETE' }),
   restoreProject: (id: string) =>
@@ -403,5 +388,4 @@ export type PersistedScreenplay = {
   projectId: string;
   screenplay: Screenplay;
   title: string;
-  version: number;
 };

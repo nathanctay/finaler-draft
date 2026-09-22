@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createAuth } from './auth.js';
+import { createAuth } from '@finaler-draft/auth-server';
 import { buildApp } from './app.js';
 import {
   createIntegrationDatabase,
@@ -12,7 +12,7 @@ import {
   runIntegrationMigrations,
   suppressPoolShutdownErrors,
 } from './integrationTestDatabase.js';
-import type { MailMessage, MailPort } from './mail.js';
+import type { MailMessage, MailPort } from '@finaler-draft/auth-server/mail';
 import { createPostgresProjectStore } from './projects.js';
 
 // See integrationTestDatabase.ts for what this shared setup/teardown fixes and why.
@@ -120,8 +120,9 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       "select column_name from information_schema.columns where table_name = 'screenplays'",
     );
     expect(screenplayColumns.rows.map((row) => row.column_name)).toEqual(
-      expect.arrayContaining(['canonical_screenplay', 'canonical_hash', 'version', 'deleted_at']),
+      expect.arrayContaining(['canonical_screenplay', 'canonical_hash', 'deleted_at']),
     );
+    expect(screenplayColumns.rows.map((row) => row.column_name)).not.toContain('version');
     const projectColumns = await pool!.query<{ column_name: string }>(
       "select column_name from information_schema.columns where table_name = 'projects'",
     );
@@ -177,22 +178,6 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       id: screenplayId,
       screenplay: { id: screenplayId },
     });
-    const ownerScreenplay = loadedByOwner.json<{ screenplay: typeof screenplayFixture }>()
-      .screenplay;
-    const invalidIdentity = await app!.inject({
-      method: 'PUT',
-      url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: ownerSession, origin: 'https://app.example.test' },
-      payload: {
-        expectedVersion: 1,
-        screenplay: { ...ownerScreenplay, id: randomUUID() },
-      },
-    });
-    expect(invalidIdentity.statusCode).toBe(400);
-    expect(invalidIdentity.json()).toEqual({
-      error: 'Screenplay identity must match request path',
-    });
-
     const other = await signUp('other@example.test');
     const deniedCreate = await app!.inject({
       method: 'POST',
@@ -213,94 +198,16 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     });
     expect(deniedRead.statusCode).toBe(404);
     expect(deniedRead.json()).toEqual(unknownRead.json());
-    const deniedUpdate = await app!.inject({
-      method: 'PUT',
-      url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: other.cookie, origin: 'https://app.example.test' },
-      payload: { expectedVersion: 1, screenplay: screenplayFixture },
-    });
-    expect(deniedUpdate.statusCode).toBe(404);
-
-    const saved = await app!.inject({
-      method: 'PUT',
-      url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: ownerSession, origin: 'https://app.example.test' },
-      payload: { expectedVersion: 1, screenplay: ownerScreenplay },
-    });
-    expect(saved.statusCode).toBe(200);
-    expect(saved.json()).toEqual({ version: 2 });
   });
 
-  it('serializes same-version saves and prevents saves after revocation or role downgrade', async () => {
-    await signUp('concurrency-owner@example.test');
-    await signUp('concurrency-editor@example.test');
-    const ownerId = await userIdFor('concurrency-owner@example.test');
-    const editorId = await userIdFor('concurrency-editor@example.test');
-    const project = await store!.createProject(ownerId, 'Concurrent project');
-    await pool!.query(
-      "insert into project_members (project_id, user_id, role) values ($1, $2, 'editor')",
-      [project.id, editorId],
-    );
-    const screenplay = await store!.createScreenplay(ownerId, project.id, {
-      title: 'Concurrent script',
-      screenplay: screenplayFixture,
-    });
-    const first = store!.updateScreenplay(editorId, screenplay.id, {
-      expectedVersion: 1,
-      screenplay: screenplayFor(screenplay.id),
-    });
-    const second = store!.updateScreenplay(editorId, screenplay.id, {
-      expectedVersion: 1,
-      screenplay: screenplayFor(screenplay.id),
-    });
-    const saves = await Promise.all([first, second]);
-    expect(saves).toContainEqual({ version: 2 });
-    expect(saves).toContain('conflict');
-
-    const revoker = await pool!.connect();
-    try {
-      await revoker.query('begin');
-      await revoker.query('delete from project_members where project_id = $1 and user_id = $2', [
-        project.id,
-        editorId,
-      ]);
-      const saveAfterRevocation = store!.updateScreenplay(editorId, screenplay.id, {
-        expectedVersion: 2,
-        screenplay: screenplayFor(screenplay.id),
-      });
-      await revoker.query('commit');
-      expect(await saveAfterRevocation).toBe('missing');
-    } finally {
-      await revoker.query('rollback');
-      revoker.release();
-    }
-
-    await pool!.query(
-      "insert into project_members (project_id, user_id, role) values ($1, $2, 'editor')",
-      [project.id, editorId],
-    );
-    const downgradeScreenplay = await store!.createScreenplay(ownerId, project.id, {
-      title: 'Downgrade script',
-      screenplay: screenplayFixture,
-    });
-    const downgrader = await pool!.connect();
-    try {
-      await downgrader.query('begin');
-      await downgrader.query(
-        "update project_members set role = 'reviewer' where project_id = $1 and user_id = $2",
-        [project.id, editorId],
-      );
-      const saveAfterDowngrade = store!.updateScreenplay(editorId, downgradeScreenplay.id, {
-        expectedVersion: 1,
-        screenplay: screenplayFor(downgradeScreenplay.id),
-      });
-      await downgrader.query('commit');
-      expect(await saveAfterDowngrade).toBe('forbidden');
-    } finally {
-      await downgrader.query('rollback');
-      downgrader.release();
-    }
-  });
+  // The concurrent-save/revocation/role-downgrade scenario this test used to cover only made
+  // sense against the whole-document REST `PUT` and its `expectedVersion` optimistic-concurrency
+  // check, both deleted in collaboration slice 1 (the canonical screenplay is a projection of the
+  // Yjs document `apps/collab` maintains -- see `progress/collaboration-slice-1.md`). There is no
+  // longer a REST write path for two concurrent editors to race, and the equivalent
+  // authorization-can-change-mid-connection question now belongs to the WebSocket layer; see
+  // `apps/collab/src/collaboration.integration.test.ts` and that module's own note on what is and
+  // is not re-checked once a connection has already authenticated.
 
   it('renames and soft-deletes/restores a project, excluding it and its screenplays from every read path until restored', async () => {
     const owner = await signUp('rename-delete-owner@example.test');
@@ -395,7 +302,7 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     expect(screenplayAfterRestore.statusCode).toBe(200);
   });
 
-  it('returns 404 rather than 403 for a soft-deleted screenplay to a user who could read it before, rejects a save into it with 404 not 409, and renames the screenplay row without touching the canonical document title', async () => {
+  it('returns 404 rather than 403 for a soft-deleted screenplay to a user who could read it before, and renames the screenplay row without touching the canonical document title', async () => {
     const owner = await signUp('screenplay-delete-owner@example.test');
     const project = await app!.inject({
       method: 'POST',
@@ -456,17 +363,6 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
     });
     expect(afterDelete.statusCode).toBe(404);
-
-    // The realistic failure mode: a stale client autosaving into a screenplay that was just
-    // deleted from under it. This must read as "not found," never as a version conflict — a 409
-    // would send the client into conflict-recovery for a document that no longer exists.
-    const saveAfterDelete = await app!.inject({
-      method: 'PUT',
-      url: `/api/screenplays/${screenplayId}`,
-      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
-      payload: { expectedVersion: 1, screenplay: screenplayFor(screenplayId) },
-    });
-    expect(saveAfterDelete.statusCode).toBe(404);
 
     // Restore is authorised the same way delete is: an editor can do both, a reviewer can do
     // neither, and both outcomes are proven against the real database and real sessions here.
@@ -1389,10 +1285,6 @@ function sessionCookie(value: string | string[] | undefined) {
   const cookie = Array.isArray(value) ? value[0] : value;
   expect(cookie).toBeTypeOf('string');
   return cookie!.split(';', 1)[0]!;
-}
-
-function screenplayFor(id: string) {
-  return { ...screenplayFixture, id };
 }
 
 async function userIdFor(email: string) {

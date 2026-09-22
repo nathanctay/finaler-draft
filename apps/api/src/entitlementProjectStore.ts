@@ -2,7 +2,7 @@ import {
   EntitlementLimitError,
   checkEntitlement,
   tierForSubscriptionStatus,
-} from './entitlements.js';
+} from '@finaler-draft/entitlements';
 import type { EntitlementStore } from './entitlementStore.js';
 import type { ProjectStore } from './projects.js';
 
@@ -18,19 +18,20 @@ import type { ProjectStore } from './projects.js';
  * outside the slot can still be renamed, deleted, or restored by an owner/editor; it just cannot
  * be written to.
  *
- * Gates exactly two operations:
- * - `createScreenplay`: refused outright (before the underlying store is ever called) once a
- *   restricted account already holds a candidate screenplay. On success, if the account is
- *   restricted, the newly created screenplay unconditionally claims the (necessarily empty) slot --
- *   see entitlementStore.ts's `claimEmptySlot` for why that is an establishment, not a switch, and
- *   does not touch the cooldown.
- * - `updateScreenplay`: refused with the store's own existing `'forbidden'` outcome when the
- *   target is a live candidate for this actor but is not the one occupying the slot. A target the
- *   actor is not an owner/editor candidate for at all is passed straight through to the underlying
- *   store instead, so a non-member's or a reviewer's request gets exactly the same `'missing'` /
- *   `'forbidden'` response it always has -- this layer never turns a membership question into a
- *   billing one, and never lets billing state leak whether a screenplay exists to someone who
- *   cannot already see it.
+ * Gates exactly one operation now: `createScreenplay`, refused outright (before the underlying
+ * store is ever called) once a restricted account already holds a candidate screenplay. On
+ * success, if the account is restricted, the newly created screenplay unconditionally claims the
+ * (necessarily empty) slot -- see entitlementStore.ts's `claimEmptySlot` for why that is an
+ * establishment, not a switch, and does not touch the cooldown.
+ *
+ * `updateScreenplay` used to be gated here too, refusing a REST write to a screenplay outside the
+ * account's editable slot. That REST write no longer exists (collaboration slice 1: the canonical
+ * screenplay is a projection of the Yjs document `apps/collab` maintains, not a client `PUT` --
+ * see `progress/collaboration-slice-1.md`), and the identical entitlement check now happens on
+ * the one write path that remains, the WebSocket connection itself
+ * (`apps/collab/src/authenticate.ts`'s `resolveConnectionAuthorization`, reusing this same
+ * `checkEntitlement` policy). A screenplay outside the slot can still be renamed, deleted, or
+ * restored by an owner/editor over REST; it just cannot be edited.
  */
 export function createEntitlementEnforcedProjectStore(
   base: ProjectStore,
@@ -54,15 +55,6 @@ export function createEntitlementEnforcedProjectStore(
         await entitlements.claimEmptySlot(actorId, created.id, at);
       }
       return created;
-    },
-    async updateScreenplay(actorId, screenplayId, input) {
-      const at = now();
-      const snapshot = await entitlements.getSnapshot(actorId, at);
-      if (snapshot.candidateScreenplayIds.includes(screenplayId)) {
-        const decision = checkEntitlement(snapshot, { type: 'edit-screenplay', screenplayId });
-        if (!decision.allowed) return 'forbidden';
-      }
-      return base.updateScreenplay(actorId, screenplayId, input);
     },
   };
 }

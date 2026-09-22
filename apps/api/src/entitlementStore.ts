@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
-import { checkEntitlement, type EntitlementSnapshot } from './entitlements.js';
+import { checkEntitlement, type EntitlementSnapshot } from '@finaler-draft/entitlements';
 import type { SubscriptionStore } from './stripeSubscriptions.js';
 
 export type SwitchEditableScreenplayResult =

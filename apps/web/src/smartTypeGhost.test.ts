@@ -3,7 +3,8 @@ import { Editor } from '@tiptap/core';
 import { TextSelection } from '@tiptap/pm/state';
 import {
   projectEditorScreenplay,
-  screenplayExtensions,
+  createLocalScreenplayEditorInit,
+  type EditorContent,
   type ScreenplayElementType,
 } from './screenplayEditor.js';
 import {
@@ -38,20 +39,24 @@ function blockId(index: number): string {
   return `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
 }
 
+function editorInitFor(content: EditorContent) {
+  const seeded = createLocalScreenplayEditorInit(content);
+  return { content: seeded.content, extensions: [...seeded.extensions, SmartTypeGhostExtension] };
+}
+
 function buildEditor(blocks: readonly Block[]) {
   const mount = document.createElement('div');
   document.body.append(mount);
   const editor = new Editor({
-    content: {
+    element: mount,
+    ...editorInitFor({
       type: 'screenplayDocument' as const,
       content: blocks.map((block, index) => ({
         type: 'screenplayBlock' as const,
         attrs: { element: block.element, id: blockId(index) },
         ...(block.text === '' ? {} : { content: [{ type: 'text', text: block.text }] }),
       })),
-    },
-    element: mount,
-    extensions: [...screenplayExtensions, SmartTypeGhostExtension],
+    }),
   });
   return { editor, mount };
 }
@@ -538,15 +543,18 @@ describe('the vocabulary', () => {
     const mount = document.createElement('div');
     document.body.append(mount);
     const editor = new Editor({
-      content: {
+      element: mount,
+      // Deliberately missing `id` on both blocks -- `ScreenplayBlockNode`'s own schema default
+      // (`null`) fills it in at runtime, which is exactly the "invalid screenplay block" shape
+      // this test needs; the cast only relaxes what `EditorContent` otherwise requires the id to
+      // look like, not what the editor is actually handed.
+      ...editorInitFor({
         type: 'screenplayDocument' as const,
         content: [
           { type: 'screenplayBlock' as const, attrs: { element: 'action' } },
           { type: 'screenplayBlock' as const, attrs: { element: 'scene_heading' } },
         ],
-      },
-      element: mount,
-      extensions: [...screenplayExtensions, SmartTypeGhostExtension],
+      } as EditorContent),
     });
 
     expect(projectEditorScreenplay(editor).valid).toBe(false);

@@ -258,12 +258,9 @@ describe('logging', () => {
 });
 
 describe('persisted project API', () => {
-  let createScreenplayResult: { id: string; version: number } | 'forbidden' | 'entitlement-limit' =
-    {
-      id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
-      version: 1,
-    };
-  let updateResult: Awaited<ReturnType<ProjectStore['updateScreenplay']>> = 'conflict';
+  let createScreenplayResult: { id: string } | 'forbidden' | 'entitlement-limit' = {
+    id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
+  };
   let renameProjectResult: Awaited<ReturnType<ProjectStore['renameProject']>> = {
     id: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
     title: 'Renamed',
@@ -327,7 +324,7 @@ describe('persisted project API', () => {
       if (createScreenplayResult === 'forbidden')
         throw new (await import('./projects.js')).ForbiddenError();
       if (createScreenplayResult === 'entitlement-limit')
-        throw new (await import('./entitlements.js')).EntitlementLimitError(
+        throw new (await import('@finaler-draft/entitlements')).EntitlementLimitError(
           'Free tier limit reached: only one editable screenplay is allowed. Choose an existing one to keep editing, or upgrade to create another.',
         );
       return createScreenplayResult;
@@ -336,14 +333,12 @@ describe('persisted project API', () => {
       id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
       projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
       title: 'Draft',
-      version: 1,
       screenplay: screenplayFixture,
     }),
     renameScreenplay: async () => renameScreenplayResult,
     deleteScreenplay: async () => deleteScreenplayResult,
     restoreScreenplay: async () => restoreScreenplayResult,
     listDeleted: async () => listDeletedResult,
-    updateScreenplay: async () => updateResult,
   };
   const auth = {
     baseUrl: 'https://app.example.test',
@@ -437,7 +432,7 @@ describe('persisted project API', () => {
             payload: { title: 'Draft', screenplay: screenplayFixture },
           })
         ).json(),
-      ).toEqual({ id: 'ecf1118c-3a2e-4656-84e6-fce75c461710', version: 1 });
+      ).toEqual({ id: 'ecf1118c-3a2e-4656-84e6-fce75c461710' });
       expect(
         (
           await app.inject({
@@ -450,31 +445,8 @@ describe('persisted project API', () => {
         id: 'ecf1118c-3a2e-4656-84e6-fce75c461710',
         projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
         title: 'Draft',
-        version: 1,
         screenplay: screenplayFixture,
       });
-    } finally {
-      await app.close();
-    }
-  });
-
-  it('validates canonical autosave input and returns optimistic conflicts', async () => {
-    const app = await buildApp({ auth, projects: store });
-    try {
-      const response = await app.inject({
-        method: 'PUT',
-        url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
-        headers: { cookie: 'session=test', origin: 'https://app.example.test' },
-        payload: { expectedVersion: 1, screenplay: screenplayFixture },
-      });
-      expect(response.statusCode).toBe(409);
-      const invalid = await app.inject({
-        method: 'PUT',
-        url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
-        headers: { cookie: 'session=test', origin: 'https://app.example.test' },
-        payload: { expectedVersion: 1, screenplay: { schemaVersion: 1 } },
-      });
-      expect(invalid.statusCode).toBe(400);
     } finally {
       await app.close();
     }
@@ -511,7 +483,7 @@ describe('persisted project API', () => {
             headers,
           })
         ).json(),
-      ).toMatchObject({ title: 'Draft', version: 1, screenplay: screenplayFixture });
+      ).toMatchObject({ title: 'Draft', screenplay: screenplayFixture });
       expect(
         (
           await app.inject({
@@ -549,57 +521,12 @@ describe('persisted project API', () => {
         error:
           'Free tier limit reached: only one editable screenplay is allowed. Choose an existing one to keep editing, or upgrade to create another.',
       });
-      createScreenplayResult = { id: 'ecf1118c-3a2e-4656-84e6-fce75c461710', version: 1 };
-      updateResult = 'missing';
-      expect(
-        (
-          await app.inject({
-            method: 'PUT',
-            url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
-            headers,
-            payload: { expectedVersion: 1, screenplay: screenplayFixture },
-          })
-        ).statusCode,
-      ).toBe(404);
-      updateResult = 'forbidden';
-      expect(
-        (
-          await app.inject({
-            method: 'PUT',
-            url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
-            headers,
-            payload: { expectedVersion: 1, screenplay: screenplayFixture },
-          })
-        ).statusCode,
-      ).toBe(403);
-      updateResult = 'invalid';
-      const invalidIdentity = await app.inject({
-        method: 'PUT',
-        url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
-        headers,
-        payload: { expectedVersion: 1, screenplay: screenplayFixture },
-      });
-      expect(invalidIdentity.statusCode).toBe(400);
-      expect(invalidIdentity.json()).toEqual({
-        error: 'Screenplay identity must match request path',
-      });
-      updateResult = { version: 2 };
-      expect(
-        (
-          await app.inject({
-            method: 'PUT',
-            url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
-            headers,
-            payload: { expectedVersion: 1, screenplay: screenplayFixture },
-          })
-        ).json(),
-      ).toEqual({ version: 2 });
+      createScreenplayResult = { id: 'ecf1118c-3a2e-4656-84e6-fce75c461710' };
       expect(
         (await app.inject({ method: 'GET', url: '/api/projects/not-a-uuid/screenplays', headers }))
           .statusCode,
       ).toBe(400);
     } finally {
-      updateResult = 'conflict';
       await app.close();
     }
   });
@@ -608,27 +535,25 @@ describe('persisted project API', () => {
     const app = await buildApp({ auth, projects: store });
     try {
       const headers = { cookie: 'session=test', origin: 'https://app.example.test' };
-      updateResult = { version: 2 };
-      const payload = JSON.stringify({ expectedVersion: 1, screenplay: maximumWireScreenplay() });
+      const payload = JSON.stringify({ title: 'Draft', screenplay: maximumWireScreenplay() });
       expect(Buffer.byteLength(payload)).toBeGreaterThan(10 * 1024 * 1024);
       expect(Buffer.byteLength(payload)).toBeLessThanOrEqual(MAX_SCREENPLAY_REQUEST_BODY_BYTES);
       const valid = await app.inject({
-        method: 'PUT',
-        url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
+        method: 'POST',
+        url: '/api/projects/5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f/screenplays',
         headers: { ...headers, 'content-type': 'application/json' },
         payload,
       });
-      expect(valid.statusCode).toBe(200);
+      expect(valid.statusCode).toBe(201);
       const tooLarge = await app.inject({
-        method: 'PUT',
-        url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
+        method: 'POST',
+        url: '/api/projects/5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f/screenplays',
         headers: { ...headers, 'content-type': 'application/json' },
         payload: `"${'x'.repeat(MAX_SCREENPLAY_REQUEST_BODY_BYTES)}"`,
       });
       expect(tooLarge.statusCode).toBe(413);
       expect(tooLarge.json()).toEqual({ error: 'Request too large' });
     } finally {
-      updateResult = 'conflict';
       await app.close();
     }
   });
@@ -690,10 +615,10 @@ describe('persisted project API', () => {
     const app = await buildApp({ auth, projects: store });
     try {
       const response = await app.inject({
-        method: 'PUT',
-        url: '/api/screenplays/ecf1118c-3a2e-4656-84e6-fce75c461710',
+        method: 'POST',
+        url: '/api/projects/5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f/screenplays',
         headers: { cookie: 'session=test', origin: 'https://app.example.test' },
-        payload: { expectedVersion: 1, screenplay: { schemaVersion: 1 } },
+        payload: { title: 'Draft', screenplay: { schemaVersion: 1 } },
       });
       expect(response.statusCode).toBe(400);
       expect(response.json()).toEqual({ error: 'Invalid request' });

@@ -16,7 +16,7 @@ import {
   editorContentFromScreenplay,
   projectDocumentScreenplay,
   screenplayElementTypes,
-  screenplayExtensions,
+  createLocalScreenplayEditorInit,
   type EditorContent,
   type ScreenplayElementType,
 } from './screenplayEditor.js';
@@ -60,7 +60,7 @@ function nextId(): string {
 function buildEditorFromContent(content: EditorContent): { editor: Editor; mount: HTMLElement } {
   const mount = document.createElement('div');
   document.body.append(mount);
-  const editor = new Editor({ content, element: mount, extensions: screenplayExtensions });
+  const editor = new Editor({ element: mount, ...createLocalScreenplayEditorInit(content) });
   return { editor, mount };
 }
 

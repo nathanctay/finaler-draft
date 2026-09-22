@@ -1,0 +1,32 @@
+{
+  "name": "@finaler-draft/auth-server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./mail": {
+      "types": "./dist/mail.d.ts",
+      "default": "./dist/mail.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@better-auth/drizzle-adapter": "1.6.25",
+    "@finaler-draft/config": "workspace:*",
+    "@finaler-draft/database": "workspace:*",
+    "better-auth": "1.6.25"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "3.2.4",
+    "vitest": "3.2.4"
+  }
+}

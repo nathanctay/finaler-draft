@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { PERSISTED_POLL_TIMEOUT_MS } from './persistedPollTimeout.js';
 import { signIn, verifyEmail } from './testMail.js';
 
 /**
@@ -35,6 +36,49 @@ async function createAndOpenScreenplay(page: Page): Promise<{ canvas: Locator }>
   const canvas = page.getByRole('textbox', { name: 'Screenplay editing canvas' });
   await expect(canvas).toBeVisible();
   return { canvas };
+}
+
+/** The screenplay id `createAndOpenScreenplay` (above) always navigates to. */
+function screenplayIdFromUrl(page: Page): string {
+  const screenplayId = /\/screenplays\/([0-9a-f-]+)/u.exec(page.url())?.[1];
+  if (!screenplayId) {
+    throw new Error(`Could not find a screenplay id in ${page.url()}.`);
+  }
+  return screenplayId;
+}
+
+/**
+ * The replacement for this file's old `page.waitForResponse` on the whole-document `PUT` --
+ * deleted along with the REST save path itself (progress/collaboration-slice-1.md: "Yjs as source
+ * of truth"). There is no request left to wait on; a save is now `apps/collab`'s own debounced
+ * `onStoreDocument` (`apps/collab/src/database.ts`'s `createStore`), writing
+ * `canonical_screenplay` in the same transaction as `document_yjs_state`. Polling the real, database-backed
+ * `GET /api/screenplays/:id` -- unchanged by this slice -- until it contains `expectedText` is
+ * therefore a direct proof that the edit reached Postgres, not merely that this tab's own socket
+ * reports "synced" -- and it fails exactly the way the old wait did if persistence broke: the text
+ * never appears, `expect.poll` times out, the test fails loudly rather than reading stale content.
+ * (`apps/web/e2e/page-rendering-persistence.spec.ts`'s own `waitForPersistedBlocks` is the same
+ * technique, generalized for that file's model-driven assertions; this file's checks are plain
+ * substring checks, so the simpler form is all it needs.)
+ */
+async function waitForPersistedText(
+  page: Page,
+  screenplayId: string,
+  expectedText: string,
+): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        const response = await page.request.get(`/api/screenplays/${screenplayId}`);
+        expect(response.ok()).toBe(true);
+        const { screenplay } = (await response.json()) as {
+          screenplay: { blocks: ReadonlyArray<{ text?: string }> };
+        };
+        return screenplay.blocks.some((block) => block.text?.includes(expectedText));
+      },
+      { timeout: PERSISTED_POLL_TIMEOUT_MS },
+    )
+    .toBe(true);
 }
 
 test('the real editor renders .script-body as the first in-flow child of .page, and the first line at exactly 1.0in', async ({
@@ -125,6 +169,10 @@ test('the Navigator tab buttons render as flat controls, not the browser default
 });
 
 test('a writer can create, autosave, and reload a private screenplay', async ({ page }) => {
+  // One `waitForPersistedText` poll at `PERSISTED_POLL_TIMEOUT_MS` (see that constant's own doc
+  // comment): the global 30_000ms default (`playwright.persistence.config.ts`) would leave this
+  // test almost no room for its own sign-up/typing work in a worst-case poll.
+  test.setTimeout(60_000);
   const token = crypto.randomUUID();
   const email = `writer-${token}@example.test`;
   const password = `test-${token}-safe-password`;
@@ -153,45 +201,22 @@ test('a writer can create, autosave, and reload a private screenplay', async ({ 
   // so there is always somewhere to put the caret. An Enter first would not add a block a writer
   // wants -- it would open the element menu (elementMenu.tsx), because Enter at an empty block
   // offers the element types rather than stacking a second empty one.
-  const savedUpdate = page.waitForResponse(
-    (response) =>
-      response.request().method() === 'PUT' &&
-      response.url().includes('/api/screenplays/') &&
-      response.status() === 200,
-  );
+  //
+  // The save-conflict simulation this test used to run past this point (a stubbed 409 on a
+  // second `PUT`, asserting a "Save conflict" message and that local text survived it) is deleted
+  // rather than adapted: its entire premise -- a whole-document `PUT` racing a stale
+  // `expectedVersion` -- no longer exists (progress/collaboration-slice-1.md: "Yjs as source of
+  // truth" removed both the route and the `version` column it protected). Yjs has no equivalent
+  // save-conflict concept for a single writer's own tab to lose to: concurrent edits merge by
+  // CRDT rules rather than racing a version check, and that merge property is what
+  // `apps/collab/src/collaboration.integration.test.ts`'s "two editors converge on the same
+  // document" test proves, against a real second client, which this single-tab test never had.
+  const screenplayId = screenplayIdFromUrl(page);
   await page.keyboard.type('A saved first line');
-  await savedUpdate;
-  await expect(page.getByText('Saved · validated locally')).toBeVisible();
+  await waitForPersistedText(page, screenplayId, 'A saved first line');
+  await expect(page.getByText(/^Synced/)).toBeVisible();
   await page.reload();
   await expect(canvas).toContainText('A saved first line');
-  let conflictingPutCount = 0;
-  await page.route('**/api/screenplays/*', async (route) => {
-    if (route.request().method() === 'PUT') {
-      conflictingPutCount += 1;
-      await route.fulfill({
-        body: JSON.stringify({ error: 'stale' }),
-        contentType: 'application/json',
-        status: 409,
-      });
-      return;
-    }
-    await route.continue();
-  });
-  await canvas.click();
-  const conflictingUpdate = page.waitForResponse(
-    (response) =>
-      response.request().method() === 'PUT' &&
-      response.url().includes('/api/screenplays/') &&
-      response.status() === 409,
-  );
-  await page.keyboard.type(' local conflict text');
-  await conflictingUpdate;
-  await expect(page.getByText(/Save conflict/)).toBeVisible();
-  await expect(canvas).toContainText('local conflict text');
-  await page.keyboard.type(' remains local');
-  await page.waitForTimeout(800);
-  await expect(canvas).toContainText('remains local');
-  expect(conflictingPutCount).toBe(1);
 });
 
 /**
@@ -201,10 +226,13 @@ test('a writer can create, autosave, and reload a private screenplay', async ({ 
  * (which use `EditorView.pasteHTML`/`pasteText` and a real `serializeForClipboard` round trip,
  * but still inside jsdom) are the mechanism, not the property the owner actually lost. The
  * property is this: the edit reaches the server. A green "projection is valid" assertion proves
- * the mechanism; only a completed `PUT` proves the save the owner lost actually happens again.
+ * the mechanism; only the real, database-backed `GET /api/screenplays/:id` actually reflecting
+ * the pasted content proves the save the owner lost actually happens again (`waitForPersistedText`,
+ * above -- the save itself is now `apps/collab`'s debounced `onStoreDocument`, not a request this
+ * file can wait on directly; see that function's own doc comment).
  *
- * Both tests below wait for that `PUT` explicitly and assert the real rendered "Saved" text
- * against no-name constants, the same discipline `save-conflict-recovery.md` used for its own
+ * Both tests below wait for that persisted state explicitly and assert the real rendered "Synced"
+ * text against no-name constants, the same discipline `save-conflict-recovery.md` used for its own
  * conflict-message test -- a test that only checked `projection.valid` in isolation would pass
  * even if some *other* guard downstream (the pagination plugin, the export menu) still treated a
  * sanitized-but-differently-broken document as invalid, which is exactly the kind of vacuous
@@ -213,6 +241,9 @@ test('a writer can create, autosave, and reload a private screenplay', async ({ 
 test('pasting foreign HTML keeps the screenplay valid and saving, instead of failing closed silently', async ({
   page,
 }) => {
+  // One `waitForPersistedText` poll at `PERSISTED_POLL_TIMEOUT_MS` -- same reasoning as the
+  // autosave-and-reload test above.
+  test.setTimeout(60_000);
   const { canvas } = await createAndOpenScreenplay(page);
   // The async Clipboard API (`navigator.clipboard.write` below) needs this; the OS-level
   // Ctrl+C/Ctrl+V a later test in this file uses does not.
@@ -241,18 +272,12 @@ test('pasting foreign HTML keeps the screenplay valid and saving, instead of fai
     await navigator.clipboard.write([item]);
   }, foreignHtml);
 
-  const savedAfterPaste = page.waitForResponse(
-    (response) =>
-      response.request().method() === 'PUT' &&
-      response.url().includes('/api/screenplays/') &&
-      response.status() === 200,
-  );
+  const screenplayId = screenplayIdFromUrl(page);
   await page.keyboard.press('ControlOrMeta+KeyV');
-  await savedAfterPaste;
+  await waitForPersistedText(page, screenplayId, 'Scene notes');
 
-  await expect(page.getByText(/^Saved · validated locally/)).toBeVisible();
+  await expect(page.getByText(/^Synced/)).toBeVisible();
   await expect(page.getByText(/Draft needs attention/)).toHaveCount(0);
-  await expect(page.getByText(/Not saving/)).toHaveCount(0);
   await expect(canvas).toContainText('Scene notes');
   await expect(canvas).toContainText('Lorem ipsum dolor sit amet, consectetur adipiscing elit.');
 });
@@ -260,25 +285,24 @@ test('pasting foreign HTML keeps the screenplay valid and saving, instead of fai
 test('pasting content copied from this editor back into the same document regenerates ids and keeps saving', async ({
   page,
 }) => {
+  // Two polls at `PERSISTED_POLL_TIMEOUT_MS` each (`waitForPersistedText`, then the inline
+  // regenerated-id count below) -- 60_000 does not leave enough room if both land near their
+  // worst case.
+  test.setTimeout(90_000);
   const { canvas } = await createAndOpenScreenplay(page);
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
 
+  const screenplayId = screenplayIdFromUrl(page);
   await canvas.click();
   // Straight into the seeded empty block, for the reason the first test in this file spells out --
   // which is also what makes this exactly the three-block copy the assertions below describe.
   await page.keyboard.type('INT. HOUSE - DAY');
   await page.keyboard.press('Enter');
   await page.keyboard.type('MARA enters the room.');
-  const firstSavedUpdate = page.waitForResponse(
-    (response) =>
-      response.request().method() === 'PUT' &&
-      response.url().includes('/api/screenplays/') &&
-      response.status() === 200,
-  );
   await page.keyboard.press('Enter');
   await page.keyboard.type('CUT TO:');
-  await firstSavedUpdate;
-  await expect(page.getByText(/^Saved · validated locally/)).toBeVisible();
+  await waitForPersistedText(page, screenplayId, 'CUT TO:');
+  await expect(page.getByText(/^Synced/)).toBeVisible();
 
   // The owner's literal report: "copying from our own page and pasting produced 'Stable id ...
   // must be globally unique'". Select-all-and-copy is the simplest real action that reproduces
@@ -333,13 +357,6 @@ test('pasting content copied from this editor back into the same document regene
   await expect(canvas).toBeVisible();
   await expect(canvas.getByText('MARA enters the room.')).toHaveCount(1);
 
-  const savedAfterPaste = page.waitForResponse(
-    (response) =>
-      response.request().method() === 'PUT' &&
-      response.url().includes('/api/screenplays/') &&
-      response.status() === 200,
-  );
-
   // Dispatched directly rather than written to the OS clipboard and pressed Ctrl+V. `html` above
   // is what a real copy really produced, and a dispatched `paste` event still runs ProseMirror's
   // own `parseFromClipboard` and `transformPasted`, including `ScreenplayPasteSanitizer` -- which
@@ -354,11 +371,26 @@ test('pasting content copied from this editor back into the same document regene
       new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: transfer }),
     );
   }, html);
-  await savedAfterPaste;
 
-  await expect(page.getByText(/^Saved · validated locally/)).toBeVisible();
+  // Two persisted blocks carrying this exact text, not just one -- the regenerated-id property
+  // this test is about only shows up once the pasted copy (itself carrying a second "MARA enters
+  // the room.") has actually reached Postgres, not merely the DOM.
+  await expect
+    .poll(
+      async () => {
+        const persisted = await page.request.get(`/api/screenplays/${screenplayId}`);
+        expect(persisted.ok()).toBe(true);
+        const { screenplay } = (await persisted.json()) as {
+          screenplay: { blocks: ReadonlyArray<{ text?: string }> };
+        };
+        return screenplay.blocks.filter((block) => block.text === 'MARA enters the room.').length;
+      },
+      { timeout: PERSISTED_POLL_TIMEOUT_MS },
+    )
+    .toBe(2);
+
+  await expect(page.getByText(/^Synced/)).toBeVisible();
   await expect(page.getByText(/Draft needs attention/)).toHaveCount(0);
-  await expect(page.getByText(/Not saving/)).toHaveCount(0);
 
   // Not a fixed block count: the paste landed at the end of "CUT TO:", inside its text, so the
   // copied slice's own open edges merge into that block the same way any ProseMirror editor
@@ -382,7 +414,7 @@ test('pasting content copied from this editor back into the same document regene
   expect(pastedId).not.toBe(originalId);
 
   await page.reload();
-  await expect(page.getByText(/^Saved · validated locally/)).toBeVisible();
+  await expect(page.getByText(/^Synced/)).toBeVisible();
   await expect(canvas.getByText('MARA enters the room.')).toHaveCount(2);
 });
 

@@ -79,8 +79,44 @@ export default defineRailway(() => {
       STRIPE_WEBHOOK_SECRET: preserve(),
     },
   });
+  // Collaboration slice 1 (progress/collaboration-slice-1.md): the Hocuspocus WebSocket server
+  // Yjs documents sync through. No `preDeploy` migration step here -- `app`'s own `preDeploy`
+  // already runs `db:migrate` against the identical `DATABASE_URL` on every deploy, and this
+  // service needs no migration path of its own; running the same migration twice on every deploy
+  // would be redundant, not additionally safe. No mail/Stripe env vars either: `apps/collab`
+  // never mounts Better Auth's HTTP handler and never sends mail (`mailStub.ts`'s
+  // `unreachableMailPort` throws if that ever changes silently) and never talks to Stripe.
+  // `healthcheck: '/'` is a real, working endpoint, not a placeholder: `@hocuspocus/server`'s own
+  // `requestHandler` answers any plain (non-upgrade) HTTP request with `200 Welcome to
+  // Hocuspocus!` by default (confirmed by reading the installed package's compiled source) --
+  // there is no dedicated `/health` route to add.
+  const collab = service('collab', {
+    source: finalerDraft,
+    build: 'pnpm build',
+    start: 'pnpm --filter @finaler-draft/collab start',
+    healthcheck: '/',
+    healthcheckTimeout: 100,
+    replicas: { 'us-west2': 1 },
+    deploy: { restartPolicyType: 'ON_FAILURE', restartPolicyMaxRetries: 3 },
+    env: {
+      BETTER_AUTH_SECRET: preserve(),
+      BETTER_AUTH_URL: preserve(),
+      CLIENT_ORIGIN: preserve(),
+      DATABASE_URL: preserve(),
+      NODE_ENV: preserve(),
+      PORT: preserve(),
+    },
+  });
 
   return project('finaler draft', {
-    resources: [DrizzleGateway, landing, Postgres, app, postgresVolume, drizzleGatewayVolume],
+    resources: [
+      DrizzleGateway,
+      landing,
+      Postgres,
+      app,
+      collab,
+      postgresVolume,
+      drizzleGatewayVolume,
+    ],
   });
 });

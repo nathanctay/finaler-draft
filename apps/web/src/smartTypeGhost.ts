@@ -46,7 +46,7 @@
  * for itself exactly as it did before the seam existed. See that function for the full reasoning.
  */
 import { Extension } from '@tiptap/core';
-import { closeHistory } from '@tiptap/pm/history';
+import { yUndoPluginKey } from 'y-prosemirror';
 import { Plugin, PluginKey, TextSelection, type EditorState } from '@tiptap/pm/state';
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
@@ -247,12 +247,17 @@ function ghostDecorations(doc: ProseMirrorNode, ghost: SmartTypeGhost): Decorati
  * inserted text and everything after the caret untouched. One transaction, one step -- so one
  * undo takes the whole completion back and nothing else.
  *
- * `closeHistory` is what makes that true. `prosemirror-history` groups adjacent steps authored
- * within a few hundred milliseconds into a single undo event, and an accept is by definition
- * adjacent to the characters the writer just typed -- without this, one undo after `Tab` would
- * swallow the typed characters as well, leaving the writer nowhere to stand. Closing the history
- * event before the insertion makes the completion its own undoable act, which is what a writer
- * pressing Ctrl+Z immediately after a completion is asking to reverse.
+ * `undoManager.stopCapturing()` is what makes that true. `y-prosemirror`'s `yUndoPlugin` groups
+ * changes into one undo event by wall-clock proximity (`Y.UndoManager`'s own `captureTimeout`,
+ * ~500ms by default), and an accept is by definition adjacent to the characters the writer just
+ * typed -- without this, one undo after `Tab` would swallow the typed characters as well, leaving
+ * the writer nowhere to stand. This replaces `@tiptap/extension-history`'s `closeHistory`, which
+ * served the identical purpose for `prosemirror-history`'s transaction-based (not time-based)
+ * grouping before this slice removed that extension; `stopCapturing` is Yjs's own equivalent
+ * boundary-forcing call, documented for exactly this "the next change must not merge with the
+ * last one" case. Calling it when no undo manager is bound yet (a bare local editor with no
+ * `screenplayYjs` extension, which none of this module's own tests build, but a defensive check
+ * costs nothing) is a silent no-op, not an error.
  *
  * Returns `false` when there is no ghost, so `Tab` falls through to the element conversions
  * `ScreenplayBlockNode`'s own keymap already performs (action to character, dialogue to
@@ -265,8 +270,9 @@ export function acceptSmartTypeGhost(view: EditorView): boolean {
     return false;
   }
 
+  yUndoPluginKey.getState(view.state)?.undoManager.stopCapturing();
   const from = ghost.pos - ghost.matchedLength;
-  const transaction = closeHistory(view.state.tr).insertText(ghost.insertText, from, ghost.pos);
+  const transaction = view.state.tr.insertText(ghost.insertText, from, ghost.pos);
   transaction.setSelection(TextSelection.create(transaction.doc, from + ghost.insertText.length));
   view.dispatch(transaction);
   return true;

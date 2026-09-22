@@ -3,7 +3,7 @@ import { Editor } from '@tiptap/core';
 import { Fragment, type Node as ProseMirrorNode } from '@tiptap/pm/model';
 import { TextSelection } from '@tiptap/pm/state';
 import { DEFAULT_DOCUMENT_SETTINGS, type ScreenplayBlock } from '@finaler-draft/screenplay';
-import { screenplayExtensions } from './screenplayEditor.js';
+import { createLocalScreenplayEditorInit, type EditorContent } from './screenplayEditor.js';
 import {
   PaginationExtension,
   paginationPluginKey,
@@ -61,7 +61,10 @@ function sceneHeading(index: number, text: string): ScreenplayBlock {
   };
 }
 
-function docContentFor(blocks: readonly ScreenplayBlock[]) {
+// This file's own fixtures never produce a `dual_dialogue` or `page_break` block, both of which
+// this editor's schema cannot represent -- the cast is a fixture-shape guarantee, not a loophole
+// around real validation, which still happens downstream in `projectDocumentScreenplay`.
+function docContentFor(blocks: readonly ScreenplayBlock[]): EditorContent {
   return {
     type: 'screenplayDocument' as const,
     content: blocks.map((block) => ({
@@ -71,7 +74,7 @@ function docContentFor(blocks: readonly ScreenplayBlock[]) {
         ? { content: [{ type: 'text', text: block.text }] }
         : {}),
     })),
-  };
+  } as EditorContent;
 }
 
 /**
@@ -85,11 +88,12 @@ function buildEditor(
 ) {
   const mount = document.createElement('div');
   document.body.append(mount);
+  const seeded = createLocalScreenplayEditorInit(docContentFor(blocks));
   const editor = new Editor({
-    content: docContentFor(blocks),
+    content: seeded.content,
     element: mount,
     extensions: [
-      ...screenplayExtensions,
+      ...seeded.extensions,
       documentSettings ? PaginationExtension.configure({ documentSettings }) : PaginationExtension,
     ],
   });
@@ -116,10 +120,11 @@ function buildEditorInRegion(
   document.body.append(region);
   const mount = document.createElement('div');
   region.append(mount);
+  const seeded = createLocalScreenplayEditorInit(docContentFor(blocks));
   const editor = new Editor({
-    content: docContentFor(blocks),
+    content: seeded.content,
     element: mount,
-    extensions: [...screenplayExtensions, PaginationExtension],
+    extensions: [...seeded.extensions, PaginationExtension],
   });
   return { editor, mount, region };
 }

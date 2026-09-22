@@ -4,10 +4,19 @@ import { TextSelection } from '@tiptap/pm/state';
 import { DEFAULT_DOCUMENT_SETTINGS } from '@finaler-draft/screenplay';
 import {
   convertActiveScreenplayBlock,
+  createLocalScreenplayEditorInit,
   projectDocumentScreenplay,
-  screenplayExtensions,
+  type EditorContent,
   type ScreenplayElementType,
 } from './screenplayEditor.js';
+
+/** Every test editor here is Yjs-backed (`createLocalScreenplayEditorInit` requires content), but
+ * none of them exercise collaboration itself -- a fresh, local, unconnected `Y.Doc` seeded with
+ * `content` is exactly as good a source for these tests as the old plain `content` editor option
+ * was, and keeps every assertion below about editing behaviour, not about Yjs. */
+function editorInitFor(content: EditorContent) {
+  return createLocalScreenplayEditorInit(content);
+}
 
 /**
  * Pressing Enter is the only way a writer changes element while typing, so where the caret sits
@@ -23,16 +32,15 @@ function buildEditor(blocks: readonly Block[]) {
   const mount = document.createElement('div');
   document.body.append(mount);
   const editor = new Editor({
-    content: {
+    element: mount,
+    ...editorInitFor({
       type: 'screenplayDocument' as const,
       content: blocks.map((block, index) => ({
         type: 'screenplayBlock' as const,
         attrs: { element: block.element, id: `block-${index}` },
         ...(block.text === '' ? {} : { content: [{ type: 'text', text: block.text }] }),
       })),
-    },
-    element: mount,
-    extensions: screenplayExtensions,
+    }),
   });
   return { editor, mount };
 }
@@ -354,7 +362,8 @@ describe('projectDocumentScreenplay', () => {
     const mount = document.createElement('div');
     document.body.append(mount);
     const editor = new Editor({
-      content: {
+      element: mount,
+      ...editorInitFor({
         type: 'screenplayDocument',
         content: [
           {
@@ -363,9 +372,7 @@ describe('projectDocumentScreenplay', () => {
             content: [{ type: 'text', text }],
           },
         ],
-      },
-      element: mount,
-      extensions: screenplayExtensions,
+      }),
     });
     return { doc: editor.state.doc, editor, mount };
   }
@@ -426,16 +433,15 @@ describe('paste sanitisation', () => {
     const mount = document.createElement('div');
     document.body.append(mount);
     const editor = new Editor({
-      content: {
+      element: mount,
+      ...editorInitFor({
         type: 'screenplayDocument' as const,
         content: blocks.map((block) => ({
           type: 'screenplayBlock' as const,
           attrs: { element: block.element, id: block.id },
           ...(block.text === '' ? {} : { content: [{ type: 'text', text: block.text }] }),
         })),
-      },
-      element: mount,
-      extensions: screenplayExtensions,
+      }),
     });
     return { editor, mount };
   }
