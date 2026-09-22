@@ -3,7 +3,7 @@ import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import type { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createEntitlementEnforcedProjectStore } from './entitlementProjectStore.js';
-import { EntitlementLimitError } from './entitlements.js';
+import { EntitlementLimitError } from '@finaler-draft/entitlements';
 import { createPostgresEntitlementStore, type EntitlementStore } from './entitlementStore.js';
 import {
   createIntegrationDatabase,
@@ -100,7 +100,18 @@ describe.skipIf(!databaseUrl)('Entitlement enforcement (PostgreSQL)', () => {
     expect(screenplaysInSecondProject).toEqual([]);
   });
 
-  it('free tier: a screenplay outside the slot cannot be edited, but stays readable', async () => {
+  // The edit-gating half of these three scenarios -- "a screenplay outside the slot cannot be
+  // edited", "cannot edit ... anything", "the chosen screenplay is editable, the other is not" --
+  // used to be asserted here through `store.updateScreenplay`, the whole-document REST `PUT`.
+  // That route is deleted (collaboration slice 1: the canonical screenplay is a projection of the
+  // Yjs document `apps/collab` maintains, never a client write over REST -- see
+  // `progress/collaboration-slice-1.md`), and with it the entitlement gate this decorator used to
+  // place on it. The identical policy is now enforced on the one write path that remains, the
+  // WebSocket connection -- see `apps/collab/src/collaboration.integration.test.ts`'s equivalent
+  // "restricted-tier" coverage. What remains genuinely true of this REST store, and is still
+  // asserted below, is that reading a screenplay and the create-screenplay/switch-slot mechanics
+  // are unaffected by which screenplay currently occupies the slot.
+  it('free tier: a screenplay outside the slot stays readable over REST', async () => {
     const owner = await createUser();
     const collaborator = await createUser();
     const project = await baseStore!.createProject(owner, 'Shared project');
@@ -123,15 +134,9 @@ describe.skipIf(!databaseUrl)('Entitlement enforcement (PostgreSQL)', () => {
 
     const loaded = await store!.getScreenplay(collaborator, ownScreenplay.id);
     expect(loaded).not.toBe('missing');
-
-    const denied = await store!.updateScreenplay(collaborator, ownScreenplay.id, {
-      expectedVersion: 1,
-      screenplay: (loaded as { screenplay: typeof screenplayFixture }).screenplay,
-    });
-    expect(denied).toBe('forbidden');
   });
 
-  it('lapsed with several screenplays and no choice made: cannot edit or create anything', async () => {
+  it('lapsed with several screenplays and no choice made: cannot create another', async () => {
     const owner = await createUser();
     await markLapsed(owner);
     const project = await baseStore!.createProject(owner, 'Legacy project');
@@ -139,28 +144,14 @@ describe.skipIf(!databaseUrl)('Entitlement enforcement (PostgreSQL)', () => {
     // while it was still paying (an active subscription lifts the create-screenplay gate
     // entirely -- see the paid-tier test below -- so this shortcut reaches the same end state a
     // real lapse would, without re-deriving that already-covered path here).
-    const first = await baseStore!.createScreenplay(owner, project.id, {
+    await baseStore!.createScreenplay(owner, project.id, {
       title: 'Legacy script one',
       screenplay: screenplayFixture,
     });
-    const second = await baseStore!.createScreenplay(owner, project.id, {
+    await baseStore!.createScreenplay(owner, project.id, {
       title: 'Legacy script two',
       screenplay: screenplayFixture,
     });
-
-    const firstLoaded = await store!.getScreenplay(owner, first.id);
-    const deniedFirst = await store!.updateScreenplay(owner, first.id, {
-      expectedVersion: 1,
-      screenplay: (firstLoaded as { screenplay: typeof screenplayFixture }).screenplay,
-    });
-    expect(deniedFirst).toBe('forbidden');
-
-    const secondLoaded = await store!.getScreenplay(owner, second.id);
-    const deniedSecond = await store!.updateScreenplay(owner, second.id, {
-      expectedVersion: 1,
-      screenplay: (secondLoaded as { screenplay: typeof screenplayFixture }).screenplay,
-    });
-    expect(deniedSecond).toBe('forbidden');
 
     await expect(
       store!.createScreenplay(owner, project.id, {
@@ -170,7 +161,7 @@ describe.skipIf(!databaseUrl)('Entitlement enforcement (PostgreSQL)', () => {
     ).rejects.toBeInstanceOf(EntitlementLimitError);
   });
 
-  it('lapsed after choosing: the chosen screenplay is editable, the other is not', async () => {
+  it('lapsed after choosing: the chosen screenplay is recorded as the account’s editable slot', async () => {
     const owner = await createUser();
     await markLapsed(owner);
     const project = await baseStore!.createProject(owner, 'Legacy project 2');
@@ -178,7 +169,7 @@ describe.skipIf(!databaseUrl)('Entitlement enforcement (PostgreSQL)', () => {
       title: 'Keep this one',
       screenplay: screenplayFixture,
     });
-    const second = await baseStore!.createScreenplay(owner, project.id, {
+    await baseStore!.createScreenplay(owner, project.id, {
       title: 'Not this one',
       screenplay: screenplayFixture,
     });
@@ -186,19 +177,8 @@ describe.skipIf(!databaseUrl)('Entitlement enforcement (PostgreSQL)', () => {
     const choice = await entitlements!.switchEditableScreenplay(owner, first.id, new Date());
     expect(choice.outcome).toBe('applied');
 
-    const firstLoaded = await store!.getScreenplay(owner, first.id);
-    const allowed = await store!.updateScreenplay(owner, first.id, {
-      expectedVersion: 1,
-      screenplay: (firstLoaded as { screenplay: typeof screenplayFixture }).screenplay,
-    });
-    expect(allowed).toEqual({ version: 2 });
-
-    const secondLoaded = await store!.getScreenplay(owner, second.id);
-    const denied = await store!.updateScreenplay(owner, second.id, {
-      expectedVersion: 1,
-      screenplay: (secondLoaded as { screenplay: typeof screenplayFixture }).screenplay,
-    });
-    expect(denied).toBe('forbidden');
+    const snapshot = await entitlements!.getSnapshot(owner, new Date());
+    expect(snapshot.slot?.screenplayId).toBe(first.id);
   });
 
   it('switching the slot is refused inside the cooldown window and allowed once it elapses', async () => {
@@ -258,7 +238,7 @@ describe.skipIf(!databaseUrl)('Entitlement enforcement (PostgreSQL)', () => {
     expect(result.outcome).toBe('not-a-candidate');
   });
 
-  it('an active subscription lifts every restriction: unlimited creation and editing, no slot needed', async () => {
+  it('an active subscription lifts every restriction: unlimited creation, no slot needed', async () => {
     const owner = await createUser();
     await markActive(owner);
     const project = await baseStore!.createProject(owner, 'Studio project');
@@ -272,20 +252,8 @@ describe.skipIf(!databaseUrl)('Entitlement enforcement (PostgreSQL)', () => {
       screenplay: screenplayFixture,
     });
 
-    const firstLoaded = await store!.getScreenplay(owner, first.id);
-    const secondLoaded = await store!.getScreenplay(owner, second.id);
-    await expect(
-      store!.updateScreenplay(owner, first.id, {
-        expectedVersion: 1,
-        screenplay: (firstLoaded as { screenplay: typeof screenplayFixture }).screenplay,
-      }),
-    ).resolves.toEqual({ version: 2 });
-    await expect(
-      store!.updateScreenplay(owner, second.id, {
-        expectedVersion: 1,
-        screenplay: (secondLoaded as { screenplay: typeof screenplayFixture }).screenplay,
-      }),
-    ).resolves.toEqual({ version: 2 });
+    await expect(store!.getScreenplay(owner, first.id)).resolves.not.toBe('missing');
+    await expect(store!.getScreenplay(owner, second.id)).resolves.not.toBe('missing');
 
     const snapshot = await entitlements!.getSnapshot(owner, new Date());
     expect(snapshot.slot).toBeNull();

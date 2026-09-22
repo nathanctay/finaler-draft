@@ -13,7 +13,6 @@ import {
   DEFAULT_DOCUMENT_SETTINGS,
   deriveCharacters,
   deriveScenes,
-  screenplayToPlainText,
   type DerivedCharacter,
   type DerivedScene,
   type DocumentSettings,
@@ -21,17 +20,22 @@ import {
   type ScreenplayBlock,
 } from '@finaler-draft/screenplay';
 import { PAGE_HEIGHT_IN, PAGE_WIDTH_IN } from '@finaler-draft/screenplay/pageFormat';
+import { TRANSIENT_SYNC_AUTH_FAILURE_REASON } from '@finaler-draft/config';
 import type { Editor } from '@tiptap/core';
 import { EditorContent, useEditor } from '@tiptap/react';
+import { HocuspocusProvider } from '@hocuspocus/provider';
 import {
   convertActiveScreenplayBlock,
   displayElement,
   findScreenplayBlockPosition,
   getActiveScreenplayBlock,
   editorContentFromScreenplay,
+  nonEmptyEditorContent,
   projectLocalScreenplay,
+  createLocalScreenplayYDoc,
+  createScreenplayEditorInit,
   screenplayElementTypes,
-  screenplayExtensions,
+  SCREENPLAY_YJS_FRAGMENT,
   type LocalScreenplayProjection,
   type ScreenplayElementType,
 } from './screenplayEditor.js';
@@ -45,7 +49,8 @@ import { SeamCaretExtension } from './seamCaret.js';
 import { SmartTypeGhostExtension } from './smartTypeGhost.js';
 import { SmartTypeList, SmartTypeListExtension } from './smartTypeList.js';
 import { ElementMenu, ElementMenuExtension } from './elementMenu.js';
-import { ApiError, MessageApiError, api, type PersistedScreenplay } from './api.js';
+import { MessageApiError, type PersistedScreenplay } from './api.js';
+import { COLLAB_WS_URL } from './collabConfig.js';
 import { applyPageGeometryCssVariables } from './pageGeometryCss.js';
 import { TitlePageView } from './titlePageEditor.js';
 import {
@@ -168,7 +173,6 @@ const legacyInitial: PersistedScreenplay = {
   id: '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
   projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
   title: 'The Long Way Home',
-  version: 1,
   screenplay: {
     annotations: [],
     blocks: [
@@ -212,6 +216,20 @@ const unavailableEditorContent = {
   content: [],
   type: 'screenplayDocument' as const,
 };
+
+// Bounds how long this tab's first sync is allowed to stay silent (`syncState === 'connecting'`,
+// with no `synced` and no `authenticationFailed` at all) before the writer is told something is
+// wrong -- the backstop the sync-reporting effect below schedules. Deliberately generous: an
+// ordinary handshake, and even a couple of automatic retries after a transient failure, finish in
+// well under this, so it only ever fires for a genuinely stuck connection.
+const SYNC_TIMEOUT_MS = 20_000;
+
+// How long to wait before retrying after a transient `authenticationFailed` (`apps/collab`'s
+// `TransientAuthenticationError`), growing with each consecutive failure so a sustained outage
+// becomes a backing-off retry loop rather than a tight one hammering the collab server -- and,
+// through it, Postgres -- once per handshake. The sync-reporting effect below resets the count
+// the moment a sync actually lands.
+const TRANSIENT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
 // `useEditor`'s own React binding (`@tiptap/react`'s `EditorInstanceManager.onRender`) compares
 // every option's *object identity* on every render of `<App>` and calls `editor.setOptions(...)`
@@ -358,7 +376,37 @@ export function App({
     issues: ['Editor is starting.'],
     valid: false,
   });
-  const [saveState, setSaveState] = useState<'saved' | 'saving' | 'failed' | 'conflict'>('saved');
+  // Replaces the old `saveState` (`'saved' | 'saving' | 'failed' | 'conflict'`): there is no
+  // longer a save this app makes, or a version to conflict on -- the editor is bound directly to
+  // a Yjs document, and `apps/collab`'s Hocuspocus server persists it on its own debounced
+  // schedule regardless of what this tab's connection is doing (plan.md's "Collaboration,
+  // history, and restoration"; see `progress/collaboration-slice-1.md`). What this reports
+  // instead is the state of *this browser's* connection to that server: `'connecting'` until the
+  // first sync completes, `'synced'` once this tab's copy matches the server's, and `'offline'`
+  // if the socket drops -- Yjs itself keeps queuing local edits during `'offline'` and flushes
+  // them the moment the connection recovers, so nothing here needs to retry anything by hand.
+  // Permanently `'synced'` when no collaboration server is configured (`COLLAB_WS_URL` unset --
+  // see `collabConfig.ts`) or when the schema is unsupported: there is no socket to report on.
+  //
+  // Two more terminal states the sync-reporting effect below adds, neither reachable before this
+  // tab's first sync completes and neither ever set again afterward:
+  //
+  //  - `'denied'`: `apps/collab`'s `onAuthenticate` resolved a real, deliberate decision that this
+  //    actor may not see this document (wrong Origin, no session, or a role lookup that genuinely
+  //    found none) -- see `authenticate.ts`'s own `TransientAuthenticationError` comment for why
+  //    this is the *other* half of that classification. Retrying would never change the outcome,
+  //    so nothing here does; the writer needs a reload (a fresh session/account check), not a
+  //    spinner that waits forever.
+  //  - `'timedOut'`: this tab's own connection has been sitting in `'connecting'` for longer than
+  //    `SYNC_TIMEOUT_MS` with no `synced` and no `authenticationFailed` at all -- a backstop for
+  //    whatever the transient-retry loop below does not by itself resolve (a sustained outage
+  //    outlasting every retry, or a failure mode neither this comment nor `authenticate.ts`'s
+  //    classification anticipated). Unlike `'denied'`, this is not asserted to be permanent: a
+  //    `synced` arriving after the timeout still wins and moves this straight to `'synced'`, since
+  //    the underlying provider is still trying regardless of what this state says.
+  const [syncState, setSyncState] = useState<
+    'connecting' | 'synced' | 'offline' | 'denied' | 'timedOut'
+  >(COLLAB_WS_URL ? 'connecting' : 'synced');
 
   // An export that fails *after* the projection was valid -- today, only `@finaler-draft/pdf`
   // rejecting on a character PDF's un-embedded standard Courier cannot encode (Cyrillic, Greek,
@@ -368,14 +416,10 @@ export function App({
   // writer saw a click that did nothing -- the same silent failure this scope exists to remove,
   // arriving through a different door.
   const [exportError, setExportError] = useState<string>();
-  // Feedback for the conflict state's "Copy my version" button (below). Not part of `saveState`:
-  // it describes the clipboard action's own outcome, which can succeed or fail independently of
-  // -- and without ever changing -- the save conflict it is trying to rescue the writer from.
-  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
-  // The read-only banner's own "Make this one editable" action (below). Not part of `saveState`
-  // or `copyStatus`: it describes `entitlementReadOnly.onMakeEditable`'s own outcome, which can
-  // fail (a cooldown, or the account no longer being a candidate) independently of anything else
-  // on this screen, and the banner is the only place that outcome is ever shown.
+  // The read-only banner's own "Make this one editable" action (below). It describes
+  // `entitlementReadOnly.onMakeEditable`'s own outcome, which can fail (a cooldown, or the
+  // account no longer being a candidate) independently of anything else on this screen, and the
+  // banner is the only place that outcome is ever shown.
   const [makeEditableState, setMakeEditableState] = useState<'idle' | 'pending' | 'error'>('idle');
   const [makeEditableError, setMakeEditableError] = useState<string>();
   // `editorContentFromScreenplay` throws for canonical features this text-block editor cannot
@@ -390,24 +434,49 @@ export function App({
     }
   }, [initial.screenplay]);
   const initialContent = initialProjection?.body;
-  // The one flag that actually gates editing: this editor must support the screenplay's
-  // canonical features *and* the account's entitlement must permit editing this specific
-  // screenplay. Either reason alone is enough to force read-only -- there is no case where
-  // `entitlementReadOnly` overrides an already-unsupported schema, or vice versa.
-  const editingAllowed = initialContent !== undefined && entitlementReadOnly === undefined;
+  // Read-only until this tab's own first collaborative sync completes (`syncState ===
+  // 'connecting'`), on top of the two reasons above. This closes a real data-loss race, not a
+  // cosmetic one: before the provider's first sync lands, `collab.doc` (below) is still genuinely
+  // empty, and ProseMirror's own schema fills the resulting empty document with a default
+  // `screenplayBlock` -- one whose `id` attribute is that schema's own default, `null`, since
+  // nothing in this codebase's block-creation paths runs for a node ProseMirror conjures on its
+  // own. `y-prosemirror` never sends a `null`-valued attribute to Yjs at all (confirmed by reading
+  // the installed package's own `createTypeFromElementNode`), so a keystroke landing in that block
+  // before the real, real-id-bearing seed arrives keeps a block whose id never reaches the server
+  // -- `apps/collab`'s projection then rejects the whole document as invalid, and nothing is ever
+  // written past the empty seed (`progress/collaboration-slice-1.md`'s "first collaborative save
+  // in a fresh process" entry). Gating on `'connecting'` closes the window entirely: there is no
+  // moment where a keystroke can reach that not-yet-real block. Deliberately *not* gating on
+  // `'offline'` too -- that only means an already-`synced` tab's socket dropped after a real
+  // document was already in hand, and Yjs's own queue-and-flush-on-reconnect behavior (this
+  // state's own comment above) is exactly what already makes continuing to type during a
+  // reconnect safe; the status bar already reports it (`'offline' · reconnecting…` below) without
+  // this needing to also lock the writer out of their own manuscript over a transient socket
+  // drop.
+  //
+  // Permanently `'synced'` (never `'connecting'`) whenever there is no real provider to wait on --
+  // `COLLAB_WS_URL` unset, or `initialContent === undefined` (unsupported schema) -- per
+  // `syncState`'s own initializer and the sync-reporting effect below, both keyed off
+  // `collab.provider`'s presence, not its existence being assumed. Every unit test in this file
+  // and every isolated render (no collaboration server configured) therefore stays editable
+  // exactly as before this change; only a real, in-flight first sync ever makes this `false`.
+  //
+  // The one flag that actually gates editing: this editor must support the screenplay's canonical
+  // features, the account's entitlement must permit editing this specific screenplay, *and* this
+  // tab's own first sync must have completed. Any one reason alone is enough to force read-only --
+  // there is no case where one of the three overrides another.
+  //
+  // Written as an explicit allow-list (`'synced'` or `'offline'`), not `syncState !== 'connecting'`,
+  // now that `syncState` has two more values (`'denied'`, `'timedOut'`) that must never make this
+  // `true`: both mean this tab's first sync has *not* completed, so allowing edits under either
+  // would reopen the exact null-id race gating on `'connecting'` alone exists to close.
+  const editingAllowed =
+    initialContent !== undefined &&
+    entitlementReadOnly === undefined &&
+    (syncState === 'synced' || syncState === 'offline');
   const editorContent = useMemo(() => {
-    if (initialContent === undefined || initialContent.content.length > 0) {
-      return initialContent;
-    }
-    return {
-      content: [
-        {
-          attrs: { element: 'action' as const, id: crypto.randomUUID() },
-          type: 'screenplayBlock' as const,
-        },
-      ],
-      type: 'screenplayDocument' as const,
-    };
+    if (initialContent === undefined) return initialContent;
+    return nonEmptyEditorContent(initialContent);
   }, [initialContent]);
   // The title page lives in its own React state, not in the ProseMirror document: it never
   // paginates with the body and is never numbered (plan.md's "Title page"), and the layout
@@ -432,17 +501,7 @@ export function App({
   );
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const fileMenuRef = useRef<HTMLDivElement>(null);
-  const inFlight = useRef(false);
   const latestProjection = useRef<LocalScreenplayProjection | undefined>(undefined);
-  const savedWire = useRef(JSON.stringify(initial.screenplay));
-  const failedEditSequence = useRef<number | undefined>(undefined);
-  const editSequence = useRef(0);
-  const timer = useRef<number | undefined>(undefined);
-  const versionRef = useRef(initial.version);
-  const saveStateRef = useRef(saveState);
-  useEffect(() => {
-    saveStateRef.current = saveState;
-  }, [saveState]);
   // `main.tsx` applies the specification's fixed defaults once at bootstrap, before any
   // screenplay has loaded (see that module's own comment for why). Once one has, its own
   // `documentSettings` -- character indent, parenthetical indent and width, per plan.md's
@@ -468,18 +527,17 @@ export function App({
 
   // Shared by `syncEditorState` (body edits, via Tiptap's own callbacks) and
   // `updateTitlePageState` (title-page edits, which never touch the ProseMirror document and so
-  // never fire a Tiptap callback at all) -- both need to record the latest projection and, when
-  // the edit actually changed something, schedule a save from it.
-  const applyProjection = (nextProjection: LocalScreenplayProjection, changed: boolean) => {
+  // never fire a Tiptap callback at all) -- both need to record the latest projection for reads
+  // (word count, export, the invalid-projection banner). Neither needs to schedule a save: the
+  // editor's document is the Yjs document (`ySyncPlugin`, wired in via `createScreenplayEditorInit`
+  // below), so `apps/collab`'s Hocuspocus server already has every keystroke the instant it is
+  // typed, on its own persistence schedule -- there is nothing left for this component to flush.
+  const applyProjection = (nextProjection: LocalScreenplayProjection) => {
     latestProjection.current = nextProjection;
     setProjection(nextProjection);
-    if (changed) {
-      editSequence.current += 1;
-      scheduleSave(nextProjection);
-    }
   };
 
-  const syncEditorState = (editorInstance: Editor, changed = false) => {
+  const syncEditorState = (editorInstance: Editor) => {
     const currentBlock = getActiveScreenplayBlock(editorInstance);
     if (currentBlock) {
       setActiveBlockId(currentBlock.id);
@@ -491,71 +549,7 @@ export function App({
       title: initial.title,
       titlePages: titlePageState ? [titlePageFromState(titlePageState)] : [],
     });
-    applyProjection(nextProjection, changed);
-  };
-
-  const scheduleSave = (nextProjection: LocalScreenplayProjection) => {
-    if (!nextProjection.valid || saveStateRef.current === 'conflict') return;
-    const wire = JSON.stringify(nextProjection.screenplay);
-    if (wire === savedWire.current) {
-      window.clearTimeout(timer.current);
-      if (!inFlight.current) setSaveState('saved');
-      return;
-    }
-    if (saveStateRef.current === 'failed') {
-      if (failedEditSequence.current === editSequence.current) return;
-      failedEditSequence.current = undefined;
-      saveStateRef.current = 'saved';
-      setSaveState('saved');
-    }
-    window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => void saveLatest(), 600);
-  };
-
-  // `keepalive` is only ever passed by the flush effect below, and only `true` for `pagehide`
-  // specifically -- see that effect's own comment for why unmount and `visibilitychange` must
-  // NOT set it. Every guard above still applies unchanged, including the conflict guard: this
-  // must never resume saving into a version the server has already rejected, on the way out any
-  // more than on the ordinary debounced path (requirement 4, progress/save-conflict-recovery.md).
-  const saveLatest = async ({ keepalive = false }: { keepalive?: boolean } = {}) => {
-    if (
-      inFlight.current ||
-      saveStateRef.current === 'conflict' ||
-      saveStateRef.current === 'failed'
-    )
-      return;
-    const nextProjection = latestProjection.current;
-    if (!nextProjection?.valid) return;
-    const wire = JSON.stringify(nextProjection.screenplay);
-    if (wire === savedWire.current) return;
-    inFlight.current = true;
-    saveStateRef.current = 'saving';
-    setSaveState('saving');
-    try {
-      const result = await api.saveScreenplay(
-        initial.id,
-        versionRef.current,
-        nextProjection.screenplay,
-        { keepalive },
-      );
-      versionRef.current = result.version;
-      savedWire.current = wire;
-      saveStateRef.current = 'saved';
-      setSaveState('saved');
-      const current = latestProjection.current;
-      if (current?.valid && JSON.stringify(current.screenplay) !== wire) scheduleSave(current);
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 409) {
-        saveStateRef.current = 'conflict';
-        setSaveState('conflict');
-      } else {
-        failedEditSequence.current = editSequence.current;
-        saveStateRef.current = 'failed';
-        setSaveState('failed');
-      }
-    } finally {
-      inFlight.current = false;
-    }
+    applyProjection(nextProjection);
   };
 
   // The pagination plugin recomputes on a requestAnimationFrame coalesce (paginationExtension.ts),
@@ -570,21 +564,203 @@ export function App({
     }
   };
 
+  // The editor's document is a Yjs document, never a plain ProseMirror one -- "Yjs becomes the
+  // source of truth" (plan.md's "Collaboration, history, and restoration"; see
+  // `progress/collaboration-slice-1.md`). Built once per mounted screenplay via `useMemo`, the
+  // same per-screenplay-instance convention `initialProjection`/`titlePageState` above already
+  // use (`App` remounts fresh per screenplay, so `initial.id` is stable for the component's whole
+  // life).
+  //
+  // Two cases:
+  //  - No collaboration server configured (`COLLAB_WS_URL` unset -- see `collabConfig.ts`) or the
+  //    canonical screenplay has features this editor cannot represent at all
+  //    (`initialContent === undefined`): a local, unconnected `Y.Doc`, seeded from the loaded
+  //    screenplay in the first case and left empty (matching `unavailableEditorContent`'s
+  //    existing read-only meaning) in the second. This is what every unit test in this file
+  //    exercises, and what any environment without `apps/collab` deployed yet falls back to.
+  //  - Otherwise: a real `HocuspocusProvider` connects to `apps/collab` over `COLLAB_WS_URL`,
+  //    authenticating from the same session cookie the browser already attaches to every other
+  //    request (plan.md: "Hocuspocus authenticates from a cookie the browser attaches
+  //    automatically" -- no token or header is set here). Its document starts empty and is
+  //    populated by the provider's own sync the instant the connection completes;
+  //    `createScreenplayEditorInit` below reads whatever is already there for the first render,
+  //    empty or not, and every update after that reaches the editor through `ySyncPlugin`
+  //    automatically, with no action from this component.
+  const collab = useMemo(() => {
+    if (initialContent === undefined || !COLLAB_WS_URL) {
+      return {
+        doc: createLocalScreenplayYDoc(editorContent ?? unavailableEditorContent),
+        provider: undefined as HocuspocusProvider | undefined,
+      };
+    }
+    const provider = new HocuspocusProvider({ url: COLLAB_WS_URL, name: initial.id });
+    return { doc: provider.document, provider };
+    // `editorContent`/`initialContent` deliberately omitted: this must only ever run once per
+    // mounted screenplay (a fresh `Y.Doc`/`HocuspocusProvider` every render would reconnect and
+    // re-seed on every keystroke), and `initial.id` alone already uniquely identifies which
+    // screenplay this is for the component's whole lifetime.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initial.id]);
+
+  // Reports this browser's own connection to `apps/collab`, for the status line below. Yjs keeps
+  // queuing local edits while offline and flushes them the moment the connection recovers, so
+  // nothing here needs to retry anything by hand for an already-`'synced'` tab's transient socket
+  // drop -- this effect only ever *reads* that case, never drives it.
+  //
+  // It does drive one thing: recovering this tab's own *first* handshake from a transient
+  // `authenticationFailed` (`apps/collab`'s `TransientAuthenticationError`, `authenticate.ts`).
+  // `@hocuspocus/server` sends its denial over the same still-open socket and never closes the
+  // transport (confirmed by reading the installed source), so nothing about the connection itself
+  // ever changes on its own -- no `close`, no `disconnect`, nothing for `HocuspocusProviderWebsocket`'s
+  // own reconnect-on-close logic to react to. Recovering requires *this* code to close the socket
+  // itself (`provider.disconnect()`) and reopen it (`provider.connect()`) once that closes for
+  // real -- `connect()` no-ops immediately if `status` still reads `'connected'`, which it does
+  // until the asynchronous close actually lands, so the retry waits for the provider's own
+  // `'disconnect'` event rather than racing it. A resolved, deliberate denial (any other `reason`,
+  // or none) gets none of this: retrying it would never change the outcome, so `syncState` moves
+  // straight to the terminal `'denied'` instead.
+  useEffect(() => {
+    const provider = collab.provider;
+    if (!provider) {
+      setSyncState('synced');
+      return;
+    }
+    setSyncState(provider.isSynced ? 'synced' : 'connecting');
+
+    // Set for the duration of one disconnect-then-reconnect cycle triggered by a transient
+    // failure, so the generic `'status'`/`'disconnect'` handlers below -- which this same cycle's
+    // own `provider.disconnect()` call also triggers -- do not report this self-inflicted,
+    // pre-first-sync drop as `'offline'`. `'offline'` is only ever correct for a tab that has
+    // already synced at least once (this effect's own comment on `editingAllowed`'s allow-list);
+    // reporting it here, even briefly, would let `editingAllowed` go `true` before a real document
+    // ever arrived -- exactly the null-id race the whole gate exists to close.
+    let awaitingTransientRetry = false;
+    // Grows on each consecutive transient failure and resets the moment a sync actually lands, so
+    // a sustained outage becomes a backing-off retry loop rather than a tight one hammering the
+    // collab server (and, through it, Postgres) once per handshake.
+    let transientRetryCount = 0;
+    let pendingRetryTimeout: ReturnType<typeof setTimeout> | undefined;
+    let pendingRetryDisconnectHandler: (() => void) | undefined;
+    const clearPendingRetry = () => {
+      if (pendingRetryTimeout !== undefined) {
+        clearTimeout(pendingRetryTimeout);
+        pendingRetryTimeout = undefined;
+      }
+      if (pendingRetryDisconnectHandler !== undefined) {
+        provider.off('disconnect', pendingRetryDisconnectHandler);
+        pendingRetryDisconnectHandler = undefined;
+      }
+    };
+
+    // The backstop for whatever the transient-retry loop above does not itself resolve (a
+    // sustained outage outlasting every retry delay, or a failure mode neither this comment nor
+    // `authenticate.ts`'s classification anticipated): if this tab is *still* `'connecting'` once
+    // `SYNC_TIMEOUT_MS` has passed, tell the writer something is wrong instead of leaving an
+    // indefinite spinner with no information. Not asserted to be permanent -- the functional
+    // updater only overwrites `'connecting'`, so a `synced` that lands after this fires (the
+    // provider is still trying regardless of what this state says) still wins on its own next
+    // render via `handleSynced` below.
+    const syncTimeout = setTimeout(() => {
+      setSyncState((current) => (current === 'connecting' ? 'timedOut' : current));
+    }, SYNC_TIMEOUT_MS);
+
+    const handleStatus = ({ status }: { status: string }) => {
+      if (status !== 'connected' && !awaitingTransientRetry) setSyncState('offline');
+    };
+    const handleSynced = () => {
+      transientRetryCount = 0;
+      setSyncState('synced');
+    };
+    const handleDisconnect = () => {
+      if (!awaitingTransientRetry) setSyncState('offline');
+    };
+    const handleAuthenticationFailed = ({ reason }: { reason?: string }) => {
+      if (reason !== TRANSIENT_SYNC_AUTH_FAILURE_REASON) {
+        awaitingTransientRetry = false;
+        setSyncState('denied');
+        return;
+      }
+      awaitingTransientRetry = true;
+      const delay =
+        TRANSIENT_RETRY_DELAYS_MS[
+          Math.min(transientRetryCount, TRANSIENT_RETRY_DELAYS_MS.length - 1)
+        ];
+      transientRetryCount += 1;
+      pendingRetryTimeout = setTimeout(() => {
+        pendingRetryTimeout = undefined;
+        pendingRetryDisconnectHandler = () => {
+          provider.off('disconnect', pendingRetryDisconnectHandler!);
+          pendingRetryDisconnectHandler = undefined;
+          awaitingTransientRetry = false;
+          provider.connect();
+        };
+        provider.on('disconnect', pendingRetryDisconnectHandler);
+        provider.disconnect();
+      }, delay);
+    };
+    provider.on('status', handleStatus);
+    provider.on('synced', handleSynced);
+    provider.on('disconnect', handleDisconnect);
+    provider.on('authenticationFailed', handleAuthenticationFailed);
+    return () => {
+      clearTimeout(syncTimeout);
+      clearPendingRetry();
+      provider.off('status', handleStatus);
+      provider.off('synced', handleSynced);
+      provider.off('disconnect', handleDisconnect);
+      provider.off('authenticationFailed', handleAuthenticationFailed);
+    };
+  }, [collab]);
+
+  // Tears down the real WebSocket connection when this screenplay is no longer mounted (in-app
+  // navigation to a different screenplay or route) -- `collab` itself only ever changes when
+  // `initial.id` does, so this fires at most once per screenplay, not on every render.
+  //
+  // The teardown itself is deliberately deferred by one macrotask, canceling the deferred call if
+  // this effect's setup runs again before it fires, rather than calling `collab.provider?.destroy()`
+  // directly in the cleanup. `collab` is built once via `useMemo` specifically so a fresh
+  // `Y.Doc`/`HocuspocusProvider` never opens on every render (that `useMemo`'s own comment) --
+  // React's `<StrictMode>` (`main.tsx`, dev builds only) intentionally runs every effect's setup,
+  // then its cleanup, then its setup again, once, immediately after a component's true initial
+  // mount, specifically to surface an effect whose cleanup cannot be undone. Because `collab` does
+  // not change across that simulated remount, an undeferred `destroy()` here destroyed the one and
+  // only provider before its handshake ever completed, and nothing recreated it -- the editor was
+  // permanently stuck reporting `'connecting'` under `pnpm dev` (React's development bundle is the
+  // only build StrictMode's double-invoke ever runs in; confirmed directly: `test:system`'s
+  // production build, where it does not run, was never affected). A real unmount (navigating to a
+  // different screenplay) has no follow-up setup call to cancel this with, so the deferred
+  // `destroy()` fires and the connection really tears down -- at most one macrotask later than
+  // before, negligible against a WebSocket teardown nothing here awaits. Confirmed against real
+  // `pnpm dev`, StrictMode left on: two browser windows opened on the same screenplay converge,
+  // and killing `apps/collab` visibly flips both to `'offline'` (`progress/collaboration-slice-1.md`).
+  const pendingProviderTeardown = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => {
+    clearTimeout(pendingProviderTeardown.current);
+    return () => {
+      pendingProviderTeardown.current = setTimeout(() => {
+        collab.provider?.destroy();
+      }, 0);
+    };
+  }, [collab]);
+
+  const editorInit = useMemo(
+    () => createScreenplayEditorInit(collab.doc.getXmlFragment(SCREENPLAY_YJS_FRAGMENT)),
+    [collab],
+  );
+
   // Same reasoning as `editorProps` above: an inline array literal here is a fresh identity on
   // every render, and `PaginationExtension.configure(...)` in particular returns a brand-new
   // extension instance on every call -- Tiptap's `.configure()` never memoizes -- so this array
   // would fail `useEditor`'s per-element identity comparison every single render regardless of
-  // whether anything about it actually changed. Memoized with an empty dependency array
-  // deliberately: `PaginationExtension.configure({ documentSettings: ... })` only ever *seeds*
-  // the plugin's own `init()` the one time the extension is constructed -- a runtime
-  // `documentSettings` change reaches the plugin entirely through `updatePaginationDocumentSettings`'s
-  // meta-carrying dispatch (paginationExtension.ts), never by reconfiguring this extension, so
-  // `initial.screenplay.documentSettings` is only ever the *initial* value and this array never
-  // legitimately needs to be rebuilt after mount. Every other member is already a module-level
-  // singleton, so nothing here loses the ability to change for a reason that matters.
+  // whether anything about it actually changed. Memoized on `[editorInit]` -- itself stable
+  // across ordinary re-renders (see `collab` above) -- rather than `[]`:
+  // `PaginationExtension.configure({ documentSettings: ... })` still only ever *seeds* the
+  // plugin's own `init()` once; a runtime `documentSettings` change reaches the plugin entirely
+  // through `updatePaginationDocumentSettings`'s meta-carrying dispatch (paginationExtension.ts),
+  // never by reconfiguring this extension.
   const extensions = useMemo(
     () => [
-      ...screenplayExtensions,
+      ...editorInit.extensions,
       PaginationExtension.configure({ documentSettings: initial.screenplay.documentSettings }),
       // The caret at a mid-block page seam (seamCaret.ts). Mounted directly after the plugin whose
       // decorations it reads, and like every layer here it is removable on its own: this line, its
@@ -607,14 +783,12 @@ export function App({
       // in this array decides nothing about which layer sees Enter first.
       ElementMenuExtension,
     ],
-    // `initial.screenplay.documentSettings` deliberately omitted: see the comment above this
-    // array for why it is a one-time seed, not a live dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+    [editorInit],
   );
 
   const editor = useEditor({
-    content: editorContent ?? unavailableEditorContent,
+    content: editorInit.content,
     editable: editingAllowed,
     editorProps,
     extensions,
@@ -623,9 +797,29 @@ export function App({
       syncPageCount(editorInstance);
     },
     onSelectionUpdate: ({ editor: editorInstance }) => syncEditorState(editorInstance),
-    onUpdate: ({ editor: editorInstance }) => syncEditorState(editorInstance, true),
+    onUpdate: ({ editor: editorInstance }) => syncEditorState(editorInstance),
     onTransaction: ({ editor: editorInstance }) => syncPageCount(editorInstance),
   });
+
+  // `useEditor`'s own React binding (`@tiptap/react`'s `EditorInstanceManager.onRender`, read
+  // directly from the installed package) does not actually apply a changed `editable` option on
+  // a later render: its own `setOptions` call there explicitly spreads
+  // `editable: this.editor.isEditable` -- the editor's own current value -- over whatever this
+  // render just passed in, so the `editable: editingAllowed` above only ever takes effect once,
+  // at construction. Before the sync gate, that never mattered: nothing in this codebase, this
+  // effect included, previously changed `editingAllowed` after the editor already existed for any
+  // real, exercised case (the "entitlement flips read-only mid-session" test asserts only the
+  // toolbar's own React-rendered `disabled` attributes, never whether the underlying
+  // `contentEditable` region itself still accepted a keystroke). `editingAllowed` beginning
+  // `false` and turning `true` moments later -- the sync gate's entire premise -- is the first
+  // case that actually depends on the live editor's editability changing after construction, and
+  // without this effect the editor stayed permanently non-editable for the rest of the session:
+  // confirmed directly, every real-editor test:system:persistence test that opens a fresh
+  // screenplay and types into it failed identically once the sync gate was added and this effect
+  // was not yet present.
+  useEffect(() => {
+    editor?.setEditable(editingAllowed);
+  }, [editor, editingAllowed]);
 
   // Recomputes `zoomPercent` (the number actually applied to `.pages`'s CSS `zoom` below) from
   // `zoomMode` and `.editor-region`'s current available area. Takes `mode` as a parameter rather
@@ -969,61 +1163,6 @@ export function App({
     return () => window.removeEventListener('keydown', handleKeydown);
   }, []);
 
-  // A pending debounced save (`scheduleSave`'s 600 ms `setTimeout`) is the last line of defence
-  // against losing an edit that never got the chance to autosave (requirement 5,
-  // progress/save-conflict-recovery.md -- the audit's "smaller sibling" finding). Three exits skip
-  // that debounce entirely: this component unmounting (in-app navigation to a different
-  // screenplay or route, via this effect's own cleanup), `visibilitychange` to `hidden` (tab
-  // switch, backgrounding), and `pagehide` (navigation away, tab close). The first two are NOT the
-  // page going away -- the app is still fully alive, mid-navigation or merely backgrounded -- so
-  // they flush with an ordinary `fetch` (`keepalive: false`), which completes normally and has no
-  // size limit. `pagehide` is the one genuine "the page may be gone before the response arrives"
-  // case, so it alone passes `keepalive: true`: `fetch`'s `keepalive` is what lets that request
-  // outlive the page, unlike a plain `fetch`, which the browser may abort mid-flight once the page
-  // is truly gone. `navigator.sendBeacon` cannot replace it there -- the save is an authenticated
-  // `PUT` with a JSON body and a content-type header, which `sendBeacon` has no way to express.
-  //
-  // The distinction matters because `keepalive: true` is capped at a 64 KB total request body by
-  // the Fetch spec, and a real screenplay routinely exceeds that (measured on this branch:
-  // canonical JSON for 500 blocks is already ~67 KB); a save over the cap throws, which
-  // `saveLatest`'s own `catch` turns into `saveState: 'failed'`, never `'saved'` -- so a `pagehide`
-  // flush can honestly fail large documents, but unmount and `visibilitychange` never pay that
-  // cap at all, which is the case that matters for every in-app exit a writer actually takes.
-  // `saveLatest` itself still refuses to run while `saveStateRef.current === 'conflict'` (see that
-  // function's own comment), so none of these three can ever resume saving into a version the
-  // server already rejected on the way out.
-  //
-  // `flushPendingSaveRef` exists only so the listeners below can be registered once, with an
-  // empty dependency array, while still invoking the *current* render's `saveLatest` closure.
-  // `saveLatest` is a plain function redefined every render, not memoized -- putting it directly
-  // in this effect's dependency array would re-attach these listeners on every render for no
-  // benefit (every code path it reaches reads current values through refs, never through this
-  // closure), and omitting it would violate `react-hooks/exhaustive-deps`. Assigning to a ref
-  // during render, rather than through a second effect, is deliberate: it needs to be current by
-  // the time this effect's listeners can fire, which a same-render `useEffect` cannot guarantee
-  // relative to another effect, and the assignment itself has no rendering side effect of its
-  // own.
-  const flushPendingSaveRef = useRef<(options: { keepalive: boolean }) => void>(() => {});
-  flushPendingSaveRef.current = ({ keepalive }) => {
-    window.clearTimeout(timer.current);
-    void saveLatest({ keepalive });
-  };
-
-  useEffect(() => {
-    const flushOrdinary = () => flushPendingSaveRef.current({ keepalive: false });
-    const flushKeepalive = () => flushPendingSaveRef.current({ keepalive: true });
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') flushOrdinary();
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('pagehide', flushKeepalive);
-    return () => {
-      flushOrdinary();
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('pagehide', flushKeepalive);
-    };
-  }, []);
-
   useEffect(() => {
     if (!editor) return;
     const currentBlock = getActiveScreenplayBlock(editor);
@@ -1046,48 +1185,6 @@ export function App({
     // suppression -- a timing guarantee this effect does not actually need to rely on.
   }, [documentSettings, editor, initial.id, initial.title, titlePageState]);
 
-  // The conflict state's rescue action (requirement 2, progress/save-conflict-recovery.md): the
-  // writer's own unsaved manuscript, as readable screenplay-formatted text, not the canonical
-  // JSON `nextProjection.screenplay` actually is -- pasting JSON into an email or a document
-  // would not read as a screenplay to anyone. `screenplayToPlainText` (`@finaler-draft/screenplay`)
-  // does that formatting; this only owns getting the result onto the clipboard and reporting
-  // whether that succeeded. `latestProjection.current` (not the `projection` state variable) is
-  // read directly for the same reason `saveLatest` reads it: it is guaranteed current the instant
-  // this runs, with no risk of a stale closure over a `projection` from an earlier render.
-  //
-  // The Clipboard API can reject -- a browser permission denial, a document that never gained
-  // focus, an insecure context -- and `navigator.clipboard` can even be entirely absent in an
-  // older or locked-down browser. Reporting only success would repeat exactly the defect this
-  // scope exists to fix: a writer trusting an action that silently did nothing. `copyStatus`
-  // drives a real, honest message either way (see the footer below); nothing here ever claims the
-  // work is safe unless the clipboard write actually resolved.
-  const copyMyVersion = async () => {
-    const current = latestProjection.current;
-    if (!current?.valid) {
-      setCopyStatus('failed');
-      return;
-    }
-    try {
-      if (!navigator.clipboard) throw new Error('Clipboard API unavailable');
-      await navigator.clipboard.writeText(screenplayToPlainText(current.screenplay));
-      setCopyStatus('copied');
-    } catch {
-      setCopyStatus('failed');
-    }
-  };
-
-  // The conflict state's clean exit (requirement 3, progress/save-conflict-recovery.md): discards
-  // this browser's unsaved copy and re-fetches the server's version. A full reload, not a
-  // targeted refetch of the `staleTime: Infinity` query in
-  // routes/projects/$projectId.screenplays.$screenplayId.tsx -- that query is deliberately
-  // "consumed once" per that route's own comment, with no invalidation path threaded down to this
-  // component, and reconstructing one just for this would add a second way to force a refetch
-  // where a full reload already does the job honestly: a real, visible navigation a writer can
-  // tell discarded something, not a quiet in-place swap.
-  const reloadFromServer = () => {
-    window.location.reload();
-  };
-
   // Title-page edits happen in separate React state, never inside the ProseMirror document (see
   // the `titlePageState` comment above), so they never fire `onUpdate`/`onTransaction` the way
   // `syncEditorState` relies on. This is the title-page equivalent, called directly from
@@ -1107,7 +1204,7 @@ export function App({
       title: initial.title,
       titlePages: [titlePageFromState(next)],
     });
-    applyProjection(nextProjection, true);
+    applyProjection(nextProjection);
   };
 
   // The document-settings dialog's own equivalent of `updateTitlePageState` above: settings
@@ -1151,7 +1248,7 @@ export function App({
       title: initial.title,
       titlePages: titlePageState ? [titlePageFromState(titlePageState)] : [],
     });
-    applyProjection(nextProjection, true);
+    applyProjection(nextProjection);
   };
 
   // "Escape to close with focus returned to the trigger" (plan.md's "Document settings" section,
@@ -1250,8 +1347,7 @@ export function App({
   // The read-only banner's "Make this one editable" button. `entitlementReadOnly.onMakeEditable`
   // is the route's own call through to `PUT /api/entitlement/editable-screenplay`
   // (api.ts's `switchEditableScreenplay`); this only owns the button's own pending/error
-  // feedback, the same division of responsibility `copyMyVersion` above has with `copyStatus`.
-  // On success there is nothing further to do here: the route re-fetches its own entitlement
+  // feedback. On success there is nothing further to do here: the route re-fetches its own entitlement
   // query and this component simply stops receiving `entitlementReadOnly` on the next render,
   // which is what actually makes the editor editable -- this function never flips `editingAllowed`
   // itself.
@@ -1302,16 +1398,34 @@ export function App({
     });
   };
 
+  // The sync gate's own banner reason, mutually exclusive with `entitlementReadOnly`'s (a
+  // screenplay already blocked by entitlement is not also shown a redundant "connecting" notice --
+  // see `editingAllowed`'s own comment on why these are additive reasons but only one banner is
+  // ever the "one thing every read-only visit must see" at a time). `initialContent !== undefined`
+  // excludes the unsupported-schema case, which never reaches `'connecting'` at all (`syncState`'s
+  // initializer and the sync-reporting effect below both key off `collab.provider`'s presence,
+  // and that case's `collab` never constructs a real provider).
+  const awaitingFirstSync =
+    initialContent !== undefined && entitlementReadOnly === undefined && syncState === 'connecting';
+  // The sync gate's other two banner reasons, same mutual-exclusion rule as `awaitingFirstSync`
+  // above (only one of `entitlementReadOnly`/`awaitingFirstSync`/`syncDenied`/`syncTimedOut` is
+  // ever true at a time, since they all key off disjoint `syncState` values or its absence).
+  const syncDenied =
+    initialContent !== undefined && entitlementReadOnly === undefined && syncState === 'denied';
+  const syncTimedOut =
+    initialContent !== undefined && entitlementReadOnly === undefined && syncState === 'timedOut';
+
   // A modifier class, not a hardcoded sixth grid row: `.application`'s `grid-template-rows`
   // (styles.css) is a fixed five-row track list, and `.readonly-banner` is an extra grid child
-  // only present when `entitlementReadOnly` is set. Without a class marking that, the banner
-  // would silently consume the toolbar's row and shove every row after it down by one --
-  // `has-readonly-banner` is what lets styles.css insert an `auto`-sized row for the banner
-  // specifically when it exists, leaving the five original rows' sizes untouched otherwise.
+  // only present when one of the four banner reasons above is true. Without a class marking that,
+  // the banner would silently consume the toolbar's row and shove every row after it down by one
+  // -- `has-readonly-banner` is what lets styles.css insert an `auto`-sized row for the banner
+  // specifically when one exists, leaving the five original rows' sizes untouched otherwise.
   const applicationClassName = [
     'application',
     dark && 'dark',
-    entitlementReadOnly && 'has-readonly-banner',
+    (entitlementReadOnly || awaitingFirstSync || syncDenied || syncTimedOut) &&
+      'has-readonly-banner',
   ]
     .filter(Boolean)
     .join(' ');
@@ -1357,7 +1471,13 @@ export function App({
               {
                 disabled: !editingAllowed,
                 disabledReason: !editingAllowed
-                  ? 'Read-only: this screenplay is not your account’s editable one'
+                  ? awaitingFirstSync
+                    ? 'Read-only: connecting to the collaboration server'
+                    : syncDenied
+                      ? 'Read-only: access to this screenplay could not be confirmed'
+                      : syncTimedOut
+                        ? 'Read-only: still trying to connect to the collaboration server'
+                        : 'Read-only: this screenplay is not your account’s editable one'
                   : undefined,
                 label: 'Document settings…',
                 onSelect: () => setSettingsDialogOpen(true),
@@ -1486,6 +1606,52 @@ export function App({
               {makeEditableError}
             </p>
           )}
+        </div>
+      )}
+      {awaitingFirstSync && (
+        // The sync gate's own banner (`editingAllowed`'s comment above): reuses the exact
+        // `entitlementReadOnly` banner's markup and class -- the lapse-chooser slice's own
+        // pattern for a legibly read-only editor, not a second one invented for this -- but never
+        // renders alongside it (`awaitingFirstSync` is already `false` whenever
+        // `entitlementReadOnly` is set). No action button: unlike a lapsed entitlement, there is
+        // nothing for the writer to do here but wait, and this resolves on its own the moment
+        // this tab's first sync completes -- `editingAllowed` flips back to `true` and this banner
+        // stops rendering, no dismissal needed. Transient by nature, so it is not given the same
+        // "persistent, not dismissible" framing as the entitlement banner's own comment: it is
+        // gone within moments on any normal connection, and reappears only if a screenplay is
+        // opened for the very first time on a slow one.
+        <div className="readonly-banner" role="status">
+          <p>
+            Connecting to the collaboration server — this screenplay will be editable once it syncs.
+          </p>
+        </div>
+      )}
+      {syncDenied && (
+        // The sync gate's *terminal* banner (`syncState`'s own comment on `'denied'`): a resolved,
+        // deliberate decision that this actor may not see this document -- wrong Origin, no
+        // session, or a role lookup that genuinely found none (`apps/collab`'s
+        // `authenticateConnection`). Never retried, so unlike `awaitingFirstSync` this does not
+        // resolve on its own; a reload is the only way out, since that is the only thing that
+        // re-checks the session/account from scratch.
+        <div className="readonly-banner" role="status">
+          <p>
+            This screenplay’s access could not be confirmed for your account. Reload the page to try
+            again.
+          </p>
+        </div>
+      )}
+      {syncTimedOut && (
+        // The backstop banner (`syncState`'s own comment on `'timedOut'`): this tab has been
+        // waiting for its first sync for longer than `SYNC_TIMEOUT_MS` with no `synced` and no
+        // `authenticationFailed` at all -- covers whatever the transient-retry loop does not
+        // itself resolve, or a failure mode neither that loop nor `authenticate.ts`'s
+        // classification anticipated. Not asserted permanent like `syncDenied`'s banner: this one
+        // still disappears on its own if a `synced` arrives late, since the underlying provider
+        // never stopped trying.
+        <div className="readonly-banner" role="status">
+          <p>
+            Still trying to connect to the collaboration server. If this continues, reload the page.
+          </p>
         </div>
       )}
       <section className="toolbar" aria-label="Screenplay tools">
@@ -1819,70 +1985,34 @@ export function App({
             ? 'Text editing is unavailable for this screenplay'
             : entitlementReadOnly
               ? 'Read-only · make this screenplay editable to save changes here'
-              : saveState === 'conflict'
-                ? // No claim of preservation: nothing preserves this browser's edits (there is no
-                  // localStorage, sessionStorage, or IndexedDB anywhere in apps/web/src -- see
-                  // audit/CONSOLIDATED.md item A2 and requirement 1 in
-                  // progress/save-conflict-recovery.md). This says only what is actually true --
-                  // something else changed this screenplay, this copy has not been saved, and
-                  // saving is paused -- and points at the two real actions below rather than an
-                  // instruction ("reload") that would destroy the very work it used to claim to
-                  // protect.
-                  'Save conflict · this screenplay changed elsewhere; this copy is unsaved and saving is paused'
-                : saveState === 'failed'
-                  ? 'Save failed · make another edit to retry'
-                  : saveState === 'saving'
-                    ? 'Saving…'
-                    : projection.valid
-                      ? `Saved · validated locally · ${wordCount} words · no print pagination`
-                      : `Draft needs attention · ${projection.issues[0] ?? 'Invalid screenplay data.'}`}
+              : syncState === 'connecting'
+                ? 'Connecting…'
+                : syncState === 'denied'
+                  ? 'Access could not be confirmed · reload to try again'
+                  : syncState === 'timedOut'
+                    ? 'Still trying to connect · reload if this continues'
+                    : syncState === 'offline'
+                      ? // Yjs keeps every local edit queued and merges it in the instant the
+                        // connection recovers -- this is a connectivity report, never a warning
+                        // that work could be lost, which is exactly what distinguishes it from
+                        // the whole-document-`PUT` save-conflict state this replaces
+                        // (progress/collaboration-slice-1.md).
+                        'Offline · reconnecting… your edits are safe and will sync automatically'
+                      : projection.valid
+                        ? `Synced · ${wordCount} words · no print pagination`
+                        : `Draft needs attention · ${projection.issues[0] ?? 'Invalid screenplay data.'}`}
         </span>
         {initialContent !== undefined && !projection.valid && (
           // Deliberately not inside `.status-center`, which the narrow-viewport media query
           // hides entirely (styles.css) -- exactly the gap requirement 2 in
           // progress/paste-sanitization.md exists to close: below that width the only place an
           // invalid projection was ever announced (the text this duplicates, a few lines up)
-          // disappeared along with everything else in `.status-center`, leaving a writer on a
-          // narrow window with no signal at all that `scheduleSave` (below) is refusing to run.
-          // Gated on `initialContent !== undefined`: the other reason `projection` can be invalid
-          // is the unrelated "this screenplay has features this editor can't open" case, which
-          // already has its own unambiguous message above and disables editing entirely, so there
-          // is no save being silently skipped there for this banner to announce.
+          // disappeared along with everything else in `.status-center`. Gated on
+          // `initialContent !== undefined`: the other reason `projection` can be invalid is the
+          // unrelated "this screenplay has features this editor can't open" case, which already
+          // has its own unambiguous message above and disables editing entirely.
           <span className="status-attention" role="alert">
-            Not saving · {projection.issues[0] ?? 'Invalid screenplay data.'}
-          </span>
-        )}
-
-        {saveState === 'conflict' && (
-          // Deliberately not inside `.status-center`, which the small-viewport media query hides
-          // entirely (styles.css) -- these are the writer's only way to rescue or leave a
-          // conflict, so they must stay reachable at every viewport width the rest of the
-          // statusbar collapses at. Copy is offered before Reload, and Reload is unambiguous
-          // about what it discards: requirement 3, progress/save-conflict-recovery.md.
-          <span className="status-conflict-actions">
-            <button
-              className="status-conflict-button"
-              onClick={() => void copyMyVersion()}
-              type="button"
-            >
-              Copy my version
-            </button>
-            <button className="status-conflict-button" onClick={reloadFromServer} type="button">
-              Reload (discards this copy)
-            </button>
-            {copyStatus === 'copied' && (
-              <span className="status-conflict-feedback" role="status">
-                Copied to clipboard.
-              </span>
-            )}
-            {copyStatus === 'failed' && (
-              <span
-                className="status-conflict-feedback status-conflict-feedback-error"
-                role="alert"
-              >
-                Copy failed · select the manuscript text and copy it manually.
-              </span>
-            )}
+            {projection.issues[0] ?? 'Invalid screenplay data.'}
           </span>
         )}
       </footer>

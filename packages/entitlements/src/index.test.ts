@@ -5,7 +5,7 @@ import {
   resolveEditableScreenplayId,
   tierForSubscriptionStatus,
   type EntitlementSnapshot,
-} from './entitlements.js';
+} from './index.js';
 
 const now = new Date('2026-09-01T12:00:00Z');
 const screenplayA = 'aaaaaaaa-0000-0000-0000-000000000001';

@@ -16,7 +16,7 @@ import {
   editorContentFromScreenplay,
   projectDocumentScreenplay,
   screenplayElementTypes,
-  screenplayExtensions,
+  createLocalScreenplayEditorInit,
   type EditorContent,
   type ScreenplayElementType,
 } from './screenplayEditor.js';
@@ -56,11 +56,11 @@ function nextId(): string {
   return `00000000-0000-4000-8000-${idCounter.toString(16).padStart(12, '0')}`;
 }
 
-/** Mounts a real Tiptap editor on a detached DOM node, matching the pattern `screenplayEditor.test.ts` uses. */
+/** Mounts a real Tiptap editor on a detached DOM node, matching the pattern `packages/screenplay-editor/src/editing.test.ts` uses. */
 function buildEditorFromContent(content: EditorContent): { editor: Editor; mount: HTMLElement } {
   const mount = document.createElement('div');
   document.body.append(mount);
-  const editor = new Editor({ content, element: mount, extensions: screenplayExtensions });
+  const editor = new Editor({ element: mount, ...createLocalScreenplayEditorInit(content) });
   return { editor, mount };
 }
 
@@ -68,8 +68,9 @@ function buildEditorFromContent(content: EditorContent): { editor: Editor; mount
  * Projects `screenplay` into the editor and back, then asserts the result equals the input
  * exactly -- the identity property this whole file exists to prove. `titlePages` and
  * `documentSettings` never pass through the ProseMirror document at all: both live outside it (see
- * `screenplayEditor.ts`'s `projectDocumentScreenplay` comment), and this helper re-supplies them
- * from `screenplay` on the way back, matching how `App.tsx`'s call sites do it. So the
+ * `packages/screenplay-editor/src/index.ts`'s `projectDocumentScreenplay` comment), and this
+ * helper re-supplies them from `screenplay` on the way back, matching how `App.tsx`'s call sites
+ * do it. So the
  * `documentSettings`/`titlePages` cases below do not prove the *editor* preserves either one --
  * neither the editor document nor `screenplayExtensions` ever holds them -- they prove
  * `editorContentFromScreenplay` passes a title page through intact, and `projectDocumentScreenplay`

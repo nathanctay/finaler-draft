@@ -1,4 +1,21 @@
-import type { SubscriptionStatus } from './stripeSubscriptions.js';
+/**
+ * Mirrors the `subscription_status` Postgres enum (`packages/database/src/schema.ts`) and
+ * `apps/api/src/stripeSubscriptions.ts`'s identically-named type -- itself a reproduction of
+ * Stripe's `Subscription.Status` union at API version 2026-07-29.dahlia. Reproduced here by hand
+ * rather than imported from `apps/api`, the same convention `packages/database/src/schema.ts`'s
+ * own comment establishes for this exact enum: this package has no dependency on Stripe's SDK or
+ * on any one application, and a status literal union is a stable external contract, not business
+ * logic that could drift out of sync by accident.
+ */
+export type SubscriptionStatus =
+  | 'incomplete'
+  | 'incomplete_expired'
+  | 'trialing'
+  | 'active'
+  | 'past_due'
+  | 'canceled'
+  | 'unpaid'
+  | 'paused';
 
 /**
  * plan.md's "The free tier" / "What happens when a subscription lapses": an account is either

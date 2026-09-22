@@ -31,19 +31,17 @@ describe('API client', () => {
       )
       .mockResolvedValueOnce(response({ id: projectId, title: 'Feature' }))
       .mockResolvedValueOnce(
-        response([{ id: screenplayId, title: 'Draft', updatedAt: '2026-01-01', version: 1 }]),
+        response([{ id: screenplayId, title: 'Draft', updatedAt: '2026-01-01' }]),
       )
-      .mockResolvedValueOnce(response({ id: screenplayId, version: 1 }))
+      .mockResolvedValueOnce(response({ id: screenplayId }))
       .mockResolvedValueOnce(
         response({
           id: screenplayId,
           projectId,
           screenplay: screenplayFixture,
           title: 'Draft',
-          version: 1,
         }),
       )
-      .mockResolvedValueOnce(response({ version: 2 }))
       .mockResolvedValueOnce(response({ id: projectId }))
       .mockResolvedValueOnce(response({ id: projectId, title: 'Feature' }))
       .mockResolvedValueOnce(response({ id: screenplayId }))
@@ -95,14 +93,10 @@ describe('API client', () => {
     await expect(api.screenplays(projectId)).resolves.toHaveLength(1);
     await expect(api.createScreenplay(projectId, 'Draft', screenplayFixture)).resolves.toEqual({
       id: screenplayId,
-      version: 1,
     });
     await expect(api.screenplay(screenplayId)).resolves.toMatchObject({
       id: screenplayId,
       projectId,
-    });
-    await expect(api.saveScreenplay(screenplayId, 1, screenplayFixture)).resolves.toEqual({
-      version: 2,
     });
     await expect(api.deleteProject(projectId)).resolves.toEqual({ id: projectId });
     await expect(api.restoreProject(projectId)).resolves.toEqual({
@@ -146,7 +140,11 @@ describe('API client', () => {
       annual: { amount: 5000, currency: 'usd', interval: 'year' },
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(21);
+    // 20, not 21: there is no longer a whole-document `PUT /api/screenplays/:id` call at all --
+    // that route, and `api.saveScreenplay`, were deleted along with the `version` column in
+    // collaboration slice 1 (see progress/collaboration-slice-1.md). Persistence for the
+    // screenplay body now happens through the Yjs collab server instead.
+    expect(fetchMock).toHaveBeenCalledTimes(20);
     expect(fetchMock.mock.calls[1]).toEqual([
       '/api/auth/sign-in/email',
       expect.objectContaining({ credentials: 'include', method: 'POST' }),
@@ -156,53 +154,49 @@ describe('API client', () => {
       expect.objectContaining({ body: expect.any(String), method: 'POST' }),
     ]);
     expect(fetchMock.mock.calls[9]).toEqual([
-      `/api/screenplays/${screenplayId}`,
-      expect.objectContaining({ method: 'PUT' }),
-    ]);
-    expect(fetchMock.mock.calls[10]).toEqual([
       `/api/projects/${projectId}`,
       expect.objectContaining({ method: 'DELETE' }),
     ]);
-    expect(fetchMock.mock.calls[11]).toEqual([
+    expect(fetchMock.mock.calls[10]).toEqual([
       `/api/projects/${projectId}/restore`,
       expect.objectContaining({ method: 'POST' }),
     ]);
-    expect(fetchMock.mock.calls[12]).toEqual([
+    expect(fetchMock.mock.calls[11]).toEqual([
       `/api/screenplays/${screenplayId}`,
       expect.objectContaining({ method: 'DELETE' }),
     ]);
-    expect(fetchMock.mock.calls[13]).toEqual([
+    expect(fetchMock.mock.calls[12]).toEqual([
       `/api/screenplays/${screenplayId}/restore`,
       expect.objectContaining({ method: 'POST' }),
     ]);
-    expect(fetchMock.mock.calls[14]).toEqual([
+    expect(fetchMock.mock.calls[13]).toEqual([
       '/api/deleted',
       expect.objectContaining({ credentials: 'include' }),
     ]);
-    expect(fetchMock.mock.calls[15]).toEqual([
+    expect(fetchMock.mock.calls[14]).toEqual([
       '/api/entitlement',
       expect.objectContaining({ credentials: 'include' }),
     ]);
-    expect(fetchMock.mock.calls[16]).toEqual([
+    expect(fetchMock.mock.calls[15]).toEqual([
       '/api/entitlement/editable-screenplay',
       expect.objectContaining({
         body: JSON.stringify({ screenplayId }),
         method: 'PUT',
       }),
     ]);
-    expect(fetchMock.mock.calls[17]).toEqual([
+    expect(fetchMock.mock.calls[16]).toEqual([
       '/api/billing/checkout-session',
       expect.objectContaining({ body: JSON.stringify({ plan: 'monthly' }), method: 'POST' }),
     ]);
-    expect(fetchMock.mock.calls[18]).toEqual([
+    expect(fetchMock.mock.calls[17]).toEqual([
       '/api/billing/portal-session',
       expect.objectContaining({ method: 'POST' }),
     ]);
-    expect(fetchMock.mock.calls[19]).toEqual([
+    expect(fetchMock.mock.calls[18]).toEqual([
       '/api/billing/subscription',
       expect.objectContaining({ credentials: 'include' }),
     ]);
-    expect(fetchMock.mock.calls[20]).toEqual([
+    expect(fetchMock.mock.calls[19]).toEqual([
       '/api/billing/plans',
       expect.objectContaining({ credentials: 'include' }),
     ]);

@@ -64,6 +64,19 @@ try {
     // This applies to the processes that run the suite, never to the build -- see
     // `buildEnvironment` below.
     NODE_ENV: 'test',
+    // `apps/collab`'s own webServer entry (`playwright.persistence.config.ts`, port 4175 --
+    // chosen to sit outside the range this file and that config already use: 4174 for the api,
+    // 4173/4322 for `test:system`'s own webServers) reads
+    // BETTER_AUTH_SECRET/BETTER_AUTH_URL/CLIENT_ORIGIN/DATABASE_URL straight off this same object
+    // -- the identical database and the identical session-verification allowlist `apps/api`'s
+    // webServer already uses, so a session cookie either service issues is valid for both.
+    //
+    // `VITE_COLLAB_WS_URL` is consumed by Vite at *build* time
+    // (`apps/web/src/collabConfig.ts`), not by either server process -- this is why it has to be
+    // set here, on the same object the `buildEnvironment` below is derived from, rather than only
+    // where the api/collab webServers read their own environment. Plain `ws://`, matching every
+    // other address in this harness: loopback-only, no TLS.
+    VITE_COLLAB_WS_URL: 'ws://127.0.0.1:4175',
   };
   /*
    * The web bundle has to be built exactly as it ships. Vite selects React's development or

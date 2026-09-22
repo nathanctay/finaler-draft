@@ -121,20 +121,22 @@ select:focus-visible,
   background: var(--surface-08);
 }
 
-/* `.readonly-banner` (App.tsx) is an extra grid child, present only for an entitlement-driven
-   read-only screenplay -- `.application`'s own five-row track list above has no row budgeted for
+/* `.readonly-banner` (App.tsx) is an extra grid child, present for an entitlement-driven
+   read-only screenplay or while this tab awaits its first collaborative sync
+   (`awaitingFirstSync`) -- `.application`'s own five-row track list above has no row budgeted for
    it. Without this modifier class, the banner would silently occupy the toolbar's 47px row,
    shoving the toolbar into the workspace's `minmax(0, 1fr)` row, the workspace into the status
    bar's 30px row, and the status bar into an implicit, unstyled row past the end of the track
    list -- the exact broken layout a real lapsed-subscription test run surfaced. `auto`, not a
    fixed pixel height, because the banner's message length (and therefore its wrapped line count)
-   varies with which entitlement state produced it -- see the two messages in
-   $projectId.screenplays.$screenplayId.tsx. Inserted between the menubar and the toolbar rows,
-   matching the banner's actual position in the DOM (App.tsx renders it directly before
-   `.toolbar`), so grid auto-placement (row tracks are consumed in document order) lines up with
-   this list without any child needing an explicit `grid-row`. The `max-width: 600px` copy of the
-   base rule below must gain the identical extra `auto` row for the same reason -- the two are
-   listed together at the top of this file's own history for exactly that kind of drift risk.
+   varies with which read-only reason produced it -- see the entitlement messages in
+   $projectId.screenplays.$screenplayId.tsx and the sync-gate message in App.tsx itself. Inserted
+   between the menubar and the toolbar rows, matching the banner's actual position in the DOM
+   (App.tsx renders it directly before `.toolbar`), so grid auto-placement (row tracks are
+   consumed in document order) lines up with this list without any child needing an explicit
+   `grid-row`. The `max-width: 600px` copy of the base rule below must gain the identical extra
+   `auto` row for the same reason -- the two are listed together at the top of this file's own
+   history for exactly that kind of drift risk.
 */
 .application.has-readonly-banner {
   grid-template-rows: 38px 31px auto 47px minmax(0, 1fr) 30px;

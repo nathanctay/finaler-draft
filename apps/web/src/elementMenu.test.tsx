@@ -4,7 +4,7 @@ import { Editor } from '@tiptap/core';
 import { TextSelection } from '@tiptap/pm/state';
 import {
   projectEditorScreenplay,
-  screenplayExtensions,
+  createLocalScreenplayEditorInit,
   type ScreenplayElementType,
 } from './screenplayEditor.js';
 import { SmartTypeGhostExtension } from './smartTypeGhost.js';
@@ -42,18 +42,19 @@ const AUTHORED = [
 function buildEditor(blocks: readonly Block[]) {
   const mount = document.createElement('div');
   document.body.append(mount);
+  const seeded = createLocalScreenplayEditorInit({
+    type: 'screenplayDocument' as const,
+    content: blocks.map((block, index) => ({
+      type: 'screenplayBlock' as const,
+      attrs: { element: block.element, id: blockId(index) },
+      ...(block.text === '' ? {} : { content: [{ type: 'text', text: block.text }] }),
+    })),
+  });
   return new Editor({
-    content: {
-      type: 'screenplayDocument' as const,
-      content: blocks.map((block, index) => ({
-        type: 'screenplayBlock' as const,
-        attrs: { element: block.element, id: blockId(index) },
-        ...(block.text === '' ? {} : { content: [{ type: 'text', text: block.text }] }),
-      })),
-    },
+    content: seeded.content,
     element: mount,
     extensions: [
-      ...screenplayExtensions,
+      ...seeded.extensions,
       SmartTypeGhostExtension,
       SmartTypeListExtension,
       ElementMenuExtension,

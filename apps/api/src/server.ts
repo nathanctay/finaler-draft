@@ -1,11 +1,11 @@
 import { findPersistenceEnvironment, parseServerEnvironment } from '@finaler-draft/server-config';
-import { createAuth } from './auth.js';
+import { createAuth } from '@finaler-draft/auth-server';
 import { buildApp } from './app.js';
 import { cachedProbe } from './cachedProbe.js';
 import { createEntitlementEnforcedProjectStore } from './entitlementProjectStore.js';
 import { createPostgresEntitlementStore } from './entitlementStore.js';
 import { loadRootEnvironment, shouldLoadRootEnvironment } from './environment.js';
-import { selectMailPort, type MailMessage } from './mail.js';
+import { selectMailPort, type MailMessage } from '@finaler-draft/auth-server/mail';
 import { createPostgresProjectStore } from './projects.js';
 import { createStripeClient } from './stripeClient.js';
 import {

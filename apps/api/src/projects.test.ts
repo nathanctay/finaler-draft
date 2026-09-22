@@ -1,11 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { minimalScreenplayFixture, screenplayFixture } from '@finaler-draft/screenplay/fixtures';
+import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import {
   ForbiddenError,
   createPostgresProjectStore,
   createScreenplayInput,
   renameInput,
-  updateScreenplayInput,
 } from './projects.js';
 
 const actorId = 'actor-1';
@@ -20,19 +19,10 @@ describe('project persistence validation', () => {
       title: 'Draft',
       screenplay: screenplayFixture,
     });
-    expect(
-      updateScreenplayInput.parse({ expectedVersion: 1, screenplay: minimalScreenplayFixture }),
-    ).toEqual({
-      expectedVersion: 1,
-      screenplay: minimalScreenplayFixture,
-    });
     expect(() =>
       createScreenplayInput.parse({ title: '', screenplay: screenplayFixture }),
     ).toThrow();
-    expect(() =>
-      updateScreenplayInput.parse({ expectedVersion: 0, screenplay: screenplayFixture }),
-    ).toThrow();
-    expect(() => updateScreenplayInput.parse({ expectedVersion: 1, screenplay: {} })).toThrow();
+    expect(() => createScreenplayInput.parse({ title: 'Draft', screenplay: {} })).toThrow();
   });
 
   it('trims rename titles and rejects blank or overlong ones', () => {
@@ -57,7 +47,6 @@ describe('PostgreSQL project store', () => {
         {
           id: screenplayId,
           title: 'Script',
-          version: 4,
           updatedAt: new Date('2026-08-06T00:00:00Z'),
         },
       ]),
@@ -67,7 +56,7 @@ describe('PostgreSQL project store', () => {
       { id: projectId, title: 'Project', updatedAt: '2026-08-06T00:00:00.000Z', role: 'owner' },
     ]);
     await expect(store.listScreenplays(actorId, projectId)).resolves.toEqual([
-      { id: screenplayId, title: 'Script', version: 4, updatedAt: '2026-08-06T00:00:00.000Z' },
+      { id: screenplayId, title: 'Script', updatedAt: '2026-08-06T00:00:00.000Z' },
     ]);
   });
 
@@ -85,7 +74,7 @@ describe('PostgreSQL project store', () => {
     const client = fakeClient([
       empty(),
       rows([{ role: 'editor' }]),
-      rows([{ id: screenplayId, version: 1 }]),
+      rows([{ id: screenplayId }]),
       empty(),
     ]);
     const store = createPostgresProjectStore(fakePool([], client));
@@ -94,7 +83,7 @@ describe('PostgreSQL project store', () => {
         title: 'Script',
         screenplay: screenplayFixture,
       }),
-    ).resolves.toEqual({ id: screenplayId, version: 1 });
+    ).resolves.toEqual({ id: screenplayId });
     const insertCall = client.query.mock.calls.find(
       ([query]) => typeof query === 'string' && query.startsWith('insert into screenplays'),
     );
@@ -121,104 +110,6 @@ describe('PostgreSQL project store', () => {
     );
     await expect(denied).rejects.toBeInstanceOf(ForbiddenError);
     expect(deniedClient.query).toHaveBeenCalledWith('rollback');
-  });
-
-  it('reports missing, forbidden, identity mismatch, stale, and successful saves without leaving transactions open', async () => {
-    const missingClient = fakeClient([empty(), empty()]);
-    await expect(
-      createPostgresProjectStore(fakePool([], missingClient)).updateScreenplay(
-        actorId,
-        screenplayId,
-        updateInput(),
-      ),
-    ).resolves.toBe('missing');
-
-    const noMemberClient = fakeClient([
-      empty(),
-      rows([{ projectId, version: 1 }]),
-      empty(),
-      empty(),
-    ]);
-    await expect(
-      createPostgresProjectStore(fakePool([], noMemberClient)).updateScreenplay(
-        actorId,
-        screenplayId,
-        updateInput(),
-      ),
-    ).resolves.toBe('missing');
-
-    const reviewerClient = fakeClient([
-      empty(),
-      rows([{ projectId, version: 1 }]),
-      rows([{ role: 'reviewer' }]),
-      empty(),
-    ]);
-    await expect(
-      createPostgresProjectStore(fakePool([], reviewerClient)).updateScreenplay(
-        actorId,
-        screenplayId,
-        updateInput(),
-      ),
-    ).resolves.toBe('forbidden');
-
-    const identityMismatchClient = fakeClient([
-      empty(),
-      rows([{ projectId, version: 1 }]),
-      rows([{ role: 'owner' }]),
-      empty(),
-    ]);
-    await expect(
-      createPostgresProjectStore(fakePool([], identityMismatchClient)).updateScreenplay(
-        actorId,
-        screenplayId,
-        {
-          expectedVersion: 1,
-          screenplay: { ...screenplayFixture, id: 'f6b92413-4aa4-413c-8d0a-dd86d09fc326' },
-        },
-      ),
-    ).resolves.toBe('invalid');
-    expect(identityMismatchClient.query).toHaveBeenCalledWith('rollback');
-
-    const staleClient = fakeClient([
-      empty(),
-      rows([{ projectId, version: 2 }]),
-      rows([{ role: 'owner' }]),
-      empty(),
-    ]);
-    await expect(
-      createPostgresProjectStore(fakePool([], staleClient)).updateScreenplay(
-        actorId,
-        screenplayId,
-        updateInput(),
-      ),
-    ).resolves.toBe('conflict');
-
-    const savedClient = fakeClient([
-      empty(),
-      rows([{ projectId, version: 1 }]),
-      rows([{ role: 'owner' }]),
-      rows([{ version: 2 }]),
-      empty(),
-      empty(),
-    ]);
-    await expect(
-      createPostgresProjectStore(fakePool([], savedClient)).updateScreenplay(
-        actorId,
-        screenplayId,
-        updateInput(),
-      ),
-    ).resolves.toEqual({ version: 2 });
-    expect(savedClient.query).toHaveBeenCalledWith('commit');
-    for (const client of [
-      missingClient,
-      noMemberClient,
-      reviewerClient,
-      identityMismatchClient,
-      staleClient,
-      savedClient,
-    ]) {
-      expect(client.release).toHaveBeenCalledOnce();
-    }
   });
 
   it('renames a project only for an owner or editor, and reports missing without leaking existence details', async () => {
@@ -522,10 +413,6 @@ describe('PostgreSQL project store', () => {
     }
   });
 });
-
-function updateInput() {
-  return { expectedVersion: 1, screenplay: { ...screenplayFixture, id: screenplayId } };
-}
 
 function rows(values: Record<string, unknown>[]) {
   return { rowCount: values.length, rows: values };

@@ -9,7 +9,7 @@ vi.mock('@finaler-draft/database', () => ({ createDatabase, schema: { marker: 's
 vi.mock('@better-auth/drizzle-adapter', () => ({ drizzleAdapter }));
 vi.mock('better-auth', () => ({ betterAuth }));
 
-const { createAuth } = await import('./auth.js');
+const { createAuth } = await import('./index.js');
 
 const environment = {
   DATABASE_URL: 'postgresql://localhost/finaler',

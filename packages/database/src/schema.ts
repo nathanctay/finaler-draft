@@ -1,7 +1,7 @@
 import {
   boolean,
+  customType,
   index,
-  integer,
   jsonb,
   pgEnum,
   pgTable,
@@ -12,6 +12,15 @@ import {
   varchar,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
+
+// `node-postgres` (the `pg` driver every app here uses) reads/writes a `bytea` column as a
+// Node `Buffer` with no configuration -- `customType` only needs to name the Postgres type
+// itself; no `toDriver`/`fromDriver` mapping is needed on top of that default behaviour.
+const bytea = customType<{ data: Buffer }>({
+  dataType() {
+    return 'bytea';
+  },
+});
 
 export const user = pgTable(
   'user',
@@ -110,15 +119,39 @@ export const screenplays = pgTable(
       .notNull()
       .references(() => projects.id, { onDelete: 'cascade' }),
     title: varchar('title', { length: 200 }).notNull(),
+    // `canonicalScreenplay`/`canonicalHash` are no longer a client-supplied write target
+    // (collaboration slice 1: apps/collab's Hocuspocus server is the only writer, on a debounced
+    // `onStoreDocument`, projecting the live Yjs document -- see `documentYjsState` below). The
+    // `version` column and the whole-document `PUT`/409-conflict machinery it protected are
+    // deleted along with it: optimistic concurrency has no meaning once there is exactly one
+    // writer of record and every editor sees the same converging Yjs state instead of racing a
+    // version number. plan.md's "Collaboration, history, and restoration" anticipates this
+    // deletion explicitly.
     canonicalScreenplay: jsonb('canonical_screenplay').notNull(),
     canonicalHash: varchar('canonical_hash', { length: 64 }).notNull(),
-    version: integer('version').default(1).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
   },
   (table) => [index('screenplays_project_id_index').on(table.projectId)],
 );
+
+// The Hocuspocus Database extension's persistence target (apps/collab): one row per screenplay,
+// holding the full merged Yjs state (`Y.encodeStateAsUpdate`) for that document's collaboration
+// session. This is slice 1's *snapshot* durability -- progress/collaboration-plan.md is explicit
+// that it is not yet the append-only `document_yjs_updates`/`document_yjs_checkpoints` log
+// plan.md's schema sketch describes for revision history; that arrives in a later slice. A
+// screenplay created before this slice has no row here until its first collaborative edit --
+// `apps/collab`'s `fetch` seeds a fresh Yjs document from the existing `canonicalScreenplay` the
+// first time a document with no row here is opened, so nothing is lost, and this table gains a
+// row from that point on.
+export const documentYjsState = pgTable('document_yjs_state', {
+  screenplayId: uuid('screenplay_id')
+    .primaryKey()
+    .references(() => screenplays.id, { onDelete: 'cascade' }),
+  state: bytea('state').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
 
 // Stripe's own Subscription.Status enum (esm/resources/Subscriptions.d.ts in the installed
 // `stripe` package, API version 2026-07-29.dahlia), reproduced here rather than imported: this

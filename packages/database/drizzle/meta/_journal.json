@@ -43,6 +43,13 @@
       "when": 1788298649958,
       "tag": "0005_whole_toxin",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788558371632,
+      "tag": "0006_remove_screenplay_version_add_document_yjs_state",
+      "breakpoints": true
     }
   ]
 }

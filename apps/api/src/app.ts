@@ -20,16 +20,15 @@ import {
   resolveEditableScreenplayId,
   tierForSubscriptionStatus,
   type EntitlementSnapshot,
-} from './entitlements.js';
+} from '@finaler-draft/entitlements';
 import type { EntitlementStore } from './entitlementStore.js';
-import type { MailMessage } from './mail.js';
+import type { MailMessage } from '@finaler-draft/auth-server/mail';
 import {
   ForbiddenError,
   type ProjectStore,
   createProjectInput,
   createScreenplayInput,
   renameInput,
-  updateScreenplayInput,
 } from './projects.js';
 import {
   createCheckoutSession,
@@ -231,18 +230,15 @@ const createProjectResponseSchema = z.object({ id: z.string(), title: z.string()
 const screenplayListItemSchema = z.object({
   id: z.string(),
   title: z.string(),
-  version: z.number(),
   updatedAt: z.string(),
 });
-const createScreenplayResponseSchema = z.object({ id: z.string(), version: z.number() });
+const createScreenplayResponseSchema = z.object({ id: z.string() });
 const screenplayResponseSchema = z.object({
   id: z.string(),
   projectId: z.string(),
   title: z.string(),
-  version: z.number(),
   screenplay: screenplaySchema,
 });
-const updateScreenplayResponseSchema = z.object({ version: z.number() });
 // Shared by both projects and screenplays: rename and restore both return the resource's
 // current id and title, and delete returns just the id it acted on. One schema per shape rather
 // than four near-identical ones, since the two resources' responses are structurally identical.
@@ -1026,37 +1022,14 @@ export async function buildApp(options: BuildAppOptions = {}) {
         return screenplay;
       },
     );
-    typedApp.put(
-      '/api/screenplays/:id',
-      {
-        schema: {
-          params: idParam,
-          body: updateScreenplayInput,
-          response: {
-            200: updateScreenplayResponseSchema,
-            400: errorResponseSchema,
-            403: errorResponseSchema,
-            404: errorResponseSchema,
-            409: errorResponseSchema,
-          },
-        },
-      },
-      async (request, reply) => {
-        const result = await options.projects!.updateScreenplay(
-          request.actorId!,
-          request.params.id,
-          request.body,
-        );
-        if (result === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
-        if (result === 'forbidden')
-          return reply.code(403).send({ error: 'Screenplay editor access required' });
-        if (result === 'invalid')
-          return reply.code(400).send({ error: 'Screenplay identity must match request path' });
-        if (result === 'conflict')
-          return reply.code(409).send({ error: 'Screenplay changed; reload before saving' });
-        return result;
-      },
-    );
+    // The whole-document `PUT /api/screenplays/:id` this route group used to expose here is
+    // deleted, along with the `version` column and 409 conflict handling it protected
+    // (collaboration slice 1: the canonical screenplay is a projection of the Yjs document
+    // `apps/collab` maintains, not a thing clients `PUT` -- see `progress/collaboration-slice-1.md`
+    // and plan.md's "Collaboration, history, and restoration", which anticipates exactly this
+    // deletion). Screenplay *content* is now written only through the Hocuspocus WebSocket
+    // connection; this REST surface still reads it (`GET` above) and still manages the
+    // library-level metadata below (rename, delete, restore).
     typedApp.patch(
       '/api/screenplays/:id',
       {

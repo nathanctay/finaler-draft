@@ -8,7 +8,7 @@ import {
 } from '@finaler-draft/layout';
 import { DEFAULT_DOCUMENT_SETTINGS, type ScreenplayBlock } from '@finaler-draft/screenplay';
 import { MARGIN_TOP_IN, PAGE_HEIGHT_IN } from '@finaler-draft/screenplay/pageFormat';
-import { screenplayExtensions } from './screenplayEditor.js';
+import { createLocalScreenplayEditorInit, type EditorContent } from './screenplayEditor.js';
 import {
   PAGE_GAP_IN,
   buildPageBreakWidget,
@@ -66,7 +66,11 @@ function speechSplitBlocks(): ScreenplayBlock[] {
   ];
 }
 
-function docContentFor(blocks: readonly ScreenplayBlock[]) {
+// This file's own fixtures (`plainTwoPageBlocks`/`speechSplitBlocks`) never produce a
+// `dual_dialogue` or `page_break` block, both of which this editor's schema cannot represent
+// (screenplay-editor's own `screenplayElementTypes`) -- the cast is a fixture-shape guarantee,
+// not a loophole around real validation, which still happens downstream in `projectDocumentScreenplay`.
+function docContentFor(blocks: readonly ScreenplayBlock[]): EditorContent {
   return {
     type: 'screenplayDocument' as const,
     content: blocks.map((block) => ({
@@ -76,16 +80,15 @@ function docContentFor(blocks: readonly ScreenplayBlock[]) {
         ? { content: [{ type: 'text', text: block.text }] }
         : {}),
     })),
-  };
+  } as EditorContent;
 }
 
 function buildDoc(blocks: readonly ScreenplayBlock[]) {
   const mount = document.createElement('div');
   document.body.append(mount);
   const editor = new Editor({
-    content: docContentFor(blocks),
     element: mount,
-    extensions: screenplayExtensions,
+    ...createLocalScreenplayEditorInit(docContentFor(blocks)),
   });
   return { doc: editor.state.doc, editor, mount };
 }

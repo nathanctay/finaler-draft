@@ -12,16 +12,16 @@ import {
   type TitlePage,
 } from '@finaler-draft/screenplay';
 import { App } from './App.js';
-import { ApiError, MessageApiError, api, type PersistedScreenplay } from './api.js';
+import { MessageApiError, type PersistedScreenplay } from './api.js';
 import { pageStackMinHeightIn } from './pagination.js';
 import {
+  createLocalScreenplayEditorInit,
   findScreenplayBlockPosition,
   getActiveScreenplayBlock,
   initialScreenplayContent,
   editorContentFromScreenplay,
   isScreenplayElementType,
   projectLocalScreenplay,
-  screenplayExtensions,
 } from './screenplayEditor.js';
 
 const firstActionId = 'ba53c2dc-10a6-46d7-a409-9aabbff7cf5d';
@@ -61,7 +61,6 @@ function persistedScreenplay(
       documentSettings,
     },
     title,
-    version: 1,
   };
 }
 
@@ -96,7 +95,6 @@ const twoCharacterPersisted: PersistedScreenplay = {
   projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
   screenplay: twoCharacterScreenplay,
   title: twoCharacterScreenplay.title,
-  version: 1,
 };
 
 // A screenplay cued entirely in lowercase/mixed case, for the case-insensitive grouping and
@@ -130,7 +128,6 @@ const mixedCaseCharacterPersisted: PersistedScreenplay = {
   projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
   screenplay: mixedCaseCharacterScreenplay,
   title: mixedCaseCharacterScreenplay.title,
-  version: 1,
 };
 
 // A variant ending in a parenthetical (rather than dialogue) authored under a lowercase cue, so
@@ -162,7 +159,6 @@ const mixedCaseParentheticalLastPersisted: PersistedScreenplay = {
   projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
   screenplay: mixedCaseParentheticalLastScreenplay,
   title: mixedCaseParentheticalLastScreenplay.title,
-  version: 1,
 };
 
 describe('local semantic screenplay editor', () => {
@@ -177,290 +173,12 @@ describe('local semantic screenplay editor', () => {
     expect(back).toHaveTextContent('Finaler Draft');
   });
 
-  it('preserves local edits and visibly locks automatic saves after a conflict', async () => {
-    const save = vi.spyOn(api, 'saveScreenplay').mockRejectedValue(new ApiError(409));
-    const user = userEvent.setup();
-    render(<App />);
-    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Active screenplay element' }),
-      'shot',
-    );
-    expect(await screen.findByText(/Save conflict/)).toBeVisible();
-    expect(save).toHaveBeenCalledOnce();
-    save.mockRestore();
-  });
-
-  it('reports a retryable non-conflict failure without discarding the editor, and a further edit retries it', async () => {
-    // Unlike a 409 conflict (the sibling test above), a non-conflict failure -- a network error,
-    // a 500 -- does not lock the editor: `App.tsx`'s `scheduleSave` clears `saveState === 'failed'`
-    // the moment a genuinely new edit arrives and retries. `ApiError(500)` on the first call
-    // reproduces that failure; the second call resolving proves the retry itself, not just that
-    // the failure text appeared.
-    const save = vi
-      .spyOn(api, 'saveScreenplay')
-      .mockRejectedValueOnce(new ApiError(500))
-      .mockResolvedValueOnce({ version: 2 });
-    const user = userEvent.setup();
-    render(<App />);
-    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Active screenplay element' }),
-      'action',
-    );
-    expect(await screen.findByText('Save failed · make another edit to retry')).toBeVisible();
-    expect(save).toHaveBeenCalledOnce();
-
-    // `scheduleSave` clears `failed` back to `saved` synchronously the moment this edit lands,
-    // ahead of its own 600 ms debounce -- so asserting on the "Saved" text alone would pass on
-    // that transient state without the retry's save round trip ever completing. Waiting for the
-    // second `saveScreenplay` call is what actually proves the retry happened.
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Active screenplay element' }),
-      'shot',
-    );
-    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText(/^Saved · validated locally/)).toBeVisible();
-    save.mockRestore();
-  });
-
-  it('tells the writer the truth in a conflict, with no claim that anything is preserved, and offers both rescue actions', async () => {
-    // The regression this guards against is specific: `audit/CONSOLIDATED.md` item A2 found the
-    // old copy said "your local edits are preserved" while `grep -rn
-    // "localStorage\|sessionStorage\|indexedDB"` over apps/web/src returns nothing -- a false
-    // claim that would send a writer away from the one place their unsaved edits still exist.
-    // Asserting the real rendered text (not a constant this test also imports) is what
-    // progress/save-conflict-recovery.md's verification section calls out as the test most likely
-    // to pass vacuously if written the other way.
-    const save = vi.spyOn(api, 'saveScreenplay').mockRejectedValue(new ApiError(409));
-    const user = userEvent.setup();
-    render(<App />);
-    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Active screenplay element' }),
-      'shot',
-    );
-    const status = await screen.findByText(/Save conflict/);
-    expect(status).toHaveTextContent(
-      'Save conflict · this screenplay changed elsewhere; this copy is unsaved and saving is paused',
-    );
-    expect(status.textContent ?? '').not.toMatch(/preserved/i);
-    expect(screen.getByRole('button', { name: 'Copy my version' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Reload (discards this copy)' })).toBeVisible();
-    save.mockRestore();
-  });
-
-  it('"Copy my version" puts the unsaved manuscript on the clipboard as readable screenplay text, not canonical JSON', async () => {
-    const save = vi.spyOn(api, 'saveScreenplay').mockRejectedValue(new ApiError(409));
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    const user = userEvent.setup();
-    // `userEvent.setup()` installs its own `navigator.clipboard` stub (an in-memory
-    // `items`-backed clipboard, for its own copy/paste helpers) -- defining the mock after setup,
-    // not before, is what makes it the one the component actually sees.
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
-    render(<App />);
-    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Active screenplay element' }),
-      'shot',
-    );
-    await screen.findByText(/Save conflict/);
-    await user.click(screen.getByRole('button', { name: 'Copy my version' }));
-
-    await waitFor(() => expect(writeText).toHaveBeenCalledOnce());
-    const copiedText: unknown = writeText.mock.calls[0]?.[0];
-    expect(typeof copiedText).toBe('string');
-    // Not canonical JSON: JSON.parse would succeed on `JSON.stringify(screenplay)`, which is
-    // exactly what this button used to have no alternative to producing.
-    expect(() => JSON.parse(copiedText as string)).toThrow();
-    expect(copiedText).not.toContain('"blocks"');
-    expect(copiedText).toContain('The Long Way Home');
-    expect(copiedText).toContain('MARA');
-    expect(copiedText).toContain('If the ending is true, it has to earn its way there.');
-    expect(await screen.findByText('Copied to clipboard.')).toBeVisible();
-
-    save.mockRestore();
-    Reflect.deleteProperty(navigator, 'clipboard');
-  });
-
-  it('reports a Clipboard API rejection honestly instead of silently doing nothing', async () => {
-    const save = vi.spyOn(api, 'saveScreenplay').mockRejectedValue(new ApiError(409));
-    const writeText = vi.fn().mockRejectedValue(new Error('denied'));
-    const user = userEvent.setup();
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
-    render(<App />);
-    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Active screenplay element' }),
-      'shot',
-    );
-    await screen.findByText(/Save conflict/);
-    await user.click(screen.getByRole('button', { name: 'Copy my version' }));
-
-    expect(
-      await screen.findByText('Copy failed · select the manuscript text and copy it manually.'),
-    ).toBeVisible();
-    expect(screen.queryByText('Copied to clipboard.')).not.toBeInTheDocument();
-
-    save.mockRestore();
-    Reflect.deleteProperty(navigator, 'clipboard');
-  });
-
-  it('"Reload (discards this copy)" discards the local copy and reloads from the server', async () => {
-    const save = vi.spyOn(api, 'saveScreenplay').mockRejectedValue(new ApiError(409));
-    const reload = vi.fn();
-    const originalLocation = window.location;
-    Object.defineProperty(window, 'location', { configurable: true, value: { reload } });
-    const user = userEvent.setup();
-    render(<App />);
-    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Active screenplay element' }),
-      'shot',
-    );
-    await screen.findByText(/Save conflict/);
-    await user.click(screen.getByRole('button', { name: 'Reload (discards this copy)' }));
-
-    expect(reload).toHaveBeenCalledOnce();
-
-    Object.defineProperty(window, 'location', { configurable: true, value: originalLocation });
-    save.mockRestore();
-  });
-
-  it('flushes a pending debounced save when the page is hidden, without keepalive since the app is not going away', async () => {
-    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
-    const user = userEvent.setup();
-    render(<App />);
-    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Active screenplay element' }),
-      'action',
-    );
-    expect(save).not.toHaveBeenCalled();
-
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
-    fireEvent(document, new Event('visibilitychange'));
-
-    // Deliberately not awaited or wrapped in `waitFor`: `saveLatest` runs synchronously up to its
-    // first `await`, so if the flush fired at all, `saveScreenplay` has already been called by
-    // the time `dispatchEvent` returns -- no window in which the ordinary 600 ms debounce could
-    // have coincidentally elapsed and produced a false pass. This is the failure mode
-    // progress/save-conflict-recovery.md's verification section names directly: "make sure the
-    // assertion would fail if the flush never fired, rather than passing because the debounce had
-    // already elapsed."
-    //
-    // `keepalive: false` here is deliberate, not an oversight: the page is only backgrounded, not
-    // going away, so an ordinary `fetch` is correct -- and unlike `pagehide` below, it carries no
-    // 64 KB request-body cap, which matters because a real screenplay routinely exceeds it (see
-    // the flush effect's own comment in App.tsx).
-    expect(save).toHaveBeenCalledOnce();
-    expect(save.mock.calls[0]?.[3]).toEqual({ keepalive: false });
-
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
-    save.mockRestore();
-  });
-
-  it('flushes a pending debounced save on pagehide too, with keepalive since that exit may be a real page teardown', async () => {
-    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
-    const user = userEvent.setup();
-    render(<App />);
-    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Active screenplay element' }),
-      'action',
-    );
-    expect(save).not.toHaveBeenCalled();
-
-    fireEvent(window, new Event('pagehide'));
-
-    expect(save).toHaveBeenCalledOnce();
-    expect(save.mock.calls[0]?.[3]).toEqual({ keepalive: true });
-    save.mockRestore();
-  });
-
-  it('still flushes a pending save on unmount for a document well over the 64 KB keepalive cap, because unmount does not use keepalive', async () => {
-    // `keepalive: true` requests are capped at a 64 KB total body by the Fetch spec, and a real
-    // screenplay routinely exceeds it -- measured on this branch, 500 blocks of canonical JSON is
-    // already ~67 KB. The other flush tests above use the tiny default fixture and so could not
-    // catch a regression that put `keepalive: true` back on the unmount/`visibilitychange` path
-    // (both are in-app, not a page teardown, and must not pay that cap): with a small document
-    // they would still "work" even over-cap, since 64 KB was never approached. This constructs a
-    // screenplay comfortably over the cap and asserts the unmount flush both carries the whole
-    // oversized payload and does so with `keepalive: false`.
-    const bigBlocks: ScreenplayBlock[] = Array.from({ length: 60 }, () => ({
-      id: crypto.randomUUID(),
-      text: 'x'.repeat(1200),
-      type: 'action' as const,
-    }));
-    const bigScreenplay: Screenplay = {
-      annotations: [],
-      blocks: [
-        { id: crypto.randomUUID(), text: 'INT. WAREHOUSE - NIGHT', type: 'scene_heading' },
-        ...bigBlocks,
-      ],
-      documentSettings: DEFAULT_DOCUMENT_SETTINGS,
-      id: crypto.randomUUID(),
-      schemaVersion: 1,
-      title: 'Big screenplay',
-      titlePages: [],
-    };
-    expect(JSON.stringify(bigScreenplay).length).toBeGreaterThan(65_536);
-    const bigInitial: PersistedScreenplay = {
-      id: bigScreenplay.id,
-      projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
-      screenplay: bigScreenplay,
-      title: bigScreenplay.title,
-      version: 1,
-    };
-    const second = persistedScreenplay(
-      '8c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
-      'Second screenplay',
-      'Second route content.',
-    );
-    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
-    const user = userEvent.setup();
-    const { rerender } = render(<App initial={bigInitial} key={bigInitial.id} />);
-    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
-    await user.click(screen.getByRole('button', { name: /1\. INT\. WAREHOUSE/i }));
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Active screenplay element' }),
-      'shot',
-    );
-    rerender(<App initial={second} key={second.id} />);
-    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
-
-    expect(save).toHaveBeenCalledOnce();
-    const [, , flushedScreenplay, flushedOptions] = save.mock.calls[0] ?? [];
-    expect(JSON.stringify(flushedScreenplay).length).toBeGreaterThan(65_536);
-    expect(flushedOptions).toEqual({ keepalive: false });
-
-    save.mockRestore();
-  });
-
-  it("never flushes on hide while a save conflict is in effect, matching the debounced path's own rule", async () => {
-    const save = vi.spyOn(api, 'saveScreenplay').mockRejectedValueOnce(new ApiError(409));
-    const user = userEvent.setup();
-    render(<App />);
-    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Active screenplay element' }),
-      'shot',
-    );
-    await screen.findByText(/Save conflict/);
-    expect(save).toHaveBeenCalledOnce();
-    save.mockClear();
-
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
-    fireEvent(document, new Event('visibilitychange'));
-
-    // The local edit is still genuinely different from `savedWire.current` (the 409 never
-    // succeeded), so absent the conflict guard this would fire a real second call -- silently
-    // resuming a save the server already rejected, requirement 4's own hazard.
-    expect(save).not.toHaveBeenCalled();
-
-    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
-    save.mockRestore();
-  });
+  // The old whole-document PUT this block tested -- save-conflict UI, retry-after-failure,
+  // clipboard/reload rescue actions, and the pagehide/visibilitychange/unmount debounced-flush
+  // effect -- was deleted along with `api.saveScreenplay` and the `version` column in
+  // collaboration slice 1 (see progress/collaboration-slice-1.md). Yjs persistence through the
+  // collab server, and the write-rejection boundary that replaces the old conflict response, are
+  // covered end-to-end in apps/collab/src/collaboration.integration.test.ts instead.
 
   it('renders unsupported persisted snapshots as read-only', async () => {
     render(
@@ -470,7 +188,6 @@ describe('local semantic screenplay editor', () => {
           projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
           screenplay: screenplayFixture,
           title: screenplayFixture.title,
-          version: 1,
         }}
       />,
     );
@@ -487,7 +204,14 @@ describe('local semantic screenplay editor', () => {
     expect(screen.queryByText('INT. APARTMENT - MORNING')).not.toBeInTheDocument();
   });
 
-  it('discards the prior editor instance when a route opens a different screenplay, after flushing its pending save', async () => {
+  it('discards the prior editor instance when a route opens a different screenplay', async () => {
+    // The old second half of this test asserted that unmounting the first instance flushed its
+    // pending debounced `saveScreenplay` call -- that whole mechanism (debounce, flush-on-unmount,
+    // `expectedVersion`) was deleted in collaboration slice 1; persistence is now the collab
+    // server's job, proven end-to-end in apps/collab/src/collaboration.integration.test.ts. What
+    // remains genuinely under test here, and still real: switching the `initial` prop to a
+    // different screenplay must tear down the first editor/Yjs doc and mount a fresh one bound to
+    // the new document, not keep showing stale content.
     const first = persistedScreenplay(
       '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
       'First screenplay',
@@ -498,7 +222,6 @@ describe('local semantic screenplay editor', () => {
       'Second screenplay',
       'Second route content.',
     );
-    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
     const user = userEvent.setup();
     const { rerender } = render(<App initial={first} key={first.id} />);
     await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
@@ -512,29 +235,6 @@ describe('local semantic screenplay editor', () => {
     const secondCanvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
     expect(secondCanvas).toHaveTextContent('Second route content.');
     expect(secondCanvas).not.toHaveTextContent('First route content.');
-
-    // Requirement 5, progress/save-conflict-recovery.md -- the audit's "smaller sibling" finding
-    // in audit/CONSOLIDATED.md item A2: unmounting with a pending debounced save now flushes it
-    // rather than silently dropping the edit, the way this test used to assert (waiting past the
-    // 600 ms debounce to prove nothing happened). The flush fires synchronously on unmount, for
-    // the discarded first instance only -- its id, its edited block, `keepalive: false` (unmount
-    // is in-app navigation, not the page going away, so it deliberately does not pay the 64 KB
-    // keepalive cap -- see the flush effect's own comment in App.tsx) -- and must never touch or
-    // be attributed to the second, still-mounted instance.
-    expect(save).toHaveBeenCalledOnce();
-    const [flushedId, flushedExpectedVersion, flushedScreenplay, flushedOptions] =
-      save.mock.calls[0] ?? [];
-    expect(flushedId).toBe(first.id);
-    expect(flushedExpectedVersion).toBe(1);
-    expect(flushedScreenplay).toMatchObject({ blocks: [{ type: 'action' }] });
-    expect(flushedOptions).toEqual({ keepalive: false });
-
-    // The old native `setTimeout` the flush pre-empted must actually be cancelled, not merely
-    // outrun -- otherwise it would still fire a second, duplicate save once its own 600 ms
-    // elapsed.
-    await new Promise((resolve) => window.setTimeout(resolve, 700));
-    expect(save).toHaveBeenCalledOnce();
-    save.mockRestore();
   });
 
   it("applies a loaded screenplay's own document settings to the rendered page geometry, not just the specification's defaults", async () => {
@@ -597,7 +297,7 @@ describe('local semantic screenplay editor', () => {
     const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
     expect(screen.getByText('1. INT. APARTMENT - MORNING')).toBeVisible();
     expect(screen.getByText('2. EXT. UNION STATION - CONTINUOUS')).toBeVisible();
-    expect(screen.getByText(/validated locally/i)).toBeVisible();
+    expect(screen.getByText(/^Synced/)).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: /2\. EXT\. UNION STATION/i }));
     expect(screen.getByLabelText('Active scene')).toHaveTextContent(
@@ -902,7 +602,7 @@ describe('local semantic screenplay editor', () => {
     expect(within(screen.getByLabelText('Inspector')).getByText('Shot')).toBeVisible();
     expect(screen.queryByRole('button', { name: /1\. INT\. APARTMENT/i })).not.toBeInTheDocument();
     expect(screen.getByText('1 scenes · local draft')).toBeVisible();
-    expect(screen.getByText(/validated locally/i)).toBeVisible();
+    expect(screen.getByText(/^Synced/)).toBeVisible();
   });
 
   it('uses selector conversion with local-only undo and redo', async () => {
@@ -930,9 +630,8 @@ describe('local semantic screenplay editor', () => {
     const mount = document.createElement('div');
     document.body.append(mount);
     const editor = new Editor({
-      content: initialScreenplayContent,
       element: mount,
-      extensions: screenplayExtensions,
+      ...createLocalScreenplayEditorInit(initialScreenplayContent),
     });
     const actionPosition = findScreenplayBlockPosition(editor, firstActionId);
     if (actionPosition === undefined) {
@@ -962,8 +661,9 @@ describe('local semantic screenplay editor', () => {
 
     // At the END of the cue, which is what makes this Enter a transition to the next element
     // rather than a split of this one. Enter inside a block keeps the element on both halves (see
-    // screenplayEditor.test.ts), so a caret one character in would leave a second character block
-    // here and prove nothing about the character-to-dialogue transition this assertion is for.
+    // packages/screenplay-editor/src/editing.test.ts), so a caret one character in would leave a
+    // second character block here and prove nothing about the character-to-dialogue transition
+    // this assertion is for.
     const cueBlock = editor.state.doc.child(2);
     editor.view.dispatch(
       editor.state.tr.setSelection(
@@ -985,9 +685,8 @@ describe('local semantic screenplay editor', () => {
     const mount = document.createElement('div');
     document.body.append(mount);
     const editor = new Editor({
-      content: initialScreenplayContent,
       element: mount,
-      extensions: screenplayExtensions,
+      ...createLocalScreenplayEditorInit(initialScreenplayContent),
     });
     const actionPosition = findScreenplayBlockPosition(editor, firstActionId);
     if (actionPosition === undefined) {
@@ -1010,9 +709,8 @@ describe('local semantic screenplay editor', () => {
     const mount = document.createElement('div');
     document.body.append(mount);
     const editor = new Editor({
-      content: initialScreenplayContent,
       element: mount,
-      extensions: screenplayExtensions,
+      ...createLocalScreenplayEditorInit(initialScreenplayContent),
     });
     const transitionPosition = findScreenplayBlockPosition(editor, transitionId);
     if (transitionPosition === undefined) {
@@ -1042,9 +740,8 @@ describe('local semantic screenplay editor', () => {
     const mount = document.createElement('div');
     document.body.append(mount);
     const editor = new Editor({
-      content: { content: [], type: 'screenplayDocument' },
       element: mount,
-      extensions: screenplayExtensions,
+      ...createLocalScreenplayEditorInit({ content: [], type: 'screenplayDocument' }),
     });
 
     const emptyProjection = projectLocalScreenplay(editor);
@@ -1065,9 +762,8 @@ describe('local semantic screenplay editor', () => {
     const mount = document.createElement('div');
     document.body.append(mount);
     const editor = new Editor({
-      content: initialScreenplayContent,
       element: mount,
-      extensions: screenplayExtensions,
+      ...createLocalScreenplayEditorInit(initialScreenplayContent),
     });
     const actionPosition = findScreenplayBlockPosition(editor, firstActionId);
     if (actionPosition === undefined) {
@@ -1257,7 +953,6 @@ describe('local semantic screenplay editor', () => {
           projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
           screenplay,
           title: screenplay.title,
-          version: 1,
         }}
       />,
     );
@@ -2005,62 +1700,13 @@ describe('title page editing', () => {
     expect(screen.getByRole('button', { name: 'Add contact line' })).toBeVisible();
   });
 
-  it('autosaves a title-page edit, preserving the rest of the title page exactly', async () => {
-    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
-    const initial = screenplayWithTitlePages([
-      {
-        id: titlePageId,
-        title: 'Custom Title',
-        authors: ['Morgan Vale'],
-        credit: 'written by',
-        source: 'a short story by Iris Kwan',
-        draftDate: 'August 2026',
-        contact: ['morgan@example.test'],
-      },
-    ]);
-    render(<App initial={initial} />);
-    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
-
-    // Every field is present before the edit, including the two the default-creation path never
-    // sets (source, draftDate) -- proving this is real editing support for the whole schema, not
-    // merely for the four fields plan.md's default lists.
-    expect(screen.getByRole('textbox', { name: 'Title page: based on' })).toHaveTextContent(
-      'a short story by Iris Kwan',
-    );
-    expect(screen.getByRole('textbox', { name: 'Title page: draft date' })).toHaveTextContent(
-      'August 2026',
-    );
-
-    const draftDateField = screen.getByRole('textbox', { name: 'Title page: draft date' });
-    draftDateField.textContent = 'September 2026';
-    fireEvent.input(draftDateField);
-
-    await waitFor(() => expect(save).toHaveBeenCalled());
-    const savedScreenplay = save.mock.calls.at(-1)?.[2] as Screenplay;
-    expect(savedScreenplay.titlePages).toEqual([
-      {
-        id: titlePageId,
-        title: 'Custom Title',
-        authors: ['Morgan Vale'],
-        credit: 'written by',
-        source: 'a short story by Iris Kwan',
-        draftDate: 'September 2026',
-        contact: ['morgan@example.test'],
-      },
-    ]);
-    save.mockRestore();
-  });
-
-  it('does not autosave a freshly loaded title page before any edit', async () => {
-    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
-    const initial = screenplayWithTitlePages([createDefaultTitlePage(titlePageId, 'Custom Title')]);
-    render(<App initial={initial} />);
-    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
-
-    await new Promise((resolve) => window.setTimeout(resolve, 700));
-    expect(save).not.toHaveBeenCalled();
-    save.mockRestore();
-  });
+  // The two autosave tests that used to live here ("autosaves a title-page edit, preserving the
+  // rest of the title page exactly" and "does not autosave a freshly loaded title page before any
+  // edit") tested `api.saveScreenplay`, which collaboration slice 1 deleted along with the whole
+  // REST PUT/version mechanism. Title-page and document-settings edits are NOT yet wired through
+  // Yjs -- they remain local React state only for this slice, a known, deliberate gap called out
+  // in progress/collaboration-slice-1.md, not something silently dropped here. There is currently
+  // no persistence mechanism for either to test.
 
   it('still treats a screenplay with more than one title page as unsupported and read-only', async () => {
     const initial = screenplayWithTitlePages([
@@ -2080,7 +1726,8 @@ describe('title page editing', () => {
 
 /**
  * Requirement 2, `progress/paste-sanitization.md`: an invalid projection can never again be
- * silent. `ScreenplayPasteSanitizer` (screenplayEditor.ts) closes the paste route these tests
+ * silent. `ScreenplayPasteSanitizer` (`packages/screenplay-editor/src/index.ts`) closes the paste
+ * route these tests
  * used to reproduce this through, so this file's other invalid-projection test (`'surfaces
  * unsupported and schema-invalid projections without dropping their nodes'`, above) reaches
  * `projectLocalScreenplay` directly with a hand-built fake editor for exactly that reason -- there
@@ -2112,7 +1759,6 @@ describe('an invalid projection is never silent', () => {
         documentSettings: DEFAULT_DOCUMENT_SETTINGS,
       },
       title,
-      version: 1,
     };
   }
 
@@ -2124,7 +1770,7 @@ describe('an invalid projection is never silent', () => {
     );
 
     const banner = await screen.findByText(
-      `Not saving · Stable id ${sharedBlockId} must be globally unique within a screenplay.`,
+      `Stable id ${sharedBlockId} must be globally unique within a screenplay.`,
     );
     expect(banner).toBeVisible();
     expect(banner).toHaveAttribute('role', 'alert');
@@ -2138,7 +1784,7 @@ describe('an invalid projection is never silent', () => {
       />,
     );
 
-    await screen.findByText(/Not saving/);
+    await screen.findByText(/Draft needs attention/);
     expect(container.querySelector('.save-dot')).toHaveClass('attention');
   });
 
@@ -2149,7 +1795,7 @@ describe('an invalid projection is never silent', () => {
         initial={duplicateIdScreenplay('9c7c5f7b-c2f0-47a0-a639-dfd0c5702b92', 'Broken Draft')}
       />,
     );
-    await screen.findByText(/Not saving/);
+    await screen.findByText(/Draft needs attention/);
 
     await user.click(screen.getByRole('button', { name: 'File menu' }));
     const fdxItem = screen.getByRole('menuitem', { name: 'Download FDX…' });
@@ -2176,18 +1822,18 @@ describe('an invalid projection is never silent', () => {
     vi.unstubAllGlobals();
   });
 
-  it('never attempts a save while the projection is invalid', async () => {
-    const save = vi.spyOn(api, 'saveScreenplay');
+  it('reports an invalid projection as needing attention, not as synced', async () => {
+    // There is no longer a save call to assert never fired -- Yjs persistence happens
+    // server-side regardless of whether the canonical projection is valid (see
+    // progress/collaboration-slice-1.md); what this editor can still promise locally is that it
+    // never claims a broken document is "Synced".
     render(
       <App
         initial={duplicateIdScreenplay('9c7c5f7b-c2f0-47a0-a639-dfd0c5702b93', 'Broken Draft')}
       />,
     );
-    await screen.findByText(/Not saving/);
-
-    await new Promise((resolve) => window.setTimeout(resolve, 700));
-    expect(save).not.toHaveBeenCalled();
-    save.mockRestore();
+    expect(await screen.findByText(/Draft needs attention/)).toBeVisible();
+    expect(screen.queryByText(/^Synced/)).not.toBeInTheDocument();
   });
 });
 
@@ -2457,93 +2103,16 @@ describe('document settings', () => {
    * settings at all, must still save those same non-default settings back -- not the
    * specification's defaults.
    */
-  it('a loaded screenplay keeps its own non-default settings through an unrelated autosave, not the schema defaults', async () => {
-    const custom = persistedScreenplay(
-      '4c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
-      'Custom settings',
-      'INT. WORKSHOP - NIGHT',
-      {
-        characterIndentIn: 4.1,
-        parentheticalIndentIn: 3.6,
-        parentheticalWidthIn: 1.8,
-        pageNumberStyle: 'roman',
-        sceneNumbersEnabled: true,
-        autoMoreContinued: false,
-      },
-    );
-    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
-    const user = userEvent.setup();
-    render(<App initial={custom} />);
-    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
-
-    // An edit that has nothing to do with document settings: converting the loaded scene heading
-    // to a shot.
-    await user.click(screen.getByRole('button', { name: /1\. INT\. WORKSHOP/i }));
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Active screenplay element' }),
-      'shot',
-    );
-
-    await waitFor(() => expect(save).toHaveBeenCalled());
-    const savedScreenplay = save.mock.calls.at(-1)?.[2] as Screenplay;
-    expect(savedScreenplay.documentSettings).toEqual({
-      characterIndentIn: 4.1,
-      parentheticalIndentIn: 3.6,
-      parentheticalWidthIn: 1.8,
-      pageNumberStyle: 'roman',
-      sceneNumbersEnabled: true,
-      autoMoreContinued: false,
-    });
-    save.mockRestore();
-  });
-
-  /**
-   * plan.md: scene numbers are "display only," rendered as decorations, never written into the
-   * document. This is the guarantee that makes that true from the writer's side of the autosave
-   * path, not just inside the pagination plugin -- the setting most likely to pass vacuously per
-   * this scope's own verification note, since nothing else in this suite saves a screenplay with
-   * the setting on and inspects what actually got sent.
-   */
-  it('toggling scene numbers on changes only documentSettings.sceneNumbersEnabled, leaving every block byte-identical', async () => {
-    const twoSceneBlocks: ScreenplayBlock[] = [
-      {
-        id: '00000000-0000-4000-8000-000000000201',
-        type: 'scene_heading',
-        text: 'INT. APARTMENT - MORNING',
-      },
-      {
-        id: '00000000-0000-4000-8000-000000000202',
-        type: 'action',
-        text: 'MARA studies the last page of a script.',
-      },
-      {
-        id: '00000000-0000-4000-8000-000000000203',
-        type: 'scene_heading',
-        text: 'EXT. STREET - DAY',
-      },
-    ];
-    const base = persistedScreenplay(
-      '5c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
-      'Two scenes',
-      'unused',
-    );
-    const initial = { ...base, screenplay: { ...base.screenplay, blocks: twoSceneBlocks } };
-    const save = vi.spyOn(api, 'saveScreenplay').mockResolvedValue({ version: 2 });
-    const user = userEvent.setup();
-    render(<App initial={initial} />);
-    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
-
-    const dialog = await openDialog(user);
-    await user.click(within(dialog).getByRole('checkbox', { name: 'Number scenes' }));
-
-    await waitFor(() => expect(save).toHaveBeenCalled());
-    const savedScreenplay = save.mock.calls.at(-1)?.[2] as Screenplay;
-    expect(savedScreenplay.documentSettings.sceneNumbersEnabled).toBe(true);
-    // `toEqual` is exact structural equality: a `sceneNumber` key silently written onto either
-    // scene_heading block here would fail this, not just a changed value on an existing key.
-    expect(savedScreenplay.blocks).toEqual(twoSceneBlocks);
-    save.mockRestore();
-  });
+  // Two tests used to live here, both verified through the now-deleted `api.saveScreenplay` payload:
+  // "a loaded screenplay keeps its own non-default settings through an unrelated autosave, not the
+  // schema defaults" (documentSettings state is independent of editor content edits, so an
+  // unrelated edit must not reset it to schema defaults) and "toggling scene numbers on changes
+  // only documentSettings.sceneNumbersEnabled, leaving every block byte-identical" (plan.md: scene
+  // numbers are display-only decorations, never written into a block). Both properties are still
+  // real -- `documentSettings` is still separate `useState` in App.tsx or actual scene-number
+  // rendering already covered by pagination.test.ts -- but with no save call left to inspect the
+  // outgoing payload, proving them now needs new test-only instrumentation this slice does not add.
+  // Flagged as a known gap in progress/collaboration-slice-1.md rather than silently dropped.
 
   /**
    * The architectural property `PaginationExtension`'s plugin-state redesign exists to protect:
