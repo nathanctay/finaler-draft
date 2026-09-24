@@ -9,6 +9,11 @@ import {
 import { authenticateConnection, TransientAuthenticationError } from './authenticate.js';
 import { createFetch, createStore } from './database.js';
 import { unreachableMailPort } from './mailStub.js';
+import {
+  resolvePresenceIdentity,
+  sanitizeAwarenessStates,
+  type ServerPresenceIdentity,
+} from './presence.js';
 
 try {
   if (shouldLoadRootEnvironment(process.env)) {
@@ -71,7 +76,13 @@ try {
         // `authenticate.integration.test.ts`'s "a reviewer's own edit never reaches..." test,
         // which fails if this line is removed.
         data.connectionConfig.readOnly = readOnly;
-        return { actorId };
+        // Resolved once per connection, not per awareness update (which can fire as often as
+        // every caret move): cached here on the connection's own `context`, which every later
+        // hook for this connection -- `beforeHandleAwareness` below included -- receives back
+        // unchanged. See `presence.ts`'s own comment on why the server, not the client, is
+        // authoritative for a connection's displayed name and colour.
+        const presence = await resolvePresenceIdentity(pool, actorId);
+        return { actorId, presence };
       } catch (error) {
         // Previously silent: Hocuspocus reports only "permission-denied" (or, for a transient
         // failure, the same message tagged with `TransientAuthenticationError`'s own `reason`)
@@ -106,6 +117,22 @@ try {
         );
         throw error;
       }
+    },
+    // Presence: the awareness-protocol half of this slice (plan.md's "Cursors and presence are
+    // transient and never belong in history" -- see `presence.ts`'s own comment for the full
+    // design). Runs *before* Hocuspocus applies an inbound awareness update to the document's
+    // shared `Awareness` state and relays it on to every other connected client, so mutating
+    // `states` here is what every other browser actually receives -- never merely advisory.
+    // `context` is `undefined` for a server-internal awareness write (`DirectConnection`, per the
+    // installed types' own comment); this application never makes one, but the guard keeps this
+    // hook a no-op rather than a crash if that ever changes.
+    async beforeHandleAwareness({ states, context }) {
+      const presence = (context as { presence?: ServerPresenceIdentity } | undefined)?.presence;
+      if (!presence) {
+        states.clear();
+        return;
+      }
+      sanitizeAwarenessStates(states, presence);
     },
     // Closes this process's *own* database pool -- the one `getActorId`/`authenticateConnection`
     // and the `Database` extension's `fetch`/`store` all share, built by `createAuth` above, and

@@ -18,6 +18,11 @@ import { TRANSIENT_SYNC_AUTH_FAILURE_REASON } from '@finaler-draft/config';
 import { authenticateConnection } from './authenticate.js';
 import { createFetch, createStore } from './database.js';
 import {
+  resolvePresenceIdentity,
+  sanitizeAwarenessStates,
+  type ServerPresenceIdentity,
+} from './presence.js';
+import {
   createIntegrationDatabase,
   createIntegrationPool,
   dropIntegrationTestDatabase,
@@ -86,7 +91,20 @@ async function startServer(
         { documentName: data.documentName, requestHeaders: data.requestHeaders },
       );
       data.connectionConfig.readOnly = readOnly;
-      return { actorId };
+      const presence = await resolvePresenceIdentity(pool!, actorId);
+      return { actorId, presence };
+    },
+    // Mirrors `server.ts`'s own `beforeHandleAwareness` -- this harness rebuilds the server's
+    // hook wiring rather than importing `server.ts` (a self-executing entrypoint, not an exported
+    // config), so it has to be kept in step by hand. The presence tests below exist specifically
+    // to catch that file and this one drifting apart.
+    async beforeHandleAwareness({ states, context }) {
+      const presence = (context as { presence?: ServerPresenceIdentity } | undefined)?.presence;
+      if (!presence) {
+        states.clear();
+        return;
+      }
+      sanitizeAwarenessStates(states, presence);
     },
     port: 0,
     quiet: true,
@@ -144,6 +162,90 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     } finally {
       clientA.destroy();
       clientB.destroy();
+    }
+  }, 20_000);
+
+  it('presence never reaches the database -- an awareness-only update leaves document_yjs_state and canonical_screenplay untouched', async () => {
+    const owner = await signUp('owner-presence-db-test@example.test');
+    const { screenplayId } = await createProjectAndScreenplay(owner.actorId);
+
+    const before = await pool!.query(
+      'select updated_at as "updatedAt" from screenplays where id = $1',
+      [screenplayId],
+    );
+    const stateBefore = await pool!.query(
+      'select 1 from document_yjs_state where screenplay_id = $1',
+      [screenplayId],
+    );
+    expect(stateBefore.rowCount).toBe(0);
+
+    const client = connectProvider(screenplayId, owner.cookie);
+    try {
+      await waitForSynced(client);
+      client.awareness!.setLocalStateField('user', { lastActiveAt: Date.now() });
+      client.awareness!.setLocalStateField('cursor', { anchor: 'irrelevant', head: 'irrelevant' });
+      // No `waitForCondition` polling a positive signal here on purpose: this proves an absence,
+      // which only a fixed wait can -- the same reasoning `collaboration.integration.test.ts`'s
+      // own reviewer-write-rejection test gives for its identical choice.
+      await sleep(500);
+    } finally {
+      client.destroy();
+    }
+
+    const after = await pool!.query(
+      'select updated_at as "updatedAt" from screenplays where id = $1',
+      [screenplayId],
+    );
+    const stateAfter = await pool!.query(
+      'select 1 from document_yjs_state where screenplay_id = $1',
+      [screenplayId],
+    );
+    expect(after.rows[0].updatedAt).toEqual(before.rows[0].updatedAt);
+    expect(stateAfter.rowCount).toBe(0);
+  }, 20_000);
+
+  it('a client cannot claim another writer’s name or colour -- the server, not the client, is authoritative for identity', async () => {
+    const owner = await signUp('owner-presence-identity@example.test');
+    const editor = await signUp('editor-presence-identity@example.test');
+    const { projectId, screenplayId } = await createProjectAndScreenplay(owner.actorId);
+    await addMember(projectId, editor.actorId, 'editor');
+
+    const ownerClient = connectProvider(screenplayId, owner.cookie);
+    const editorClient = connectProvider(screenplayId, editor.cookie);
+    try {
+      await Promise.all([waitForSynced(ownerClient), waitForSynced(editorClient)]);
+
+      // The owner's own client claims to be someone else entirely -- exactly the spoofing
+      // `presence.ts`'s own top-of-file comment says this hook exists to close off.
+      ownerClient.awareness!.setLocalStateField('user', {
+        name: 'Someone Else Entirely',
+        color: '#000000',
+        lastActiveAt: Date.now(),
+      });
+
+      // Keyed on the *value* the editor observes, not a specific client id: the underlying
+      // `HocuspocusProviderWebsocket`/`Y.Doc` pairing is free to reconnect and mint a fresh
+      // client id mid-test (observed directly while writing this test -- not something this
+      // property needs to be sensitive to), and the real property under test is that the
+      // sanitized identity is what arrives, under *whichever* client id it arrives as.
+      const usersEditorSees = () =>
+        Array.from(editorClient.awareness!.getStates().values()) as Array<{
+          user?: { name?: string; color?: string };
+        }>;
+      await waitForCondition(() =>
+        usersEditorSees().some((state) => state.user?.name === 'owner-presence-identity'),
+      );
+
+      const names = usersEditorSees().map((state) => state.user?.name);
+      expect(names).toContain('owner-presence-identity');
+      expect(names).not.toContain('Someone Else Entirely');
+      const ownerState = usersEditorSees().find(
+        (state) => state.user?.name === 'owner-presence-identity',
+      );
+      expect(ownerState?.user?.color).toBeDefined();
+    } finally {
+      ownerClient.destroy();
+      editorClient.destroy();
     }
   }, 20_000);
 

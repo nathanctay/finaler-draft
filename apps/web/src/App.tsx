@@ -26,6 +26,7 @@ import { EditorContent, useEditor } from '@tiptap/react';
 import { HocuspocusProvider } from '@hocuspocus/provider';
 import {
   convertActiveScreenplayBlock,
+  createRemotePresenceExtension,
   displayElement,
   findScreenplayBlockPosition,
   getActiveScreenplayBlock,
@@ -60,6 +61,7 @@ import {
 } from './titlePageState.js';
 import { DocumentSettingsDialog } from './documentSettingsDialog.js';
 import { OverflowMenu } from './components/OverflowMenu.js';
+import { ParticipantIndicator } from './components/ParticipantIndicator.js';
 import { Toast } from './components/Toast.js';
 import {
   applyPinchWheelDelta,
@@ -760,6 +762,20 @@ export function App({
   // never by reconfiguring this extension.
   const extensions = useMemo(
     () => [
+      // Remote cursors and selections (presence.ts, slice 2). Only when a real collaboration
+      // server is connected -- there is no `Awareness` to read from a local, unconnected `Y.Doc`,
+      // and no other participant who could ever appear in one. Must precede `editorInit.extensions`
+      // (`ScreenplayYjsExtension`, which registers `ySyncPlugin`) in this array: Tiptap's
+      // `ExtensionManager.plugins` reverses the extension list (then stable-sorts by priority)
+      // before flattening it into ProseMirror plugins, so a *later* entry here ends up *earlier* in
+      // the final plugin list. `yCursorPlugin`'s own `state.init` synchronously reads
+      // `ySyncPluginKey.getState(state)`, which is only populated once `ySyncPlugin` has itself run
+      // its own `init` -- confirmed directly (`packages/screenplay-editor/src/presence.test.ts`'s
+      // own comment on the identical ordering requirement, and the exact crash the wrong order
+      // produces: `TypeError: Cannot read properties of undefined (reading 'doc')`).
+      ...(collab.provider?.awareness
+        ? [createRemotePresenceExtension(collab.provider.awareness)]
+        : []),
       ...editorInit.extensions,
       PaginationExtension.configure({ documentSettings: initial.screenplay.documentSettings }),
       // The caret at a mid-block page seam (seamCaret.ts). Mounted directly after the plugin whose
@@ -784,7 +800,7 @@ export function App({
       ElementMenuExtension,
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [editorInit],
+    [editorInit, collab],
   );
 
   const editor = useEditor({
@@ -2015,6 +2031,7 @@ export function App({
             {projection.issues[0] ?? 'Invalid screenplay data.'}
           </span>
         )}
+        <ParticipantIndicator awareness={collab.provider?.awareness ?? undefined} />
       </footer>
       {exportError !== undefined && (
         // A toast rather than a line in the status bar: this message names the block and element
