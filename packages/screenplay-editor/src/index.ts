@@ -1132,3 +1132,7 @@ export const initialScreenplayContent: EditorContent = {
   ],
   type: 'screenplayDocument',
 };
+
+// Remote presence: awareness-driven cursors and the participant list (slice 2). See
+// presence.ts's own top-of-file comment for what this carries and why.
+export * from './presence.js';

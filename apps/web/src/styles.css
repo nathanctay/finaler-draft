@@ -1001,6 +1001,101 @@ select:focus-visible,
 }
 
 /*
+ * Remote presence: the caret and name label a collaborator's live cursor draws
+ * (`packages/screenplay-editor/src/presence.ts`, slice 2's `buildRemoteCursorWidget`). A widget
+ * decoration inserted inline at the writer's live text position -- exactly the class of thing
+ * `.smarttype-ghost` above and `.page-seam-caret` are, and made safe by the identical technique:
+ * `position: absolute` with no `top`/`left` of its own paints at exactly the position this inline
+ * insertion would have had while being completely removed from layout, so it cannot widen a line,
+ * wrap a line, or grow `.script-body`'s content-sized height, regardless of how much text the name
+ * label holds. `presence-persistence.spec.ts` measures this in a real browser rather than trusting
+ * the rule to keep working, the same precedent `page-rendering-persistence.spec.ts`'s `measurePage`
+ * set for every other layer drawn into the manuscript.
+ */
+.remote-cursor {
+  position: absolute;
+  user-select: none;
+}
+
+/* The caret itself: a thin vertical bar roughly one line tall. `padding-inline`/`background-clip`
+   give it a slightly wider hover target than its painted width -- free, since this element sits
+   inside an already out-of-flow ancestor, so widening it costs nothing in the manuscript's own
+   layout.
+
+   `box-sizing: content-box` overrides this app's global `* { box-sizing: border-box; }` (near the
+   top of this file) specifically for this element. Measured directly in a real browser (a two-
+   client check, not assumed): under the inherited border-box default, `width: 2px` describes the
+   *border box*, and `padding-inline: 3px` (6px total) alone already exceeds that 2px budget --
+   padding cannot shrink to make room, so the content box -- the only thing `background-clip:
+   content-box` paints -- clamps to 0 and the caret paints nothing at all. The element was still
+   correctly attached and correctly positioned (this is what let it pass the geometry test below
+   without ever being visible), so nothing about its presence or placement looked wrong; only its
+   painted width did, and only in a real browser, which is why this was found by measuring
+   `getBoundingClientRect()`/`getComputedStyle()` directly rather than by reasoning about the CSS.
+   `content-box` here means `width` again describes the *painted* box precisely, independent of the
+   padding placed around it for the hover target.
+
+   `margin-left: calc(-1 * var(--remote-cursor-hover-padding))` corrects a second, separate defect
+   the padding fix above introduced without anyone intending it: `.remote-cursor` (the wrapper, just
+   above) has no `left` of its own, so its *border box* lands exactly on the anchor position -- but
+   `background-clip: content-box` only ever paints starting after the left padding, so the painted
+   stripe itself was landing `--remote-cursor-hover-padding` (3px) to the right of that anchor.
+   Confirmed directly, not reasoned: measured live (two browser contexts, a `Range` at the exact
+   anchored text offset compared against the caret's own painted rect) at a 3px delta, matching the
+   padding value exactly -- on a 9.6px character cell (`NOMINAL_CHARACTERS_PER_INCH`,
+   `@finaler-draft/screenplay/pageFormat`, at 96dpi), a shift that size lands the stripe over the
+   *following* character rather than between the two it belongs between, exactly the "covering the
+   i" report this fix is for. The negative margin operates entirely on this element's own position
+   *within* `.remote-cursor`'s line box -- it has no interaction with `.remote-cursor`'s own
+   absolute positioning (which depends on `left`/`right` staying `auto` to keep using its static
+   position; setting a `left` on `.remote-cursor` itself instead would abandon that mechanism
+   entirely and position against its containing block's edge, a different and wrong computation).
+   The custom property keeps this value and `padding-inline` from ever drifting apart: whatever the
+   hover target's width is, the compensating shift must equal it exactly, not approximately. */
+.remote-cursor-caret {
+  --remote-cursor-hover-padding: 3px;
+  box-sizing: content-box;
+  display: inline-block;
+  width: 2px;
+  height: 1.15em;
+  vertical-align: text-bottom;
+  padding-inline: var(--remote-cursor-hover-padding);
+  margin-left: calc(-1 * var(--remote-cursor-hover-padding));
+  background-clip: content-box;
+  cursor: default;
+}
+
+/*
+ * The name label: hidden by default, per the owner's decision (progress/collaboration-plan.md) --
+ * "a thin coloured caret, with the writer's name on hover or briefly when they start typing", not
+ * a persistent label that would compete with the manuscript and move on every keystroke. `:hover`
+ * on the caret always reveals it; `[data-remote-cursor-active]` (set by `buildRemoteCursorWidget`,
+ * cleared once `PRESENCE_TYPING_GLOW_MS` elapses with no further activity) is the "briefly when
+ * they start typing" half.
+ */
+.remote-cursor-label {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  white-space: pre;
+  padding: 1px 4px;
+  border-radius: 2px;
+  color: #fff;
+  font-family: system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.remote-cursor:hover .remote-cursor-label,
+.remote-cursor[data-remote-cursor-active] .remote-cursor-label {
+  opacity: 1;
+}
+
+/*
  * Every indent below is specified from the physical page edge (see
  * `@finaler-draft/screenplay/pageFormat`), not from the script-body content box. The content
  * box's own left/right edges already sit `--fd-page-margin-left` / `--fd-page-margin-right` in
@@ -1405,6 +1500,31 @@ select:focus-visible,
  * deliberate here too -- this is not routine status text, it is the one place a writer learns
  * their draft has stopped saving.
  */
+/*
+ * The status bar's participant list (`components/ParticipantIndicator.tsx`, slice 2). After
+ * `.status-center` (`flex: 1`) in DOM order, so it takes the bar's right edge for free -- the
+ * identical positioning `.status-attention` above already relies on.
+ */
+.participant-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 10px;
+}
+
+.participant-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .status-attention {
   margin-left: 10px;
   color: var(--feedback-error);

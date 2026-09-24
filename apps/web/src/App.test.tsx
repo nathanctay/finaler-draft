@@ -173,6 +173,19 @@ describe('local semantic screenplay editor', () => {
     expect(back).toHaveTextContent('Finaler Draft');
   });
 
+  // No `HocuspocusProvider` mocking is built for this file (see
+  // progress/collaboration-slice-2.md for the full reasoning): every test here has no collaboration
+  // server configured (`COLLAB_WS_URL` unset in the test environment -- `collabConfig.ts`), so
+  // `collab.provider` is always `undefined` and no remote-presence extension or `Awareness` ever
+  // exists to mock. What this test guards is that this file's whole surface for slice 2 -- the
+  // conditional inclusion of `createRemotePresenceExtension` and rendering `<ParticipantIndicator>`
+  // -- degrades to exactly nothing in that case, which is what every other test in this file
+  // already silently depends on continuing to be true.
+  it('shows no participant indicator with no collaboration server configured', () => {
+    render(<App />);
+    expect(screen.queryByRole('group', { name: /also here/i })).not.toBeInTheDocument();
+  });
+
   // The old whole-document PUT this block tested -- save-conflict UI, retry-after-failure,
   // clipboard/reload rescue actions, and the pagehide/visibilitychange/unmount debounced-flush
   // effect -- was deleted along with `api.saveScreenplay` and the `version` column in
