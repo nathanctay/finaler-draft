@@ -18,6 +18,7 @@ import {
   yXmlFragmentToProseMirrorRootNode,
 } from 'y-prosemirror';
 import {
+  DEFAULT_DOCUMENT_SETTINGS,
   SCREENPLAY_SCHEMA_VERSION,
   safeParseScreenplay,
   type DocumentSettings,
@@ -37,6 +38,43 @@ import {
  * side actually asserts.
  */
 export const SCREENPLAY_YJS_FRAGMENT = 'default';
+
+/**
+ * The two `Y.Map` types that hold everything a screenplay carries outside the ProseMirror body --
+ * added in this slice, which moves the title page and document settings out of local React state
+ * (`apps/web`'s `titlePageState`/`documentSettings`) and into the collaborative document itself,
+ * closing a real data-loss defect: neither had any save path at all once slice 1 deleted the
+ * whole-document `PUT` (`progress/collaboration-title-page.md`).
+ *
+ * Two separate top-level maps, not one combined "metadata" map -- the owner's own approved shape
+ * lists them as siblings of the body fragment, and keeping them separate means a reader (or a
+ * future increment) touching one can never accidentally clobber the other's keys, the same reason
+ * `SCREENPLAY_YJS_FRAGMENT` is its own named type rather than nested inside something else.
+ *
+ * Every field in both maps is a **plain, last-write-wins value**, not a `Y.Text`/`Y.Array` nested
+ * shared type -- deliberately, not by default. A title page has a handful of short fields (title,
+ * credit, source, draft date, a handful of author/contact lines) that two collaborators
+ * overwhelmingly do not edit character-by-character at the same instant the way they do the
+ * manuscript body; `documentSettings`' six fields are settings, not prose, and there is no
+ * sensible reading of "merge two people's concurrent character-indent edits character by
+ * character." `Y.Text` would buy fine-grained concurrent-merge semantics at real cost: the title
+ * page's fields are plain `contentEditable` divs synced by plain string assignment
+ * (`titlePageEditor.tsx`'s own "uncontrolled-but-synced" comment), not bound through
+ * `y-prosemirror` the way the body is, so getting `Y.Text` co-editing right would mean building a
+ * second, parallel rich-text binding for six short fields nobody meaningfully co-edits. Plain
+ * last-write-wins values are the honest choice for content this size and this rarely contested;
+ * the cost -- a genuinely simultaneous edit to the same field by two writers drops one writer's
+ * keystroke -- is the same cost every other settings-shaped value in this codebase already
+ * accepts, and is far cheaper than the alternative's complexity.
+ *
+ * See `titlePageFromYMap`/`writeTitlePageToYMap` and `documentSettingsFromYMap`/
+ * `writeDocumentSettingsToYMap` below for the read/write contract each map keeps, and
+ * `seedScreenplayYDoc` for how a screenplay that predates this slice gets its existing canonical
+ * title page and document settings carried into these maps the first time it is opened
+ * collaboratively.
+ */
+export const TITLE_PAGE_YJS_MAP = 'titlePage';
+export const DOCUMENT_SETTINGS_YJS_MAP = 'documentSettings';
 
 export const screenplayElementTypes = [
   'scene_heading',
@@ -1070,21 +1108,192 @@ export function createLocalScreenplayEditorInit(content: EditorContent): {
   );
 }
 
+function readOptionalString(map: Y.Map<unknown>, key: string): string | undefined {
+  const value = map.get(key);
+  return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
+function readOptionalStringArray(map: Y.Map<unknown>, key: string): string[] | undefined {
+  const value = map.get(key);
+  if (!Array.isArray(value)) return undefined;
+  const strings = value.filter((item): item is string => typeof item === 'string');
+  return strings.length > 0 ? strings : undefined;
+}
+
+/**
+ * True exactly when `map` (`TITLE_PAGE_YJS_MAP`) holds a title page -- an `id` key, which is the
+ * one field `writeTitlePageToYMap` always writes whenever it is given a real `TitlePage`, and the
+ * one field it never omits even for a title page a writer has cleared down to nothing (mirroring
+ * `titlePageFromState`'s own convention, `apps/web`'s `titlePageFromState`: an emptied title page
+ * still has an `id` and still counts as one title page). An unseeded map -- one
+ * `writeTitlePageToYMap` has never been called on -- has no `id` key at all, which is exactly
+ * what distinguishes "no title page" from "a title page with every field blank," and what
+ * `apps/collab/src/database.ts`'s migration backfill uses to tell "this document predates title
+ * pages living in Yjs" apart from "a writer already edited this collaboratively, however sparsely."
+ */
+export function isTitlePageMapSeeded(map: Y.Map<unknown>): boolean {
+  return typeof map.get('id') === 'string';
+}
+
+/**
+ * Reads the collaborative document's single title page back out of `TITLE_PAGE_YJS_MAP`, or
+ * `undefined` when the map holds none at all (`isTitlePageMapSeeded` above is `false`) -- matching
+ * `titlePages: []` in the canonical screenplay, and `titlePageState === undefined` in `App.tsx`
+ * (no title page rendered at all). An empty scalar or list field is read back as absent, not `''`/
+ * `[]`, the same "ordinary deletable text" convention `titlePageFromState` already uses -- this is
+ * the reverse of `writeTitlePageToYMap` below, and the two are meant to be read together.
+ */
+export function titlePageFromYMap(map: Y.Map<unknown>): TitlePage | undefined {
+  if (!isTitlePageMapSeeded(map)) return undefined;
+  const titlePage: TitlePage = { id: map.get('id') as string };
+  const title = readOptionalString(map, 'title');
+  if (title !== undefined) titlePage.title = title;
+  const credit = readOptionalString(map, 'credit');
+  if (credit !== undefined) titlePage.credit = credit;
+  const source = readOptionalString(map, 'source');
+  if (source !== undefined) titlePage.source = source;
+  const draftDate = readOptionalString(map, 'draftDate');
+  if (draftDate !== undefined) titlePage.draftDate = draftDate;
+  const authors = readOptionalStringArray(map, 'authors');
+  if (authors !== undefined) titlePage.authors = authors;
+  const contact = readOptionalStringArray(map, 'contact');
+  if (contact !== undefined) titlePage.contact = contact;
+  return titlePage;
+}
+
+/**
+ * Writes `titlePage` into `TITLE_PAGE_YJS_MAP` as plain last-write-wins values, one key per field
+ * -- see `TITLE_PAGE_YJS_MAP`'s own comment for why these are plain values, not `Y.Text`. The only
+ * function that mutates this map, on both the client (`App.tsx`'s `updateTitlePageState`, wrapped
+ * in the caller's own `doc.transact()`) and the server (`apps/collab/src/database.ts`'s one-shot
+ * seed/backfill, used bare since nothing else shares its transaction).
+ *
+ * Clears every existing key first -- not merely overwriting the six known ones -- so a stale key
+ * from a future field this function doesn't yet know about can never survive a write it should
+ * have been part of, and so `undefined`-out fields (a writer clearing a field back to nothing,
+ * `titlePage.title === undefined`) are actually removed rather than left holding a stale value:
+ * `titlePageFromYMap` above reads an *absent* key as "no value," never a leftover one.
+ */
+export function writeTitlePageToYMap(map: Y.Map<unknown>, titlePage: TitlePage | undefined): void {
+  for (const key of [...map.keys()]) map.delete(key);
+  if (!titlePage) return;
+  map.set('id', titlePage.id);
+  if (titlePage.title !== undefined) map.set('title', titlePage.title);
+  if (titlePage.credit !== undefined) map.set('credit', titlePage.credit);
+  if (titlePage.source !== undefined) map.set('source', titlePage.source);
+  if (titlePage.draftDate !== undefined) map.set('draftDate', titlePage.draftDate);
+  if (titlePage.authors !== undefined) map.set('authors', [...titlePage.authors]);
+  if (titlePage.contact !== undefined) map.set('contact', [...titlePage.contact]);
+}
+
+const DOCUMENT_SETTINGS_KEYS = [
+  'characterIndentIn',
+  'parentheticalIndentIn',
+  'parentheticalWidthIn',
+  'pageNumberStyle',
+  'sceneNumbersEnabled',
+  'autoMoreContinued',
+] as const satisfies readonly (keyof DocumentSettings)[];
+
+/** True exactly when `map` (`DOCUMENT_SETTINGS_YJS_MAP`) has ever been written to -- see
+ * `isTitlePageMapSeeded`'s own comment; the equivalent check for the settings map, which (unlike
+ * the title page map) has no field that is always present, so map-non-emptiness is the signal. */
+export function isDocumentSettingsMapSeeded(map: Y.Map<unknown>): boolean {
+  return map.size > 0;
+}
+
+/**
+ * Reads `documentSettings` back out of `DOCUMENT_SETTINGS_YJS_MAP`, or `undefined` when the map is
+ * empty (`isDocumentSettingsMapSeeded` above is `false`) -- `ProjectScreenplayOptions.documentSettings`
+ * is deliberately left unset in that case rather than defaulted here, so `safeParseScreenplay`'s
+ * own schema default (see that option's own comment) remains the single place that default lives.
+ * A *partially* populated map still returns a complete object, falling each individually missing
+ * key back to `DEFAULT_DOCUMENT_SETTINGS` -- defensive only: every writer of this map
+ * (`writeDocumentSettingsToYMap` below) always writes all six keys atomically in one
+ * `doc.transact()`, and nothing here is expected to ever see a genuine partial write.
+ */
+export function documentSettingsFromYMap(map: Y.Map<unknown>): DocumentSettings | undefined {
+  if (!isDocumentSettingsMapSeeded(map)) return undefined;
+  const settings: Record<string, unknown> = { ...DEFAULT_DOCUMENT_SETTINGS };
+  for (const key of DOCUMENT_SETTINGS_KEYS) {
+    const value = map.get(key);
+    if (value !== undefined) settings[key] = value;
+  }
+  return settings as DocumentSettings;
+}
+
+/**
+ * Writes `documentSettings` into `DOCUMENT_SETTINGS_YJS_MAP`, all six keys at once -- see
+ * `documentSettingsFromYMap`'s own comment on why every writer of this map keeps that invariant.
+ */
+export function writeDocumentSettingsToYMap(
+  map: Y.Map<unknown>,
+  documentSettings: DocumentSettings,
+): void {
+  for (const key of DOCUMENT_SETTINGS_KEYS) {
+    map.set(key, documentSettings[key]);
+  }
+}
+
+/**
+ * Builds a fresh, local `Y.Doc` seeded from a full canonical screenplay's editable content: the
+ * body (via `createLocalScreenplayYDoc`) and, new in this slice, the title page and document
+ * settings maps (`writeTitlePageToYMap`/`writeDocumentSettingsToYMap`) -- all three written inside
+ * one `doc.transact()`, so nothing ever observes this document with a body but no title page (or
+ * vice versa) partway through.
+ *
+ * Two call sites, both seeding a Yjs document for the first time from a screenplay's canonical
+ * content, never to rehydrate an existing collaborative one (`createLocalScreenplayYDoc`'s own
+ * warning, which this still delegates to for the body):
+ *
+ *  - `apps/collab/src/database.ts`'s `createFetch`, seeding a brand-new collaborative document the
+ *    first time a screenplay is opened collaboratively at all, and backfilling the title page and
+ *    document settings maps of one whose `document_yjs_state` already exists but predates this
+ *    slice (see that module's own comment on the migration).
+ *  - `apps/web/src/App.tsx`'s local (no collaboration server configured, or an unsupported schema)
+ *    fallback path, which needs the identical shape so this app's own title-page/document-settings
+ *    observers behave the same with or without a real `HocuspocusProvider` behind them.
+ */
+export function seedScreenplayYDoc(
+  content: EditorContent,
+  titlePage: TitlePage | undefined,
+  documentSettings: DocumentSettings | undefined,
+): Y.Doc {
+  const doc = createLocalScreenplayYDoc(content);
+  doc.transact(() => {
+    writeTitlePageToYMap(doc.getMap(TITLE_PAGE_YJS_MAP), titlePage);
+    if (documentSettings) {
+      writeDocumentSettingsToYMap(doc.getMap(DOCUMENT_SETTINGS_YJS_MAP), documentSettings);
+    }
+  });
+  return doc;
+}
+
 /**
  * The server-side half of "the canonical screenplay is a projection of the Yjs document" --
  * reads the current state of `ydoc`'s `SCREENPLAY_YJS_FRAGMENT` fragment back into a real
  * `ProseMirrorNode` (`yXmlFragmentToProseMirrorRootNode`, the non-deprecated replacement for
- * `yDocToProsemirror`) and hands it to `projectDocumentScreenplay`, the exact same projection
- * function the browser editor's own save path always used. There is only one projection function
- * in this codebase; this is the only other place that calls it.
+ * `yDocToProsemirror`), and now also reads `ydoc`'s title page and document settings maps
+ * (`titlePageFromYMap`/`documentSettingsFromYMap`) rather than accepting them as options -- both
+ * genuinely live in this `Y.Doc` now, so there is nothing left for a caller to supply beyond `id`/
+ * `title`, which do not (title is a project/screenplay-level field, unrelated to the title *page*;
+ * see `ProjectScreenplayOptions`'s own comment). Hands the result to `projectDocumentScreenplay`,
+ * the exact same projection function the browser editor's own save path always used. There is only
+ * one projection function in this codebase; this is the only other place that calls it.
  */
 export function projectYDocScreenplay(
   ydoc: Y.Doc,
-  options: ProjectScreenplayOptions = {},
+  options: Pick<ProjectScreenplayOptions, 'id' | 'title'> = {},
 ): LocalScreenplayProjection {
   const fragment = ydoc.getXmlFragment(SCREENPLAY_YJS_FRAGMENT);
   const doc = yXmlFragmentToProseMirrorRootNode(fragment, getScreenplayEditorSchema());
-  return projectDocumentScreenplay(doc, options);
+  const titlePage = titlePageFromYMap(ydoc.getMap(TITLE_PAGE_YJS_MAP));
+  const documentSettings = documentSettingsFromYMap(ydoc.getMap(DOCUMENT_SETTINGS_YJS_MAP));
+  return projectDocumentScreenplay(doc, {
+    ...options,
+    titlePages: titlePage ? [titlePage] : [],
+    ...(documentSettings ? { documentSettings } : {}),
+  });
 }
 
 export const initialScreenplayContent: EditorContent = {

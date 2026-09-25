@@ -6,8 +6,14 @@ import { createAuth } from '@finaler-draft/auth-server';
 import type { MailMessage, MailPort } from '@finaler-draft/auth-server/mail';
 import { yXmlFragmentToProseMirrorRootNode } from 'y-prosemirror';
 import {
+  createLocalScreenplayYDoc,
+  documentSettingsFromYMap,
+  DOCUMENT_SETTINGS_YJS_MAP,
   getScreenplayEditorSchema,
   SCREENPLAY_YJS_FRAGMENT,
+  titlePageFromYMap,
+  TITLE_PAGE_YJS_MAP,
+  writeTitlePageToYMap,
 } from '@finaler-draft/screenplay-editor';
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import type { Pool } from 'pg';
@@ -164,6 +170,165 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
       clientB.destroy();
     }
   }, 20_000);
+
+  // The migration this slice's brief calls the highest-stakes part of the work: an existing
+  // screenplay's title page and document settings, sitting only in `canonical_screenplay`, must
+  // end up in the Yjs document the first time it is opened collaboratively -- and, for a
+  // screenplay that was *already* collaborative before this slice shipped, must be backfilled on
+  // the next open without ever clobbering a writer's own collaborative edit. Run against a real,
+  // migrated Postgres database (not the fake-pool unit tests in `database.test.ts`, which cover
+  // the same logic in isolation) and through the real socket, the same way every other guarantee
+  // in this file is proven.
+  //
+  // Only the "first open, no `document_yjs_state` row yet" test below needs this: that is the only
+  // migration path that calls `editorContentFromScreenplay` (`createFetch`'s seed-from-canonical
+  // branch), so it is the only one `screenplayFixture`'s own `dual_dialogue`/`page_break`/note
+  // content -- deliberately unrepresentable in this editor -- would break. The backfill and
+  // idempotency tests insert `document_yjs_state` directly and never touch `blocks` at all.
+  const editableBodyFields: Partial<typeof screenplayFixture> = {
+    annotations: [],
+    blocks: [{ id: randomUUID(), type: 'action', text: 'A single representable block.' }],
+  };
+
+  it('a screenplay opened collaboratively for the first time carries its real title page and document settings into the Yjs document', async () => {
+    const owner = await signUp('owner-migration-first-open@example.test');
+    // `screenplayFixture` (`packages/screenplay/src/fixtures.ts`) has a real, populated title page
+    // -- not a placeholder -- exactly the "a screenplay that has a populated title page" case the
+    // brief asks this to be tested against. `blocks`/`annotations` are overridden to content this
+    // editor can actually represent (see `createProjectAndScreenplay`'s own comment); the title
+    // page and document settings this test asserts on stay the fixture's real, unmodified values.
+    const { screenplayId } = await createProjectAndScreenplay(owner.actorId, editableBodyFields);
+
+    const client = connectProvider(screenplayId, owner.cookie);
+    try {
+      await waitForSynced(client);
+      expect(titlePageFromYMap(client.document.getMap(TITLE_PAGE_YJS_MAP))).toEqual(
+        screenplayFixture.titlePages[0],
+      );
+      expect(documentSettingsFromYMap(client.document.getMap(DOCUMENT_SETTINGS_YJS_MAP))).toEqual(
+        screenplayFixture.documentSettings,
+      );
+    } finally {
+      client.destroy();
+    }
+  }, 20_000);
+
+  it('a screenplay already collaborative before this slice backfills its title page on the next open', async () => {
+    const owner = await signUp('owner-migration-backfill@example.test');
+    const { screenplayId } = await createProjectAndScreenplay(owner.actorId);
+
+    // Simulates a `document_yjs_state` row written before this slice shipped: real body content,
+    // but the title page/document settings maps were never written, since that concept did not
+    // exist yet. Inserted directly into the database, standing in for what a pre-this-slice
+    // `apps/collab` process would have persisted.
+    const preSliceDoc = createLocalScreenplayYDoc({
+      type: 'screenplayDocument',
+      content: [
+        {
+          type: 'screenplayBlock',
+          attrs: { element: 'action', id: randomUUID() },
+          content: [{ type: 'text', text: 'Pre-existing collaborative content.' }],
+        },
+      ],
+    });
+    await pool!.query(
+      `insert into document_yjs_state (screenplay_id, state, updated_at)
+       values ($1, $2, now())`,
+      [screenplayId, Buffer.from(Y.encodeStateAsUpdate(preSliceDoc))],
+    );
+
+    const client = connectProvider(screenplayId, owner.cookie);
+    try {
+      await waitForSynced(client);
+      expect(projectedText(client)).toContain('Pre-existing collaborative content.');
+      expect(titlePageFromYMap(client.document.getMap(TITLE_PAGE_YJS_MAP))).toEqual(
+        screenplayFixture.titlePages[0],
+      );
+    } finally {
+      client.destroy();
+    }
+  }, 20_000);
+
+  it('the backfill is idempotent: a title page a writer has already edited collaboratively survives a later reload, even though canonical_screenplay still disagrees', async () => {
+    const owner = await signUp('owner-migration-idempotent@example.test');
+    const { screenplayId } = await createProjectAndScreenplay(owner.actorId);
+
+    // Same pre-slice fixture as above: a `document_yjs_state` row with no title page map yet.
+    const preSliceDoc = createLocalScreenplayYDoc({
+      type: 'screenplayDocument',
+      content: [{ type: 'screenplayBlock', attrs: { element: 'action', id: randomUUID() } }],
+    });
+    await pool!.query(
+      `insert into document_yjs_state (screenplay_id, state, updated_at)
+       values ($1, $2, now())`,
+      [screenplayId, Buffer.from(Y.encodeStateAsUpdate(preSliceDoc))],
+    );
+
+    // First open: the migration backfills the fixture's own title page, exactly like the test
+    // above. A writer then edits it collaboratively to something new.
+    const firstOpen = connectProvider(screenplayId, owner.cookie);
+    const writersOwnTitlePage = {
+      id: screenplayFixture.titlePages[0]!.id,
+      title: "The Writer's Own Later Title",
+    };
+    try {
+      await waitForSynced(firstOpen);
+      expect(titlePageFromYMap(firstOpen.document.getMap(TITLE_PAGE_YJS_MAP))).toEqual(
+        screenplayFixture.titlePages[0],
+      );
+      firstOpen.document.transact(() => {
+        writeTitlePageToYMap(firstOpen.document.getMap(TITLE_PAGE_YJS_MAP), writersOwnTitlePage);
+      });
+      await waitForCondition(
+        () =>
+          titlePageFromYMap(firstOpen.document.getMap(TITLE_PAGE_YJS_MAP))?.title ===
+          writersOwnTitlePage.title,
+      );
+      // Forces the debounced store to run now, persisting the writer's edit to
+      // `document_yjs_state` rather than waiting out the real debounce window.
+      server!.hocuspocus.flushPendingStores();
+      await waitForCondition(async () => {
+        const row = await pool!.query(
+          'select updated_at as "updatedAt" from document_yjs_state where screenplay_id = $1',
+          [screenplayId],
+        );
+        return row.rowCount === 1;
+      });
+    } finally {
+      firstOpen.destroy();
+    }
+
+    // Standing in for a cold load (server restart, or the document having been evicted from
+    // memory and reopened) -- a brand-new server instance against the same database, the same
+    // technique the "survives a Hocuspocus restart" test above uses.
+    await server!.destroy();
+
+    // `canonical_screenplay` is made to disagree with the writer's edit, modelling a genuinely
+    // stale read. This must happen *after* `server.destroy()`, not before: `destroy()` flushes
+    // Hocuspocus's pending stores, and that flush rewrites `canonical_screenplay` from the
+    // document's own projection -- so a stale value planted before it is overwritten by the
+    // writer's real title again, and the next open would find canonical and the Yjs document in
+    // perfect agreement, asserting nothing. Planted here, the disagreement actually survives to
+    // the reopen below, which is the only arrangement under which this test can fail if the
+    // migration's seeded-ness gate is removed.
+    await pool!.query(
+      `update screenplays set canonical_screenplay = jsonb_set(canonical_screenplay, '{titlePages,0,title}', $1::jsonb) where id = $2`,
+      [JSON.stringify('A Stale Title From Before The Edit'), screenplayId],
+    );
+
+    server = await startServer();
+    serverUrl = server.webSocketURL;
+
+    const reopened = connectProvider(screenplayId, owner.cookie);
+    try {
+      await waitForSynced(reopened);
+      expect(titlePageFromYMap(reopened.document.getMap(TITLE_PAGE_YJS_MAP))).toEqual(
+        writersOwnTitlePage,
+      );
+    } finally {
+      reopened.destroy();
+    }
+  }, 30_000);
 
   it('presence never reaches the database -- an awareness-only update leaves document_yjs_state and canonical_screenplay untouched', async () => {
     const owner = await signUp('owner-presence-db-test@example.test');
@@ -650,12 +815,23 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
+/**
+ * `screenplayOverrides`, when given, replace fields of `screenplayFixture` wholesale (not merged
+ * field-by-field) -- used only by the migration tests above, which need `blocks`/`annotations`
+ * this editor can actually represent (`screenplayFixture` itself has `dual_dialogue`, a
+ * `page_break`, and a note, all of which `editorContentFromScreenplay` rejects, so `createFetch`
+ * never seeds a Yjs document from it at all -- confirmed directly: every other test in this file
+ * logs `collab_seed_failed` for exactly this reason, harmlessly, since none of them assert on
+ * seeded content). `screenplayFixture`'s own title page and document settings stay the default,
+ * since those are exactly what the migration tests want to prove got carried over.
+ */
 async function createProjectAndScreenplay(
   ownerActorId: string,
+  screenplayOverrides: Partial<typeof screenplayFixture> = {},
 ): Promise<{ projectId: string; screenplayId: string }> {
   const projectId = randomUUID();
   const screenplayId = randomUUID();
-  const screenplay = { ...screenplayFixture, id: screenplayId };
+  const screenplay = { ...screenplayFixture, ...screenplayOverrides, id: screenplayId };
   const canonicalJson = JSON.stringify(screenplay);
   await pool!.query('insert into projects (id, title) values ($1, $2)', [
     projectId,

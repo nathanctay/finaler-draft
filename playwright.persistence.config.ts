@@ -7,6 +7,7 @@ export default defineConfig({
     '**/session-routing.spec.ts',
     '**/page-rendering-persistence.spec.ts',
     '**/presence-persistence.spec.ts',
+    '**/titlepage-persistence.spec.ts',
   ],
   timeout: 30_000,
   reporter: 'list',

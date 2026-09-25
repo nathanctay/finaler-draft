@@ -2,14 +2,28 @@ import { Editor } from '@tiptap/core';
 import { describe, expect, it } from 'vitest';
 import * as Y from 'yjs';
 import {
+  DEFAULT_DOCUMENT_SETTINGS,
+  type DocumentSettings,
+  type TitlePage,
+} from '@finaler-draft/screenplay';
+import {
   createLocalScreenplayEditorInit,
   createLocalScreenplayYDoc,
   createScreenplayEditorInit,
+  documentSettingsFromYMap,
+  DOCUMENT_SETTINGS_YJS_MAP,
   getScreenplayEditorSchema,
   initialScreenplayContent,
+  isDocumentSettingsMapSeeded,
+  isTitlePageMapSeeded,
   nonEmptyEditorContent,
   projectYDocScreenplay,
   SCREENPLAY_YJS_FRAGMENT,
+  seedScreenplayYDoc,
+  titlePageFromYMap,
+  TITLE_PAGE_YJS_MAP,
+  writeDocumentSettingsToYMap,
+  writeTitlePageToYMap,
   type EditorContent,
 } from './index.js';
 
@@ -170,6 +184,144 @@ describe('projectYDocScreenplay', () => {
 
     const projection = projectYDocScreenplay(ydoc);
     expect(projection.valid).toBe(false);
+  });
+});
+
+describe('title page and document settings Y.Maps', () => {
+  it('titlePageFromYMap reports no title page for an unseeded map, and isTitlePageMapSeeded agrees', () => {
+    const doc = new Y.Doc();
+    const map = doc.getMap(TITLE_PAGE_YJS_MAP);
+    expect(isTitlePageMapSeeded(map)).toBe(false);
+    expect(titlePageFromYMap(map)).toBeUndefined();
+  });
+
+  it('writeTitlePageToYMap then titlePageFromYMap round-trips a fully populated title page', () => {
+    const doc = new Y.Doc();
+    const map = doc.getMap(TITLE_PAGE_YJS_MAP);
+    const titlePage: TitlePage = {
+      id: '00000000-0000-4000-8000-000000000010',
+      title: 'The Long Way Home',
+      credit: 'written by',
+      source: 'Based on a true story',
+      draftDate: 'Third Draft, March 2026',
+      authors: ['Mara Quinn'],
+      contact: ['mara@example.com', '555-0100'],
+    };
+    writeTitlePageToYMap(map, titlePage);
+    expect(isTitlePageMapSeeded(map)).toBe(true);
+    expect(titlePageFromYMap(map)).toEqual(titlePage);
+  });
+
+  it('an emptied-out title page (only id) still round-trips as present, not as "no title page"', () => {
+    const doc = new Y.Doc();
+    const map = doc.getMap(TITLE_PAGE_YJS_MAP);
+    writeTitlePageToYMap(map, { id: '00000000-0000-4000-8000-000000000011' });
+    expect(isTitlePageMapSeeded(map)).toBe(true);
+    expect(titlePageFromYMap(map)).toEqual({ id: '00000000-0000-4000-8000-000000000011' });
+  });
+
+  it('writing undefined clears the map back to unseeded', () => {
+    const doc = new Y.Doc();
+    const map = doc.getMap(TITLE_PAGE_YJS_MAP);
+    writeTitlePageToYMap(map, { id: '00000000-0000-4000-8000-000000000012', title: 'Draft' });
+    writeTitlePageToYMap(map, undefined);
+    expect(isTitlePageMapSeeded(map)).toBe(false);
+    expect(titlePageFromYMap(map)).toBeUndefined();
+  });
+
+  it('re-writing a title page clears fields the new value no longer has, not merges them', () => {
+    const doc = new Y.Doc();
+    const map = doc.getMap(TITLE_PAGE_YJS_MAP);
+    writeTitlePageToYMap(map, {
+      id: '00000000-0000-4000-8000-000000000013',
+      title: 'Old Title',
+      authors: ['Someone'],
+    });
+    writeTitlePageToYMap(map, { id: '00000000-0000-4000-8000-000000000013', title: 'New Title' });
+    expect(titlePageFromYMap(map)).toEqual({
+      id: '00000000-0000-4000-8000-000000000013',
+      title: 'New Title',
+    });
+  });
+
+  it('documentSettingsFromYMap reports no override for an unseeded map, and isDocumentSettingsMapSeeded agrees', () => {
+    const doc = new Y.Doc();
+    const map = doc.getMap(DOCUMENT_SETTINGS_YJS_MAP);
+    expect(isDocumentSettingsMapSeeded(map)).toBe(false);
+    expect(documentSettingsFromYMap(map)).toBeUndefined();
+  });
+
+  it('writeDocumentSettingsToYMap then documentSettingsFromYMap round-trips exactly', () => {
+    const doc = new Y.Doc();
+    const map = doc.getMap(DOCUMENT_SETTINGS_YJS_MAP);
+    const settings: DocumentSettings = {
+      characterIndentIn: 2.9,
+      parentheticalIndentIn: 2.4,
+      parentheticalWidthIn: 2,
+      pageNumberStyle: 'roman',
+      sceneNumbersEnabled: true,
+      autoMoreContinued: false,
+    };
+    writeDocumentSettingsToYMap(map, settings);
+    expect(isDocumentSettingsMapSeeded(map)).toBe(true);
+    expect(documentSettingsFromYMap(map)).toEqual(settings);
+  });
+
+  it('documentSettingsFromYMap falls back to the specification default for any individually missing key', () => {
+    const doc = new Y.Doc();
+    const map = doc.getMap(DOCUMENT_SETTINGS_YJS_MAP);
+    // Simulates a partial write, which no code path here is meant to produce -- defensive coverage
+    // for the fallback `documentSettingsFromYMap`'s own comment describes, not a reachable app path.
+    map.set('sceneNumbersEnabled', true);
+    const settings = documentSettingsFromYMap(map);
+    expect(settings).toEqual({ ...DEFAULT_DOCUMENT_SETTINGS, sceneNumbersEnabled: true });
+  });
+});
+
+describe('seedScreenplayYDoc', () => {
+  it('seeds the body, title page, and document settings together', () => {
+    const titlePage: TitlePage = { id: '00000000-0000-4000-8000-000000000020', title: 'Seeded' };
+    const settings: DocumentSettings = {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      sceneNumbersEnabled: true,
+    };
+    const doc = seedScreenplayYDoc(simpleContent, titlePage, settings);
+
+    expect(doc.getXmlFragment(SCREENPLAY_YJS_FRAGMENT).toString()).toContain('INT. WORKSHOP');
+    expect(titlePageFromYMap(doc.getMap(TITLE_PAGE_YJS_MAP))).toEqual(titlePage);
+    expect(documentSettingsFromYMap(doc.getMap(DOCUMENT_SETTINGS_YJS_MAP))).toEqual(settings);
+  });
+
+  it('leaves both maps unseeded when given no title page and no document settings', () => {
+    const doc = seedScreenplayYDoc(simpleContent, undefined, undefined);
+    expect(isTitlePageMapSeeded(doc.getMap(TITLE_PAGE_YJS_MAP))).toBe(false);
+    expect(isDocumentSettingsMapSeeded(doc.getMap(DOCUMENT_SETTINGS_YJS_MAP))).toBe(false);
+  });
+});
+
+describe('projectYDocScreenplay reading title page and document settings from the Y.Doc', () => {
+  it('projects a seeded title page and document settings, not just the body', () => {
+    const titlePage: TitlePage = { id: '00000000-0000-4000-8000-000000000030', title: 'On Deck' };
+    const settings: DocumentSettings = { ...DEFAULT_DOCUMENT_SETTINGS, autoMoreContinued: false };
+    const ydoc = seedScreenplayYDoc(simpleContent, titlePage, settings);
+
+    const projection = projectYDocScreenplay(ydoc, {
+      id: '00000000-0000-4000-8000-000000000031',
+      title: 'Custom Title',
+    });
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) throw new Error('expected a valid projection');
+    expect(projection.screenplay.titlePages).toEqual([titlePage]);
+    expect(projection.screenplay.documentSettings).toEqual(settings);
+  });
+
+  it('projects an empty titlePages array and the schema default settings when neither map is seeded', () => {
+    const ydoc = createLocalScreenplayYDoc(simpleContent);
+    const projection = projectYDocScreenplay(ydoc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) throw new Error('expected a valid projection');
+    expect(projection.screenplay.titlePages).toEqual([]);
+    expect(projection.screenplay.documentSettings).toEqual(DEFAULT_DOCUMENT_SETTINGS);
   });
 });
 

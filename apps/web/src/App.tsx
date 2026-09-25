@@ -33,10 +33,16 @@ import {
   editorContentFromScreenplay,
   nonEmptyEditorContent,
   projectLocalScreenplay,
-  createLocalScreenplayYDoc,
   createScreenplayEditorInit,
+  documentSettingsFromYMap,
+  DOCUMENT_SETTINGS_YJS_MAP,
   screenplayElementTypes,
   SCREENPLAY_YJS_FRAGMENT,
+  seedScreenplayYDoc,
+  titlePageFromYMap,
+  TITLE_PAGE_YJS_MAP,
+  writeDocumentSettingsToYMap,
+  writeTitlePageToYMap,
   type LocalScreenplayProjection,
   type ScreenplayElementType,
 } from './screenplayEditor.js';
@@ -576,10 +582,13 @@ export function App({
   // Two cases:
   //  - No collaboration server configured (`COLLAB_WS_URL` unset -- see `collabConfig.ts`) or the
   //    canonical screenplay has features this editor cannot represent at all
-  //    (`initialContent === undefined`): a local, unconnected `Y.Doc`, seeded from the loaded
-  //    screenplay in the first case and left empty (matching `unavailableEditorContent`'s
-  //    existing read-only meaning) in the second. This is what every unit test in this file
-  //    exercises, and what any environment without `apps/collab` deployed yet falls back to.
+  //    (`initialContent === undefined`): a local, unconnected `Y.Doc`, seeded via
+  //    `seedScreenplayYDoc` -- body, title page, and document settings together, the identical
+  //    shape `apps/collab`'s own migration seed builds -- from the loaded screenplay in the first
+  //    case, and left entirely unseeded (matching `unavailableEditorContent`'s existing read-only
+  //    meaning: this whole document, title page included, is off-limits to this editor) in the
+  //    second. This is what every unit test in this file exercises, and what any environment
+  //    without `apps/collab` deployed yet falls back to.
   //  - Otherwise: a real `HocuspocusProvider` connects to `apps/collab` over `COLLAB_WS_URL`,
   //    authenticating from the same session cookie the browser already attaches to every other
   //    request (plan.md: "Hocuspocus authenticates from a cookie the browser attaches
@@ -587,11 +596,17 @@ export function App({
   //    populated by the provider's own sync the instant the connection completes;
   //    `createScreenplayEditorInit` below reads whatever is already there for the first render,
   //    empty or not, and every update after that reaches the editor through `ySyncPlugin`
-  //    automatically, with no action from this component.
+  //    automatically, with no action from this component. The title page/document settings
+  //    observer effect below follows the identical rule for `TITLE_PAGE_YJS_MAP`/
+  //    `DOCUMENT_SETTINGS_YJS_MAP`.
   const collab = useMemo(() => {
     if (initialContent === undefined || !COLLAB_WS_URL) {
       return {
-        doc: createLocalScreenplayYDoc(editorContent ?? unavailableEditorContent),
+        doc: seedScreenplayYDoc(
+          editorContent ?? unavailableEditorContent,
+          initialContent === undefined ? undefined : initialProjection?.titlePage,
+          initialContent === undefined ? undefined : initial.screenplay.documentSettings,
+        ),
         provider: undefined as HocuspocusProvider | undefined,
       };
     }
@@ -745,6 +760,78 @@ export function App({
     };
   }, [collab]);
 
+  // The current `editor` instance, readable synchronously from inside the title-page/document-
+  // settings observer effect below without that effect needing to re-subscribe every time `editor`
+  // itself changes -- the same stable-identity-listener-with-fresh-closure pattern
+  // `handleZoomKeydownRef` above uses, and for the identical reason: the observer effect below is
+  // keyed on `[collab]` only (it must attach to `collab.doc`'s maps exactly once per mounted
+  // screenplay, the same lifetime `editorInit`/`extensions` already use), but `editor` itself can
+  // still be `undefined` for a render or two after that (`@tiptap/react`'s `useEditor` does not
+  // guarantee a synchronously-available instance) -- reading through a ref keeps this effect
+  // correct in both orderings without over-subscribing.
+  const editorRef = useRef<Editor | undefined>(undefined);
+
+  // Title page and document settings now live in `collab.doc` itself
+  // (`TITLE_PAGE_YJS_MAP`/`DOCUMENT_SETTINGS_YJS_MAP` -- `packages/screenplay-editor`'s own
+  // top-of-file comment on why these are separate `Y.Map`s of plain, last-write-wins values), not
+  // only in this component's React state -- closing the data-loss defect this slice exists to fix:
+  // before this, neither had any save path at all, collaborative or otherwise
+  // (`progress/collaboration-title-page.md`).
+  //
+  // This effect is the *only* place `titlePageState`/`documentSettings` React state is ever set.
+  // `updateTitlePageState`/`updateDocumentSettings` below (the UI-facing handlers `TitlePageView`/
+  // `DocumentSettingsDialog` call) only ever write into the Y.Map and do nothing else -- no direct
+  // `setState`, no direct pagination call -- so there is exactly one path from "a Y.Map changed" to
+  // "React state, live pagination, and CSS geometry reflect it," and that path runs identically
+  // whether the change originated from this tab's own edit or a remote collaborator's. This mirrors
+  // `ySyncPlugin`'s own contract for the body: a local edit's own effect on `editor.state.doc` is
+  // never predicted or applied twice, it is always read back from what Yjs actually decided.
+  //
+  // Yjs fires `.observe()` callbacks synchronously, at the end of the `doc.transact()` call that
+  // triggered them (confirmed by reading the installed `yjs` source: `Transaction`'s own
+  // `cleanupTransactions` calls every registered observer before `transact()` returns) -- so a
+  // local edit's round trip through the Y.Map and back into React/pagination/CSS state is still
+  // fully synchronous from the writer's own event handler, with no user-visible latency added by
+  // routing through Yjs first.
+  //
+  // Keyed on `[collab]` only, not `[editor]`: registering once per mounted screenplay (the same
+  // lifetime `editorInit`/`extensions` already use) is what lets a *remote* change reach this tab
+  // even before its own `editor` has mounted -- exactly parallel to how `ySyncPlugin` itself
+  // attaches to `collab.doc`'s XmlFragment independently of whether an `Editor` yet exists to
+  // render it. Each sync function is also called once, synchronously, at effect setup -- not only
+  // on future `.observe()` firings -- so it picks up whatever the map already holds at the moment
+  // this screenplay mounts (a migration-seeded value already present when a local, unconnected
+  // `Y.Doc` is used, or nothing yet for a real `HocuspocusProvider` whose first sync hasn't landed
+  // -- `editingAllowed`'s own comment on why a pre-sync empty read is safe and expected here too).
+  useEffect(() => {
+    const titlePageMap = collab.doc.getMap(TITLE_PAGE_YJS_MAP);
+    const documentSettingsMap = collab.doc.getMap(DOCUMENT_SETTINGS_YJS_MAP);
+
+    const syncTitlePageFromMap = () => {
+      const titlePage = titlePageFromYMap(titlePageMap);
+      setTitlePageState(titlePage ? titlePageStateFromTitlePage(titlePage) : undefined);
+    };
+    const syncDocumentSettingsFromMap = () => {
+      const next = documentSettingsFromYMap(documentSettingsMap) ?? DEFAULT_DOCUMENT_SETTINGS;
+      setDocumentSettings(next);
+      const editorInstance = editorRef.current;
+      if (editorInstance) {
+        updatePaginationDocumentSettings(editorInstance, next, () =>
+          applyPageGeometryCssVariables(next),
+        );
+      }
+    };
+
+    syncTitlePageFromMap();
+    syncDocumentSettingsFromMap();
+    titlePageMap.observe(syncTitlePageFromMap);
+    documentSettingsMap.observe(syncDocumentSettingsFromMap);
+    return () => {
+      titlePageMap.unobserve(syncTitlePageFromMap);
+      documentSettingsMap.unobserve(syncDocumentSettingsFromMap);
+    };
+  }, [collab]);
+
   const editorInit = useMemo(
     () => createScreenplayEditorInit(collab.doc.getXmlFragment(SCREENPLAY_YJS_FRAGMENT)),
     [collab],
@@ -816,6 +903,25 @@ export function App({
     onUpdate: ({ editor: editorInstance }) => syncEditorState(editorInstance),
     onTransaction: ({ editor: editorInstance }) => syncPageCount(editorInstance),
   });
+  // Kept current every render, read by the title-page/document-settings observer effect above --
+  // see that ref's own declaration for why a ref rather than a dependency.
+  editorRef.current = editor;
+
+  // The narrow catch-up that effect's own "keyed on `[collab]` only" choice can otherwise miss: if
+  // `editor` becomes available *after* `collab.doc`'s document settings map already holds its real
+  // value (that effect ran with `editorRef.current` still `undefined` and therefore could not
+  // repaginate), this re-reads the map's current value and repaginates once `editor` actually
+  // exists, closing the gap without a second, competing authority -- it reads the same map that
+  // effect does, rather than trusting `documentSettings` state, so it is correct regardless of
+  // which of the two runs first.
+  useEffect(() => {
+    if (!editor) return;
+    const next =
+      documentSettingsFromYMap(collab.doc.getMap(DOCUMENT_SETTINGS_YJS_MAP)) ??
+      DEFAULT_DOCUMENT_SETTINGS;
+    updatePaginationDocumentSettings(editor, next, () => applyPageGeometryCssVariables(next));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor]);
 
   // `useEditor`'s own React binding (`@tiptap/react`'s `EditorInstanceManager.onRender`, read
   // directly from the installed package) does not actually apply a changed `editable` option on
@@ -1204,67 +1310,43 @@ export function App({
   // Title-page edits happen in separate React state, never inside the ProseMirror document (see
   // the `titlePageState` comment above), so they never fire `onUpdate`/`onTransaction` the way
   // `syncEditorState` relies on. This is the title-page equivalent, called directly from
-  // `TitlePageView`'s `onChange`. Takes `next` directly rather than reading `titlePageState` back
-  // out of state, because `setTitlePageState` is asynchronous and the save this triggers must
-  // reflect the edit that just happened, not whatever the closure captured before it.
+  // `TitlePageView`'s `onChange`.
+  //
+  // This writes into `collab.doc`'s `TITLE_PAGE_YJS_MAP` and does nothing else -- no direct
+  // `setTitlePageState`, no direct `applyProjection` call. The observer effect above is the single
+  // authority that reacts to a Y.Map change (this tab's own write included: Yjs fires `.observe()`
+  // synchronously, so the round trip is still complete before this function returns), which in turn
+  // updates `titlePageState`, and the `useEffect` above that recomputes `projection` is keyed on
+  // `titlePageState` and picks the change up from there. One path, not two, whether the edit is
+  // this tab's own or a remote collaborator's -- see the observer effect's own comment.
   const updateTitlePageState = (next: TitlePageState) => {
     // `TitlePageView`'s own `readOnly` prop (below) already stops the writer's keystrokes from
     // reaching `onChange` in the first place -- this is the second, independent guard: nothing
     // here trusts that the caller actually honoured `readOnly`.
     if (!editingAllowed) return;
-    setTitlePageState(next);
-    if (!editor) return;
-    const nextProjection = projectLocalScreenplay(editor, {
-      documentSettings,
-      id: initial.id,
-      title: initial.title,
-      titlePages: [titlePageFromState(next)],
+    collab.doc.transact(() => {
+      writeTitlePageToYMap(collab.doc.getMap(TITLE_PAGE_YJS_MAP), titlePageFromState(next));
     });
-    applyProjection(nextProjection);
   };
 
   // The document-settings dialog's own equivalent of `updateTitlePageState` above: settings
   // changes never touch the ProseMirror document either, so nothing here can rely on Tiptap's own
-  // update callbacks. Takes `next` directly (not read back out of `documentSettings` state) for
-  // the identical reason `updateTitlePageState` does -- `setDocumentSettings` is asynchronous, and
-  // both the live repagination and the save this triggers must reflect the edit that just
-  // happened.
+  // update callbacks.
   //
-  // Three independent things read `documentSettings`, updated here explicitly rather than by
-  // waiting on the `documentSettings`-keyed `useEffect` above: `updatePaginationDocumentSettings`
-  // repaginates the live document in place (no editor remount -- see paginationExtension.ts's own
-  // comment on why that matters for undo history) and has no `useEffect` equivalent at all, since it
-  // needs the live `Editor` instance, not just the settings value; the projection rebuild is what
-  // actually reaches the autosave path with the new value -- the fix for the bug where
-  // `documentSettings` was never threaded into `projectDocumentScreenplay` at all, so autosave
-  // silently wrote the schema's defaults over whatever a writer had stored -- and likewise has no
-  // effect equivalent, since re-running it on every unrelated render would be wrong. Only
-  // `applyPageGeometryCssVariables` genuinely has a second authority (the effect above): calling it
-  // here too is purely so the writer sees the geometry change the instant they make it, rather than
-  // waiting a render for the effect to catch up -- see that effect's own comment.
-  //
-  // `applyPageGeometryCssVariables` is passed to `updatePaginationDocumentSettings` as its
-  // `runBeforeDispatch` argument rather than called as a separate statement after it -- previously
-  // it ran as a bare second statement here, which under-compensated the writer's scroll position
-  // for a `parentheticalWidthIn` change specifically (progress/repagination-scroll-anchor.md's
-  // "known limitations", fixed in this slice; see `updatePaginationDocumentSettings`'s own comment
-  // in paginationExtension.ts for why passing it in, not merely reordering the two calls, is what
-  // actually fixes it).
+  // Same "write to Yjs and nothing else" shape as `updateTitlePageState`: this used to call
+  // `updatePaginationDocumentSettings`/`applyPageGeometryCssVariables`/`applyProjection` directly
+  // (still true before this slice, when there was nowhere else for the change to go), but the
+  // observer effect above now performs exactly those three steps -- reading this same
+  // `DOCUMENT_SETTINGS_YJS_MAP` back -- the instant the map changes, synchronously, for this same
+  // local edit as much as for a remote one. Calling them again here would run the pagination pass
+  // twice for one edit; see the observer effect's own comment on why Yjs's synchronous `.observe()`
+  // firing makes that redundant rather than merely eventually-consistent.
   const updateDocumentSettings = (next: DocumentSettings) => {
     // The "Document settings…" menu item is disabled while read-only (below), so this dialog
     // should never be reachable in the first place -- this guard is what actually stops it,
     // rather than only the menu item's own `disabled` attribute.
     if (!editingAllowed) return;
-    setDocumentSettings(next);
-    if (!editor) return;
-    updatePaginationDocumentSettings(editor, next, () => applyPageGeometryCssVariables(next));
-    const nextProjection = projectLocalScreenplay(editor, {
-      documentSettings: next,
-      id: initial.id,
-      title: initial.title,
-      titlePages: titlePageState ? [titlePageFromState(titlePageState)] : [],
-    });
-    applyProjection(nextProjection);
+    writeDocumentSettingsToYMap(collab.doc.getMap(DOCUMENT_SETTINGS_YJS_MAP), next);
   };
 
   // "Escape to close with focus returned to the trigger" (plan.md's "Document settings" section,

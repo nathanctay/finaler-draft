@@ -11,6 +11,7 @@ export default defineConfig({
     '**/session-routing.spec.ts',
     '**/page-rendering-persistence.spec.ts',
     '**/presence-persistence.spec.ts',
+    '**/titlepage-persistence.spec.ts',
   ],
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),

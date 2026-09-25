@@ -3,10 +3,12 @@ import { Editor } from '@tiptap/core';
 import { AllSelection, TextSelection } from '@tiptap/pm/state';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
+import * as Y from 'yjs';
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import {
   DEFAULT_DOCUMENT_SETTINGS,
   createDefaultTitlePage,
+  type DocumentSettings,
   type Screenplay,
   type ScreenplayBlock,
   type TitlePage,
@@ -14,14 +16,19 @@ import {
 import { App } from './App.js';
 import { MessageApiError, type PersistedScreenplay } from './api.js';
 import { pageStackMinHeightIn } from './pagination.js';
+import * as screenplayEditorModule from './screenplayEditor.js';
 import {
   createLocalScreenplayEditorInit,
+  documentSettingsFromYMap,
+  DOCUMENT_SETTINGS_YJS_MAP,
   findScreenplayBlockPosition,
   getActiveScreenplayBlock,
   initialScreenplayContent,
   editorContentFromScreenplay,
   isScreenplayElementType,
   projectLocalScreenplay,
+  titlePageFromYMap,
+  TITLE_PAGE_YJS_MAP,
 } from './screenplayEditor.js';
 
 const firstActionId = 'ba53c2dc-10a6-46d7-a409-9aabbff7cf5d';
@@ -1716,10 +1723,60 @@ describe('title page editing', () => {
   // The two autosave tests that used to live here ("autosaves a title-page edit, preserving the
   // rest of the title page exactly" and "does not autosave a freshly loaded title page before any
   // edit") tested `api.saveScreenplay`, which collaboration slice 1 deleted along with the whole
-  // REST PUT/version mechanism. Title-page and document-settings edits are NOT yet wired through
-  // Yjs -- they remain local React state only for this slice, a known, deliberate gap called out
-  // in progress/collaboration-slice-1.md, not something silently dropped here. There is currently
-  // no persistence mechanism for either to test.
+  // REST PUT/version mechanism. This slice (progress/collaboration-title-page.md) replaces that
+  // gap with a real save path -- the title page now lives in `collab.doc`'s own `TITLE_PAGE_YJS_MAP`
+  // -- which the test below proves directly.
+  it('an edit reaches the collaborative Y.Doc, preserving the rest of the title page exactly', async () => {
+    // `App` never exposes `collab.doc` directly; spying on the module's own `seedScreenplayYDoc`
+    // (the function that builds it for the no-collaboration-server path every test in this file
+    // runs under -- see the top-of-file comment on why) captures the exact `Y.Doc` instance this
+    // mounted `<App>` is using, the same way a real `HocuspocusProvider`'s `.document` would be
+    // inspected end to end (`apps/collab/src/collaboration.integration.test.ts`'s own tests do
+    // exactly that against a real socket; this is the unit-level equivalent for the local path).
+    const seedSpy = vi.spyOn(screenplayEditorModule, 'seedScreenplayYDoc');
+    const initial = screenplayWithTitlePages([
+      { ...createDefaultTitlePage(titlePageId, 'Custom Title'), credit: 'written by' },
+    ]);
+    render(<App initial={initial} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const titleField = screen.getByRole('textbox', { name: 'Title page: title' });
+    fireEvent.input(titleField, { target: { textContent: 'A New Title' } });
+
+    const doc = seedSpy.mock.results[0]?.value as Y.Doc;
+    expect(doc).toBeInstanceOf(Y.Doc);
+    await waitFor(() => {
+      expect(titlePageFromYMap(doc.getMap(TITLE_PAGE_YJS_MAP))).toEqual({
+        id: titlePageId,
+        title: 'A New Title',
+        credit: 'written by',
+      });
+    });
+
+    seedSpy.mockRestore();
+  });
+
+  it('renders the title page read-only and never reaches the Y.Doc from a field-edit attempt while entitlement forbids editing', async () => {
+    const seedSpy = vi.spyOn(screenplayEditorModule, 'seedScreenplayYDoc');
+    const initial = screenplayWithTitlePages([createDefaultTitlePage(titlePageId, 'Custom Title')]);
+    render(<App initial={initial} entitlementReadOnly={{ message: 'Read-only for this test.' }} />);
+    await screen.findByRole('article', { name: 'Title page' });
+
+    const titleField = screen.getByRole('textbox', { name: 'Title page: title' });
+    // `TitlePageView`'s own `readOnly` prop drops `contentEditable` and detaches `onInput`
+    // entirely while read-only (`titlePageEditor.tsx`'s own comment) -- this `fireEvent.input`
+    // therefore has no listener to reach at all, which is itself the first-line proof that a
+    // read-only title page cannot dispatch an edit through the DOM. `updateTitlePageState`'s own
+    // `if (!editingAllowed) return` (App.tsx) is a second, independent guard behind this one, not
+    // separately exercised here -- there is no route through this component's public surface that
+    // reaches it with `editingAllowed` false and the DOM guard bypassed.
+    fireEvent.input(titleField, { target: { textContent: 'Should never land' } });
+
+    const doc = seedSpy.mock.results[0]?.value as Y.Doc;
+    expect(titlePageFromYMap(doc.getMap(TITLE_PAGE_YJS_MAP))?.title).toBe('Custom Title');
+
+    seedSpy.mockRestore();
+  });
 
   it('still treats a screenplay with more than one title page as unsupported and read-only', async () => {
     const initial = screenplayWithTitlePages([
@@ -2116,16 +2173,69 @@ describe('document settings', () => {
    * settings at all, must still save those same non-default settings back -- not the
    * specification's defaults.
    */
-  // Two tests used to live here, both verified through the now-deleted `api.saveScreenplay` payload:
-  // "a loaded screenplay keeps its own non-default settings through an unrelated autosave, not the
-  // schema defaults" (documentSettings state is independent of editor content edits, so an
-  // unrelated edit must not reset it to schema defaults) and "toggling scene numbers on changes
-  // only documentSettings.sceneNumbersEnabled, leaving every block byte-identical" (plan.md: scene
-  // numbers are display-only decorations, never written into a block). Both properties are still
-  // real -- `documentSettings` is still separate `useState` in App.tsx or actual scene-number
-  // rendering already covered by pagination.test.ts -- but with no save call left to inspect the
-  // outgoing payload, proving them now needs new test-only instrumentation this slice does not add.
-  // Flagged as a known gap in progress/collaboration-slice-1.md rather than silently dropped.
+  // Two tests used to live here, both verified through the now-deleted `api.saveScreenplay`
+  // payload. This slice (progress/collaboration-title-page.md) gives `documentSettings` a real
+  // save path -- `collab.doc`'s own `DOCUMENT_SETTINGS_YJS_MAP` -- and the two tests below replace
+  // these with the equivalent property proven against that map directly, the same technique the
+  // title-page tests above use.
+  it('toggling scene numbers writes only sceneNumbersEnabled to the Y.Doc, leaving every other setting at its seeded value', async () => {
+    const seedSpy = vi.spyOn(screenplayEditorModule, 'seedScreenplayYDoc');
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const dialog = await openDialog(user);
+    await user.click(within(dialog).getByRole('checkbox', { name: 'Number scenes' }));
+
+    const doc = seedSpy.mock.results[0]?.value as Y.Doc;
+    await waitFor(() => {
+      expect(documentSettingsFromYMap(doc.getMap(DOCUMENT_SETTINGS_YJS_MAP))).toEqual({
+        ...DEFAULT_DOCUMENT_SETTINGS,
+        sceneNumbersEnabled: true,
+      });
+    });
+
+    seedSpy.mockRestore();
+  });
+
+  it("a loaded screenplay's own non-default document settings are still what the Y.Doc holds after an unrelated body edit, not the schema defaults", async () => {
+    const seedSpy = vi.spyOn(screenplayEditorModule, 'seedScreenplayYDoc');
+    const nonDefaultSettings: DocumentSettings = {
+      ...DEFAULT_DOCUMENT_SETTINGS,
+      characterIndentIn: DEFAULT_DOCUMENT_SETTINGS.characterIndentIn - 0.5,
+      autoMoreContinued: false,
+    };
+    const user = userEvent.setup();
+    render(
+      <App
+        initial={persistedScreenplay(
+          '9c7c5f7b-c2f0-47a0-a639-dfd0c5702b95',
+          'Settings Draft',
+          'INT. APARTMENT - MORNING',
+          nonDefaultSettings,
+        )}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    // An edit that has nothing to do with settings -- converting the one block's element, the
+    // same real body edit `'undo history for an edit made before a settings change...'` above
+    // uses. (Literally typing into the ProseMirror canvas isn't exercised at this level anywhere
+    // in this file: jsdom has no `elementFromPoint`, which `EditorView.posAtCoords` needs for a
+    // real mousedown-driven caret placement.)
+    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'action',
+    );
+
+    const doc = seedSpy.mock.results[0]?.value as Y.Doc;
+    expect(documentSettingsFromYMap(doc.getMap(DOCUMENT_SETTINGS_YJS_MAP))).toEqual(
+      nonDefaultSettings,
+    );
+
+    seedSpy.mockRestore();
+  });
 
   /**
    * The architectural property `PaginationExtension`'s plugin-state redesign exists to protect:
