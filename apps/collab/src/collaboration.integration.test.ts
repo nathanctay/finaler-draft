@@ -349,6 +349,10 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
       await waitForSynced(client);
       client.awareness!.setLocalStateField('user', { lastActiveAt: Date.now() });
       client.awareness!.setLocalStateField('cursor', { anchor: 'irrelevant', head: 'irrelevant' });
+      // This slice's own addition to awareness -- the title page's own cursor, subject to the
+      // identical guarantee `cursor` (the manuscript body's) already proves above: awareness never
+      // reaches `onStoreDocument`, regardless of which surface a cursor is for.
+      client.awareness!.setLocalStateField('titlePageCursor', { field: 'title', offset: 3 });
       // No `waitForCondition` polling a positive signal here on purpose: this proves an absence,
       // which only a fixed wait can -- the same reasoning `collaboration.integration.test.ts`'s
       // own reviewer-write-rejection test gives for its identical choice.
@@ -444,6 +448,56 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
       // The reviewer's own local Yjs document is free to hold the pending change (Hocuspocus does
       // not need to explain the rejection back into the client's local state for this slice) --
       // what matters is that it never reached the shared document the owner sees.
+    } finally {
+      ownerClient.destroy();
+      reviewerClient.destroy();
+    }
+  }, 20_000);
+
+  it('a reviewer’s title-page cursor is visible to the owner, but a reviewer’s attempted title-page edit never reaches the shared document -- the same write-rejection gate, proven for this slice’s own two Y.Maps', async () => {
+    const owner = await signUp('owner-reviewer-titlepage-test@example.test');
+    const reviewer = await signUp('reviewer-titlepage-write-test@example.test');
+    const { projectId, screenplayId } = await createProjectAndScreenplay(owner.actorId);
+    await addMember(projectId, reviewer.actorId, 'reviewer');
+
+    const ownerClient = connectProvider(screenplayId, owner.cookie);
+    const reviewerClient = connectProvider(screenplayId, reviewer.cookie);
+    try {
+      await Promise.all([waitForSynced(ownerClient), waitForSynced(reviewerClient)]);
+      expect(reviewerClient.authorizedScope).toBe('readonly');
+
+      // Visible: `progress/collaboration-title-page.md`'s "write rejection is free" argument
+      // extends to awareness too -- a reviewer is not a second-class viewer just because they
+      // cannot edit (plan.md), so their title-page cursor must reach the owner exactly like an
+      // editor's would.
+      reviewerClient.awareness!.setLocalStateField('user', { lastActiveAt: Date.now() });
+      reviewerClient.awareness!.setLocalStateField('titlePageCursor', {
+        field: 'title',
+        offset: 2,
+      });
+      await waitForCondition(() =>
+        Array.from(ownerClient.awareness!.getStates().values()).some(
+          (state) =>
+            (state as { titlePageCursor?: { field?: string } }).titlePageCursor?.field === 'title',
+        ),
+      );
+
+      // Never writes: the reviewer attempts to overwrite the title page directly on their own
+      // document -- bypassing `TitlePageView`'s own `readOnly` gate entirely, the same "test the
+      // socket, not only the UI" shape `writeLine` above already established for the body. This
+      // must never reach the owner's own `TITLE_PAGE_YJS_MAP`.
+      const reviewerTitlePageMap = reviewerClient.document.getMap(TITLE_PAGE_YJS_MAP);
+      reviewerTitlePageMap.doc!.transact(() => {
+        writeTitlePageToYMap(reviewerTitlePageMap, {
+          id: randomUUID(),
+          title: 'A reviewer title that must never survive',
+        });
+      });
+      // A fixed wait, not `waitForCondition` polling for absence -- proving a negative, the same
+      // reasoning the body's own reviewer-write-rejection test above gives.
+      await sleep(500);
+      const ownerTitlePage = titlePageFromYMap(ownerClient.document.getMap(TITLE_PAGE_YJS_MAP));
+      expect(ownerTitlePage?.title).not.toBe('A reviewer title that must never survive');
     } finally {
       ownerClient.destroy();
       reviewerClient.destroy();

@@ -94,6 +94,55 @@ function sanitizeCursor(value: unknown): { anchor: unknown; head: unknown } | un
   return { anchor: candidate.anchor, head: candidate.head };
 }
 
+/**
+ * The finite set of title-page fields a cursor may name -- mirrors `apps/web/src/
+ * titlePageEditor.tsx`'s own `TitlePageFieldName` union, duplicated here rather than imported: this
+ * package is server-only and must never depend on `apps/web`, the same reason `sanitizeCursor`
+ * above validates the body cursor's shape without importing anything from `y-prosemirror`. Kept as
+ * a finite whitelist, not "any non-empty string", because the client that receives this value
+ * builds a `document.querySelector('[data-title-page-field="..."]')` attribute selector directly
+ * from it (`apps/web/src/titlePageCursors.ts`) -- an unbounded string could otherwise carry
+ * selector-breaking characters into a peer's browser, whereas a value outside this set is simply
+ * dropped here before it ever reaches one.
+ */
+const TITLE_PAGE_CURSOR_FIELDS = new Set([
+  'title',
+  'credit',
+  'source',
+  'draft-date',
+  'author',
+  'contact',
+]);
+
+/** Structural validation for the title page's own cursor field (this slice's addition). Plain
+ * data, not a Yjs relative position -- a title-page field is a last-write-wins string, not a
+ * `Y.Text` (`progress/collaboration-title-page.md`), so there is no relative-position concept to
+ * decode here at all, unlike `sanitizeCursor` above. `offset`/`lineIndex` are still only ever
+ * checked for a plausible shape, never trusted as *correct* for the field's current length --
+ * that clamping is the client's own job (`apps/web/src/titlePageCursors.ts`), since only the
+ * client can measure the field's live DOM text. */
+function sanitizeTitlePageCursor(
+  value: unknown,
+): { field: string; lineIndex?: number; offset: number } | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const candidate = value as { field?: unknown; lineIndex?: unknown; offset?: unknown };
+  if (typeof candidate.field !== 'string' || !TITLE_PAGE_CURSOR_FIELDS.has(candidate.field)) {
+    return undefined;
+  }
+  if (!Number.isInteger(candidate.offset) || (candidate.offset as number) < 0) return undefined;
+  if (candidate.lineIndex !== undefined) {
+    if (!Number.isInteger(candidate.lineIndex) || (candidate.lineIndex as number) < 0) {
+      return undefined;
+    }
+    return {
+      field: candidate.field,
+      lineIndex: candidate.lineIndex as number,
+      offset: candidate.offset as number,
+    };
+  }
+  return { field: candidate.field, offset: candidate.offset as number };
+}
+
 /** Never re-stamped from the server's own clock (see this module's top-of-file comment and
  * `packages/screenplay-editor/src/presence.ts`'s own comment on why only the client can tell a
  * real keystroke apart from the periodic awareness heartbeat) -- only clamped so a client cannot
@@ -127,6 +176,10 @@ function clampLastActiveAt(value: unknown, now: number): number {
  * per authenticated connection), so the spoofing this hook exists to close stays closed; what
  * changes is only that a single connection's own multi-client-id housekeeping message is no longer
  * mistaken for that attack and dropped.
+ *
+ * `titlePageCursor` (this slice's addition) is sanitized the same way `cursor` already is --
+ * structurally validated and passed through unchanged if valid, dropped silently otherwise -- and
+ * carries no identity of its own to overwrite, so it needs nothing beyond that.
  */
 export function sanitizeAwarenessStates(
   states: Map<number, Record<string, unknown>>,
@@ -141,6 +194,12 @@ export function sanitizeAwarenessStates(
       lastActiveAt: clampLastActiveAt(rawUser?.lastActiveAt, now),
     };
     const cursor = sanitizeCursor((state as { cursor?: unknown }).cursor);
-    states.set(clientId, cursor ? { user: sanitizedUser, cursor } : { user: sanitizedUser });
+    const titlePageCursor = sanitizeTitlePageCursor(
+      (state as { titlePageCursor?: unknown }).titlePageCursor,
+    );
+    const sanitized: Record<string, unknown> = { user: sanitizedUser };
+    if (cursor) sanitized.cursor = cursor;
+    if (titlePageCursor) sanitized.titlePageCursor = titlePageCursor;
+    states.set(clientId, sanitized);
   }
 }

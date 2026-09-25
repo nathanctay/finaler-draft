@@ -165,4 +165,91 @@ describe('sanitizeAwarenessStates', () => {
     sanitizeAwarenessStates(states, identity, 100);
     expect(states.size).toBe(0);
   });
+
+  describe('titlePageCursor', () => {
+    it('keeps a well-formed title-page cursor unchanged', () => {
+      const titlePageCursor = { field: 'title', offset: 3 };
+      const states = new Map([[1, { user: {}, titlePageCursor }]]);
+      sanitizeAwarenessStates(states, identity, 100);
+      expect((states.get(1) as { titlePageCursor: unknown }).titlePageCursor).toEqual(
+        titlePageCursor,
+      );
+    });
+
+    it('keeps a well-formed title-page cursor with a lineIndex unchanged', () => {
+      const titlePageCursor = { field: 'author', lineIndex: 1, offset: 5 };
+      const states = new Map([[1, { user: {}, titlePageCursor }]]);
+      sanitizeAwarenessStates(states, identity, 100);
+      expect((states.get(1) as { titlePageCursor: unknown }).titlePageCursor).toEqual(
+        titlePageCursor,
+      );
+    });
+
+    it('drops a title-page cursor naming a field outside the whitelist', () => {
+      const states = new Map([
+        [1, { user: {}, titlePageCursor: { field: 'not-a-real-field', offset: 0 } }],
+      ]);
+      sanitizeAwarenessStates(states, identity, 100);
+      expect(states.get(1)).toEqual({
+        user: { name: 'Mara Quinn', color: '#2563eb', lastActiveAt: 0 },
+      });
+    });
+
+    it('drops a title-page cursor whose field is not a string at all -- the exact shape that would otherwise reach a peer’s querySelector', () => {
+      const states = new Map([[1, { user: {}, titlePageCursor: { field: 123, offset: 0 } }]]);
+      sanitizeAwarenessStates(states, identity, 100);
+      expect(states.get(1)).toEqual({
+        user: { name: 'Mara Quinn', color: '#2563eb', lastActiveAt: 0 },
+      });
+    });
+
+    it('drops a title-page cursor with a negative offset', () => {
+      const states = new Map([[1, { user: {}, titlePageCursor: { field: 'title', offset: -1 } }]]);
+      sanitizeAwarenessStates(states, identity, 100);
+      expect(states.get(1)).toEqual({
+        user: { name: 'Mara Quinn', color: '#2563eb', lastActiveAt: 0 },
+      });
+    });
+
+    it('drops a title-page cursor with a non-integer offset', () => {
+      const states = new Map([[1, { user: {}, titlePageCursor: { field: 'title', offset: 1.5 } }]]);
+      sanitizeAwarenessStates(states, identity, 100);
+      expect(states.get(1)).toEqual({
+        user: { name: 'Mara Quinn', color: '#2563eb', lastActiveAt: 0 },
+      });
+    });
+
+    it('drops a title-page cursor with a negative lineIndex', () => {
+      const states = new Map([
+        [1, { user: {}, titlePageCursor: { field: 'author', lineIndex: -1, offset: 0 } }],
+      ]);
+      sanitizeAwarenessStates(states, identity, 100);
+      expect(states.get(1)).toEqual({
+        user: { name: 'Mara Quinn', color: '#2563eb', lastActiveAt: 0 },
+      });
+    });
+
+    it('drops a title-page cursor that is not an object at all', () => {
+      const states = new Map([[1, { user: {}, titlePageCursor: 'not-an-object' }]]);
+      sanitizeAwarenessStates(states, identity, 100);
+      expect(states.get(1)).toEqual({
+        user: { name: 'Mara Quinn', color: '#2563eb', lastActiveAt: 0 },
+      });
+    });
+
+    it('carries a valid cursor and a valid titlePageCursor together -- a writer can move between the two surfaces without either being clobbered', () => {
+      const cursor = {
+        anchor: { tname: 'default', item: null, assoc: 0 },
+        head: { tname: 'default', item: null, assoc: 0 },
+      };
+      const titlePageCursor = { field: 'contact', lineIndex: 0, offset: 2 };
+      const states = new Map([[1, { user: {}, cursor, titlePageCursor }]]);
+      sanitizeAwarenessStates(states, identity, 100);
+      expect(states.get(1)).toEqual({
+        user: { name: 'Mara Quinn', color: '#2563eb', lastActiveAt: 0 },
+        cursor,
+        titlePageCursor,
+      });
+    });
+  });
 });
