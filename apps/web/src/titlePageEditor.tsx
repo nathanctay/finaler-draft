@@ -1,7 +1,19 @@
 import { useEffect, useRef, type CSSProperties } from 'react';
+import type { Awareness } from 'y-protocols/awareness';
 import type { TitlePageState } from './titlePageState.js';
+import { useTitlePagePresence } from './titlePageCursors.js';
 
-type TitlePageFieldName = 'title' | 'credit' | 'source' | 'draft-date' | 'author' | 'contact';
+/** Exported for `titlePageCursors.ts`'s own use: the awareness cursor a remote writer broadcasts
+ * (`TitlePageCursor`, that module) names the field it is in with this exact vocabulary, so both
+ * this component's own `data-title-page-field` attributes and that module's `querySelector` calls
+ * stay in agreement by construction rather than by two independently maintained lists. */
+export type TitlePageFieldName =
+  | 'title'
+  | 'credit'
+  | 'source'
+  | 'draft-date'
+  | 'author'
+  | 'contact';
 
 /**
  * One editable text field on the title page: a bare `contentEditable` `div`, not a ProseMirror
@@ -155,20 +167,42 @@ function TitlePageLineList({
  *
  * `readOnly` is App.tsx's own `editingAllowed` (schema support *and* entitlement, combined) --
  * this component has no opinion of its own about why it is read-only, only whether it is.
+ *
+ * `awareness`/`zoomPercent` feed `useTitlePagePresence` (`titlePageCursors.ts`): remote
+ * collaborators' cursors on this title page, rendered as widgets appended directly to this
+ * `<article>` -- never inside any `[data-title-page-field]` subtree, so they can never be read
+ * back by a field's own `onInput` (that module's own top-of-file comment has the full reasoning).
+ * `awareness` is `undefined` in local, no-collaboration-server mode, in which case the hook does
+ * nothing at all -- matching every other presence-aware surface in this codebase.
  */
 export function TitlePageView({
+  awareness,
   onChange,
   readOnly = false,
   state,
   style,
+  zoomPercent = 100,
 }: {
+  awareness?: Awareness | undefined;
   onChange: (next: TitlePageState) => void;
   readOnly?: boolean;
   state: TitlePageState;
   style?: CSSProperties;
+  zoomPercent?: number;
 }) {
+  const articleRef = useRef<HTMLElement | null>(null);
+  useTitlePagePresence({
+    awareness,
+    containerRef: articleRef,
+    // Local, no-collaboration-server mode never renders a remote cursor (`awareness` is
+    // `undefined`, so the hook no-ops before this value is ever read) -- `zoomPercent`'s own
+    // default (100, above) exists only so this prop can stay optional for every caller that has no
+    // zoom concept at all (this component's own tests included).
+    zoomPercent,
+  });
+
   return (
-    <article aria-label="Title page" className="title-page" style={style}>
+    <article aria-label="Title page" className="title-page" ref={articleRef} style={style}>
       <div className="title-page-center">
         <TitlePageField
           ariaLabel="Title page: title"

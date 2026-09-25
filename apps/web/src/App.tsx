@@ -2022,9 +2022,11 @@ export function App({
                 24/48/72px and `scrollHeight` scaled exactly in step. */}
             {titlePageState && (
               <TitlePageView
+                awareness={collab.provider?.awareness ?? undefined}
                 onChange={updateTitlePageState}
                 readOnly={!editingAllowed}
                 state={titlePageState}
+                zoomPercent={zoomPercent}
               />
             )}
             <article

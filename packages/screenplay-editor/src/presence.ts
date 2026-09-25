@@ -53,6 +53,18 @@
  * the owner's decision ("a thin coloured caret, with the writer's name on hover or briefly when
  * they start typing" -- not a persistent label, which would compete with the manuscript on a fixed
  * 12pt Courier grid and move on every keystroke).
+ *
+ * ## A second surface: the title page
+ *
+ * `apps/web/src/titlePageCursors.ts` reuses several of this module's exports wholesale rather than
+ * building a parallel colour/name/expiry mechanism for the title page's own remote cursors: the
+ * title page is a set of bare `contentEditable` divs, not a ProseMirror document, so it has no
+ * `yCursorPlugin`/decoration surface to bind to (`createRemotePresenceExtension` below is
+ * unavoidably ProseMirror-specific), but `isRecentlyActive`, `createGlowController`,
+ * `buildRemoteCursorWidget`, `markPresenceActive`, and the two duration constants above are all
+ * surface-agnostic -- they read and write plain `Awareness` state and plain DOM, never anything
+ * ProseMirror-specific -- so they are exported for that reuse instead of being reimplemented a
+ * second time for one more kind of cursor.
  */
 import { Extension } from '@tiptap/core';
 import { Plugin } from '@tiptap/pm/state';
@@ -93,8 +105,12 @@ const FALLBACK_NAME = 'A collaborator';
  * display-only signal, not a security boundary; see the module comment on why the server does not
  * re-stamp it) falls inside `windowMs` of `now`. Missing or non-finite is never "active": a peer
  * this module has not sanitized `user` from yet must not flash into the participant list only to
- * vanish once its own value arrives. */
-function isRecentlyActive(
+ * vanish once its own value arrives.
+ *
+ * Exported for `apps/web/src/titlePageCursors.ts`'s reuse -- see this module's own top-of-file
+ * comment on why the title page's remote cursors read the identical "present"/"active" windows
+ * rather than defining their own. */
+export function isRecentlyActive(
   lastActiveAt: number | undefined,
   now: number,
   windowMs: number,
@@ -225,6 +241,18 @@ function noRemoteSelectionAttrs(): Record<string, never> {
 }
 
 /**
+ * Refreshes this browser's own `lastActiveAt` to now -- the one write both the body's
+ * `presenceHeartbeatPlugin` (below) and the title page's own local-cursor tracking
+ * (`apps/web/src/titlePageCursors.ts`) need to make on real, locally-originated activity. Kept as
+ * one exported function, not duplicated per surface, so "what counts as marking a writer active"
+ * has exactly one implementation regardless of which part of the document they are typing in.
+ */
+export function markPresenceActive(awareness: Awareness): void {
+  const current = (awareness.getLocalState() as { user?: PresenceUser } | null)?.user;
+  awareness.setLocalStateField('user', { ...current, lastActiveAt: Date.now() });
+}
+
+/**
  * The heartbeat: refreshes this browser's own `lastActiveAt` on real, locally-originated activity
  * (a keystroke, a click that moves the caret) -- never on a remote peer's edit merging in locally,
  * which also changes `view.state` but must not count as *this* writer's own activity.
@@ -249,13 +277,9 @@ function presenceHeartbeatPlugin(
 ): Plugin {
   return new Plugin({
     view(editorView: EditorView) {
-      const markActive = () => {
-        const current = (awareness.getLocalState() as { user?: PresenceUser } | null)?.user;
-        awareness.setLocalStateField('user', { ...current, lastActiveAt: Date.now() });
-      };
       // Present the instant this tab connects, before any keystroke -- see the module comment
       // on why "present" must not require having already typed.
-      markActive();
+      markPresenceActive(awareness);
 
       let previousState = editorView.state;
       const update = (view: EditorView) => {
@@ -264,7 +288,7 @@ function presenceHeartbeatPlugin(
           (!next.doc.eq(previousState.doc) || !next.selection.eq(previousState.selection)) &&
           !ySyncPluginKey.getState(next)?.isChangeOrigin;
         previousState = next;
-        if (changedLocally) markActive();
+        if (changedLocally) markPresenceActive(awareness);
       };
 
       return {
@@ -310,8 +334,15 @@ function presenceHeartbeatPlugin(
  * dispatch, no decoration recompute, just a `Map` lookup and a `setAttribute`/`removeAttribute`
  * call, and it only ever runs in response to a real awareness change (this peer's own periodic
  * keep-alive included) or a precisely-timed expiry, never on a fixed polling cadence.
+ *
+ * Exported so `apps/web/src/titlePageCursors.ts` can run a second, independent instance of this
+ * same controller against the same `Awareness`, scoped to the title page's own cursor widgets --
+ * see this module's top-of-file comment. Two instances never interfere: each tracks only the
+ * `clientId -> HTMLElement` pairs it was itself `register`ed with, so the body's own instance
+ * (inside `createRemotePresenceExtension`, below) and the title page's are simply two independent
+ * listeners on the same `awareness.on('change', ...)` event, each blind to the other's nodes.
  */
-function createGlowController(awareness: Awareness) {
+export function createGlowController(awareness: Awareness) {
   const nodes = new Map<number, HTMLElement>();
   const timers = new Map<number, ReturnType<typeof setTimeout>>();
 
@@ -388,6 +419,13 @@ function createGlowController(awareness: Awareness) {
 
   return {
     register,
+    // Exposed (unlike before this slice, when it was only ever called internally for a real
+    // `removed` disconnect) for `apps/web/src/titlePageCursors.ts`'s own case: a peer who is still
+    // connected but no longer has an active title-page cursor (they moved to the manuscript body,
+    // or clicked outside the title page entirely) is not a `removed` awareness client id at all --
+    // the caller has to be able to say "stop tracking this one" without a disconnect ever
+    // happening, or its pending expiry timer would otherwise leak for the life of the connection.
+    forget,
     destroy(): void {
       awareness.off('change', onAwarenessChange);
       timers.forEach((timer) => clearTimeout(timer));

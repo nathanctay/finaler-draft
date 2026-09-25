@@ -12,6 +12,7 @@ export default defineConfig({
     '**/page-rendering-persistence.spec.ts',
     '**/presence-persistence.spec.ts',
     '**/titlepage-persistence.spec.ts',
+    '**/titlepage-cursors-persistence.spec.ts',
   ],
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
