@@ -1161,6 +1161,28 @@ export function titlePageFromYMap(map: Y.Map<unknown>): TitlePage | undefined {
   return titlePage;
 }
 
+function sameStringList(value: unknown, next: readonly string[]): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length === next.length &&
+    next.every((item, index) => value[index] === item)
+  );
+}
+
+/**
+ * The `TitlePage` fields this map stores, one key each. Listed rather than derived so that adding a
+ * field to `TitlePage` without adding it here is a type error (`satisfies`), not a field that
+ * silently never syncs.
+ */
+const TITLE_PAGE_SCALAR_KEYS = [
+  'title',
+  'credit',
+  'source',
+  'draftDate',
+] as const satisfies readonly (keyof TitlePage)[];
+
+const TITLE_PAGE_LIST_KEYS = ['authors', 'contact'] as const satisfies readonly (keyof TitlePage)[];
+
 /**
  * Writes `titlePage` into `TITLE_PAGE_YJS_MAP` as plain last-write-wins values, one key per field
  * -- see `TITLE_PAGE_YJS_MAP`'s own comment for why these are plain values, not `Y.Text`. The only
@@ -1168,22 +1190,49 @@ export function titlePageFromYMap(map: Y.Map<unknown>): TitlePage | undefined {
  * in the caller's own `doc.transact()`) and the server (`apps/collab/src/database.ts`'s one-shot
  * seed/backfill, used bare since nothing else shares its transaction).
  *
- * Clears every existing key first -- not merely overwriting the six known ones -- so a stale key
- * from a future field this function doesn't yet know about can never survive a write it should
- * have been part of, and so `undefined`-out fields (a writer clearing a field back to nothing,
- * `titlePage.title === undefined`) are actually removed rather than left holding a stale value:
- * `titlePageFromYMap` above reads an *absent* key as "no value," never a leftover one.
+ * **Touches only the keys that actually differ from what the map already holds.** This is the whole
+ * point of the function and not an optimisation: `Y.Map` resolves a concurrent write per *key*, so
+ * which keys a write touches is exactly which keys it can take from another writer. An earlier
+ * version cleared every key and rewrote all of them from the caller's full `TitlePage` -- which
+ * made every write touch every field, so two writers editing *different* fields at the same time
+ * still collided on all of them and one writer's edit was discarded whole (writer A renames the
+ * title, writer B adds an author, and they converge on B's author with A's title reverted). Writing
+ * only the genuine difference confines a collision to the one field two people are actually
+ * contesting, which is the cost `TITLE_PAGE_YJS_MAP`'s own comment describes.
+ *
+ * Keys the incoming `titlePage` does not carry are deleted rather than left behind: a writer
+ * clearing a field back to nothing (`titlePage.title === undefined`) must actually remove the key,
+ * since `titlePageFromYMap` above reads an *absent* key as "no value," never a leftover one. That
+ * sweep covers unknown keys too -- a field a future version of this function writes and this one
+ * does not know about cannot survive here pretending to be current.
+ *
+ * `titlePage === undefined` means "this screenplay has no title page at all" and clears the map
+ * completely, which is what leaves `isTitlePageMapSeeded` false.
  */
 export function writeTitlePageToYMap(map: Y.Map<unknown>, titlePage: TitlePage | undefined): void {
-  for (const key of [...map.keys()]) map.delete(key);
-  if (!titlePage) return;
-  map.set('id', titlePage.id);
-  if (titlePage.title !== undefined) map.set('title', titlePage.title);
-  if (titlePage.credit !== undefined) map.set('credit', titlePage.credit);
-  if (titlePage.source !== undefined) map.set('source', titlePage.source);
-  if (titlePage.draftDate !== undefined) map.set('draftDate', titlePage.draftDate);
-  if (titlePage.authors !== undefined) map.set('authors', [...titlePage.authors]);
-  if (titlePage.contact !== undefined) map.set('contact', [...titlePage.contact]);
+  if (!titlePage) {
+    for (const key of [...map.keys()]) map.delete(key);
+    return;
+  }
+
+  const desired = new Map<string, string | string[]>([['id', titlePage.id]]);
+  for (const key of TITLE_PAGE_SCALAR_KEYS) {
+    const value = titlePage[key];
+    if (value !== undefined) desired.set(key, value);
+  }
+  for (const key of TITLE_PAGE_LIST_KEYS) {
+    const value = titlePage[key];
+    if (value !== undefined) desired.set(key, [...value]);
+  }
+
+  for (const key of [...map.keys()]) {
+    if (!desired.has(key)) map.delete(key);
+  }
+  for (const [key, value] of desired) {
+    const current = map.get(key);
+    const unchanged = Array.isArray(value) ? sameStringList(current, value) : current === value;
+    if (!unchanged) map.set(key, value);
+  }
 }
 
 const DOCUMENT_SETTINGS_KEYS = [
@@ -1208,9 +1257,11 @@ export function isDocumentSettingsMapSeeded(map: Y.Map<unknown>): boolean {
  * is deliberately left unset in that case rather than defaulted here, so `safeParseScreenplay`'s
  * own schema default (see that option's own comment) remains the single place that default lives.
  * A *partially* populated map still returns a complete object, falling each individually missing
- * key back to `DEFAULT_DOCUMENT_SETTINGS` -- defensive only: every writer of this map
- * (`writeDocumentSettingsToYMap` below) always writes all six keys atomically in one
- * `doc.transact()`, and nothing here is expected to ever see a genuine partial write.
+ * key back to `DEFAULT_DOCUMENT_SETTINGS`. That fallback is load-bearing rather than merely
+ * defensive: `writeDocumentSettingsToYMap` below deliberately writes only the keys whose value
+ * changed, so the *seeding* write is the one that establishes all six, and any later write touches
+ * a subset. A key is therefore missing here only if it was never seeded at all (a document seeded
+ * before a settings field existed), which is exactly the case this default covers.
  */
 export function documentSettingsFromYMap(map: Y.Map<unknown>): DocumentSettings | undefined {
   if (!isDocumentSettingsMapSeeded(map)) return undefined;
@@ -1223,15 +1274,24 @@ export function documentSettingsFromYMap(map: Y.Map<unknown>): DocumentSettings 
 }
 
 /**
- * Writes `documentSettings` into `DOCUMENT_SETTINGS_YJS_MAP`, all six keys at once -- see
- * `documentSettingsFromYMap`'s own comment on why every writer of this map keeps that invariant.
+ * Writes `documentSettings` into `DOCUMENT_SETTINGS_YJS_MAP`, touching only the keys whose value
+ * actually differs from what the map already holds -- the same rule, for the same reason, as
+ * `writeTitlePageToYMap` above (see its own comment: a `Y.Map` write can only take from another
+ * writer on the keys it touches, so a write that touches all six settings makes two writers who
+ * changed two *different* settings collide on both). The settings dialog submits a whole
+ * `DocumentSettings` object for a single changed control, so without this, changing the scene-number
+ * toggle would revert a collaborator's concurrent character-indent change.
+ *
+ * Every key is still present after seeding an empty map (each `map.get` is `undefined` there and no
+ * `DocumentSettings` field is optional), which is what `documentSettingsFromYMap`'s own comment
+ * relies on and what makes `isDocumentSettingsMapSeeded` true.
  */
 export function writeDocumentSettingsToYMap(
   map: Y.Map<unknown>,
   documentSettings: DocumentSettings,
 ): void {
   for (const key of DOCUMENT_SETTINGS_KEYS) {
-    map.set(key, documentSettings[key]);
+    if (map.get(key) !== documentSettings[key]) map.set(key, documentSettings[key]);
   }
 }
 
