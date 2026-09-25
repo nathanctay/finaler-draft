@@ -244,6 +244,117 @@ describe('title page and document settings Y.Maps', () => {
     });
   });
 
+  it('a re-write that changes nothing touches the map at all -- no key is re-set, so nothing is broadcast', () => {
+    const doc = new Y.Doc();
+    const map = doc.getMap(TITLE_PAGE_YJS_MAP);
+    const titlePage: TitlePage = {
+      id: '00000000-0000-4000-8000-000000000014',
+      title: 'Unchanged',
+      authors: ['Someone'],
+    };
+    writeTitlePageToYMap(map, titlePage);
+
+    let observedAfterSeed = 0;
+    map.observe(() => {
+      observedAfterSeed += 1;
+    });
+    // A fresh object with identical contents, including a distinct-but-equal `authors` array: the
+    // diff compares list contents, not array identity, or every keystroke elsewhere on the page
+    // would still rewrite `authors` and collide on it.
+    writeTitlePageToYMap(map, { ...titlePage, authors: [...titlePage.authors!] });
+    expect(observedAfterSeed).toBe(0);
+  });
+
+  it('two writers editing different title-page fields at the same time both keep their edit', () => {
+    // The defect this diffing exists to prevent: the earlier implementation cleared and rewrote
+    // every key on every write, so two writers who touched different fields still collided on all
+    // of them and Y.Map's per-key resolution discarded one writer's edit whole.
+    const base: TitlePage = {
+      id: '00000000-0000-4000-8000-000000000015',
+      title: 'THE HEIST',
+      credit: 'Written by',
+      authors: ['First Writer'],
+    };
+    const a = new Y.Doc();
+    const b = new Y.Doc();
+    writeTitlePageToYMap(a.getMap(TITLE_PAGE_YJS_MAP), base);
+    Y.applyUpdate(b, Y.encodeStateAsUpdate(a));
+
+    // Concurrent, neither having seen the other: A renames the title, B adds a second author.
+    writeTitlePageToYMap(a.getMap(TITLE_PAGE_YJS_MAP), { ...base, title: 'THE HEIST II' });
+    writeTitlePageToYMap(b.getMap(TITLE_PAGE_YJS_MAP), {
+      ...base,
+      authors: ['First Writer', 'Second Writer'],
+    });
+
+    const fromA = Y.encodeStateAsUpdate(a);
+    const fromB = Y.encodeStateAsUpdate(b);
+    Y.applyUpdate(a, fromB);
+    Y.applyUpdate(b, fromA);
+
+    const converged: TitlePage = {
+      ...base,
+      title: 'THE HEIST II',
+      authors: ['First Writer', 'Second Writer'],
+    };
+    expect(titlePageFromYMap(a.getMap(TITLE_PAGE_YJS_MAP))).toEqual(converged);
+    expect(titlePageFromYMap(b.getMap(TITLE_PAGE_YJS_MAP))).toEqual(converged);
+  });
+
+  it('two writers editing the same title-page field converge on one value -- the accepted cost of plain last-write-wins', () => {
+    const base: TitlePage = { id: '00000000-0000-4000-8000-000000000016', title: 'Shared' };
+    const a = new Y.Doc();
+    const b = new Y.Doc();
+    writeTitlePageToYMap(a.getMap(TITLE_PAGE_YJS_MAP), base);
+    Y.applyUpdate(b, Y.encodeStateAsUpdate(a));
+
+    writeTitlePageToYMap(a.getMap(TITLE_PAGE_YJS_MAP), { ...base, title: "A's Title" });
+    writeTitlePageToYMap(b.getMap(TITLE_PAGE_YJS_MAP), { ...base, title: "B's Title" });
+
+    const fromA = Y.encodeStateAsUpdate(a);
+    const fromB = Y.encodeStateAsUpdate(b);
+    Y.applyUpdate(a, fromB);
+    Y.applyUpdate(b, fromA);
+
+    // One of the two edits is lost -- that is the documented cost, and it is contained to the one
+    // field both writers were genuinely contesting. What must never happen is the two diverging.
+    const settled = titlePageFromYMap(a.getMap(TITLE_PAGE_YJS_MAP));
+    expect(titlePageFromYMap(b.getMap(TITLE_PAGE_YJS_MAP))).toEqual(settled);
+    expect(["A's Title", "B's Title"]).toContain(settled?.title);
+  });
+
+  it('two writers changing different document settings at the same time both keep their change', () => {
+    const base: DocumentSettings = { ...DEFAULT_DOCUMENT_SETTINGS };
+    const a = new Y.Doc();
+    const b = new Y.Doc();
+    writeDocumentSettingsToYMap(a.getMap(DOCUMENT_SETTINGS_YJS_MAP), base);
+    Y.applyUpdate(b, Y.encodeStateAsUpdate(a));
+
+    // The settings dialog submits a whole DocumentSettings object for one changed control, so this
+    // is the ordinary shape of two people using the dialog at once, not a contrived case.
+    writeDocumentSettingsToYMap(a.getMap(DOCUMENT_SETTINGS_YJS_MAP), {
+      ...base,
+      sceneNumbersEnabled: !base.sceneNumbersEnabled,
+    });
+    writeDocumentSettingsToYMap(b.getMap(DOCUMENT_SETTINGS_YJS_MAP), {
+      ...base,
+      characterIndentIn: base.characterIndentIn + 0.5,
+    });
+
+    const fromA = Y.encodeStateAsUpdate(a);
+    const fromB = Y.encodeStateAsUpdate(b);
+    Y.applyUpdate(a, fromB);
+    Y.applyUpdate(b, fromA);
+
+    const converged: DocumentSettings = {
+      ...base,
+      sceneNumbersEnabled: !base.sceneNumbersEnabled,
+      characterIndentIn: base.characterIndentIn + 0.5,
+    };
+    expect(documentSettingsFromYMap(a.getMap(DOCUMENT_SETTINGS_YJS_MAP))).toEqual(converged);
+    expect(documentSettingsFromYMap(b.getMap(DOCUMENT_SETTINGS_YJS_MAP))).toEqual(converged);
+  });
+
   it('documentSettingsFromYMap reports no override for an unseeded map, and isDocumentSettingsMapSeeded agrees', () => {
     const doc = new Y.Doc();
     const map = doc.getMap(DOCUMENT_SETTINGS_YJS_MAP);

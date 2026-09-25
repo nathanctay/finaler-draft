@@ -59,13 +59,48 @@ the brief asked to be justified:
   value in this codebase already accepts, and far cheaper than the alternative's complexity for
   content this size and this rarely contested.
 
+### Field-level writes: only the keys that actually differ
+
+Added after review of the first implementation, which cleared every key and rewrote all of them from
+the caller's full `TitlePage` on every write. That made the stated cost above wrong in a way that
+mattered: `Y.Map` resolves a concurrent write **per key**, so the set of keys a write touches is
+exactly the set it can take from another writer. Rewriting all of them meant two writers editing
+_different_ fields still collided on every field, and one writer's edit was discarded whole.
+
+Verified against real Yjs before changing anything -- two docs, seeded identically, then edited
+concurrently and merged both ways:
+
+```
+A edits only the title; B concurrently adds only an author
+  -> both converge on: B's author kept, A's title reverted
+```
+
+`writeTitlePageToYMap` and `writeDocumentSettingsToYMap` now compute the difference against what the
+map already holds and touch only the keys that genuinely changed -- setting changed keys, deleting
+keys the incoming value no longer carries (which is what still lets a writer clear a field back to
+nothing, since `titlePageFromYMap` reads an absent key as "no value"), and leaving everything else
+untouched so it is never offered up to a concurrent write. Array fields (`authors`, `contact`) are
+compared by contents rather than identity; otherwise a fresh-but-equal array from React state would
+rewrite the key on every unrelated keystroke and collide on it anyway.
+
+This matters for `documentSettings` just as much as for the title page, and it is not a contrived
+case there: the settings dialog submits a whole `DocumentSettings` object for a single changed
+control, so before this, toggling scene numbers would revert a collaborator's concurrent
+character-indent change.
+
+With the fix, the cost is what the section above claims it is -- a collision is confined to the one
+field two writers are genuinely contesting, and one of those two edits is lost. Concurrent edits to
+different fields now both survive.
+
 `titlePage`'s map presence is keyed on its `id` field: a real, required `TitlePage.id` present means
 "a title page exists, however sparsely filled in" (mirrors `titlePageFromState`'s own convention --
 a title page cleared down to nothing still has an `id` and still counts as one title page);
-`id` absent means "no title page," matching `titlePages: []` in the canonical screenplay. All six
-`documentSettings` keys are always written together, atomically, in one `doc.transact()` --
-`DocumentSettings` has no optional fields, so a partial write is never a real state, only ever a
-defensive fallback (`documentSettingsFromYMap`, `packages/screenplay-editor/src/index.ts`).
+`id` absent means "no title page," matching `titlePages: []` in the canonical screenplay. The six
+`documentSettings` keys are all established by the _seeding_ write; later writes touch only what
+changed (above). `DocumentSettings` has no optional fields, so `documentSettingsFromYMap`'s
+per-key fallback to `DEFAULT_DOCUMENT_SETTINGS` covers exactly one real case -- a document seeded
+before a settings field existed -- and is otherwise unreachable
+(`packages/screenplay-editor/src/index.ts`).
 
 ### New shared functions, `packages/screenplay-editor/src/index.ts`
 
@@ -317,6 +352,13 @@ failure (and nothing else), restored, confirmed green again.
 3. **Disabled the client-side write** in `App.tsx`'s `updateTitlePageState` (commented out the
    `collab.doc.transact(...)` call) -- caught by `App.test.tsx`'s "an edit reaches the collaborative
    Y.Doc..." test: the Y.Map still held the original title instead of the edited one.
+4. **Restored the clear-every-key-and-rewrite behaviour** in `writeTitlePageToYMap`, and removed
+   `writeDocumentSettingsToYMap`'s changed-key guard -- caught by exactly the three new tests in
+   `packages/screenplay-editor/src/index.test.ts` and nothing else: "two writers editing different
+   title-page fields at the same time both keep their edit," "two writers changing different
+   document settings at the same time both keep their change," and "a re-write that changes nothing
+   touches the map at all." The "same field" convergence test passes under both implementations, as
+   it should -- it documents an invariant this change does not alter.
 
 ### A vacuous integration assertion, found in review and fixed
 
