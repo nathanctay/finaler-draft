@@ -3,6 +3,7 @@ import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createAuth } from '@finaler-draft/auth-server';
+import { mintConnectionToken } from '@finaler-draft/collab-token';
 import { buildApp } from './app.js';
 import {
   createIntegrationDatabase,
@@ -198,6 +199,44 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     });
     expect(deniedRead.statusCode).toBe(404);
     expect(deniedRead.json()).toEqual(unknownRead.json());
+  });
+
+  // The connection-tokens slice's own explicit requirement: "A test proving the token cannot be
+  // used as a REST session credential." A collab connection token is a signed JWT, not one of
+  // Better Auth's own database-backed session tokens -- `auth.api.getSession` looks up the
+  // *value* of the session cookie against the `session` table, and a real, correctly-signed JWT
+  // for the exact same actor was never written there, so it can never match. This forges the
+  // cookie with the real cookie *name* (read off a genuine sign-in, not hardcoded, so this does
+  // not depend on knowing Better Auth's own naming scheme) but the connection token as its value,
+  // which is the strongest version of this claim this suite can make without depending on the
+  // exact cookie name staying the same across a Better Auth upgrade.
+  it('rejects a minted connection token used as a session cookie, even with the correct cookie name', async () => {
+    const owner = await signUp('collab-token-not-a-session-test@example.test');
+    const actorId = await userIdFor('collab-token-not-a-session-test@example.test');
+    const cookieName = owner.cookie.split('=')[0];
+    const connectionToken = await mintConnectionToken(
+      'test-collab-token-secret-at-least-32-characters',
+      actorId,
+      new Date(),
+    );
+
+    const forgedSession = await app!.inject({
+      method: 'GET',
+      url: '/api/auth/get-session',
+      headers: { cookie: `${cookieName}=${connectionToken}`, origin: 'https://app.example.test' },
+    });
+    // Better Auth's own `get-session` answers 200 with a body of literally `null` when no session
+    // matches, rather than a 401 -- this app's own `apiSession.ts` on the client side documents
+    // the identical behaviour. Either shape proves the same thing: no real session was found.
+    expect(forgedSession.statusCode).toBe(200);
+    expect(forgedSession.json()).toBeNull();
+
+    const forgedProjectsRead = await app!.inject({
+      method: 'GET',
+      url: '/api/projects',
+      headers: { cookie: `${cookieName}=${connectionToken}`, origin: 'https://app.example.test' },
+    });
+    expect(forgedProjectsRead.statusCode).toBe(401);
   });
 
   // The concurrent-save/revocation/role-downgrade scenario this test used to cover only made

@@ -58,6 +58,16 @@ try {
     BETTER_AUTH_SECRET: randomBytes(32).toString('hex'),
     BETTER_AUTH_URL: 'http://127.0.0.1:4174',
     CLIENT_ORIGIN: 'http://127.0.0.1:4174',
+    // Mints and verifies the short-lived connection token that replaced cookie-based WebSocket
+    // authentication (progress/collaboration-plan.md's connection-tokens slice). Required
+    // unconditionally by `apps/collab` (its own `requireCollabPersistenceEnvironment` throws
+    // without it, in every environment) and, in this harness, by `apps/api` too -- without it,
+    // `apps/api`'s own `collabTokenConfigured` gate (server.ts) never registers
+    // `POST /api/collab/connection-token`, and every browser's `HocuspocusProvider` in this suite
+    // would fail every handshake with no token to send. Both webServer entries below read this
+    // same value off this same object, exactly like `BETTER_AUTH_SECRET` already does, so the
+    // token `apps/api` mints is one `apps/collab` can actually verify.
+    COLLAB_TOKEN_SECRET: randomBytes(32).toString('hex'),
     DATABASE_URL: databaseUrl.toString(),
     FINALER_SYSTEM_TEST: 'true',
     // Keep the *server* in test mode so loopback HTTP cannot weaken production HTTPS policy.

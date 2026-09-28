@@ -3,6 +3,7 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 import { buildApp, MAX_SCREENPLAY_REQUEST_BODY_BYTES } from './app.js';
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import { DEFAULT_API_RATE_LIMIT_MAX } from '@finaler-draft/server-config';
+import { verifyConnectionToken } from '@finaler-draft/collab-token';
 import type { ProjectStore } from './projects.js';
 import type { BillingPort } from './stripeCheckout.js';
 
@@ -1378,6 +1379,118 @@ describe('entitlement API', () => {
       expect(response.statusCode).toBe(409);
     } finally {
       await app.close();
+    }
+  });
+});
+
+describe('collab connection-token API', () => {
+  const collabAuth = {
+    baseUrl: 'https://app.example.test',
+    handler: async () =>
+      new Response('auth', { headers: { 'set-cookie': 'session=test; HttpOnly' } }),
+    getActorId: async (headers: Headers) =>
+      headers.get('cookie') === 'session=test' ? 'actor-1' : null,
+    trustedOrigins: ['https://app.example.test'],
+  };
+  const headers = { cookie: 'session=test', origin: 'https://app.example.test' };
+  const collabSecret = 'test-collab-token-secret-at-least-32-characters';
+
+  it('is not registered at all when no collab option is supplied', async () => {
+    // The default `app` built at the top of this file has no `collab` option -- this is the
+    // production shape whenever `COLLAB_TOKEN_SECRET` is unset (server.ts's `collabTokenConfigured`
+    // gate). `undefined` here means the route was never registered, not that it exists and denies
+    // -- the same "absent means no route" contract `stripe`/`billing`/`testMail` already establish.
+    const response = await app.inject({ method: 'POST', url: '/api/collab/connection-token' });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('POST /api/collab/connection-token requires authentication, same as the project routes', async () => {
+    const collabApp = await buildApp({ auth: collabAuth, collab: { secret: collabSecret } });
+    try {
+      // A trusted Origin but no session cookie, isolating the authentication check from the
+      // Origin check the next test covers -- this is a POST (an unsafe method), so an absent
+      // Origin alone would already be rejected with 403 before authentication is ever checked
+      // (`isTrustedOrigin`'s own doc comment), which would prove the wrong thing here.
+      const response = await collabApp.inject({
+        method: 'POST',
+        url: '/api/collab/connection-token',
+        headers: { origin: 'https://app.example.test' },
+      });
+      expect(response.statusCode).toBe(401);
+    } finally {
+      await collabApp.close();
+    }
+  });
+
+  it('POST /api/collab/connection-token requires a trusted Origin, same as every other route this hook guards', async () => {
+    const collabApp = await buildApp({ auth: collabAuth, collab: { secret: collabSecret } });
+    try {
+      const response = await collabApp.inject({
+        method: 'POST',
+        url: '/api/collab/connection-token',
+        headers: { cookie: 'session=test', origin: 'https://evil.example.test' },
+      });
+      expect(response.statusCode).toBe(403);
+    } finally {
+      await collabApp.close();
+    }
+  });
+
+  it('mints a token that verifies back to the authenticated actor, and never carries a role or entitlement claim', async () => {
+    const collabApp = await buildApp({ auth: collabAuth, collab: { secret: collabSecret } });
+    try {
+      const response = await collabApp.inject({
+        method: 'POST',
+        url: '/api/collab/connection-token',
+        headers,
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body).toEqual({ token: expect.any(String), expiresAt: expect.any(String) });
+      // Round-trips through the real verification function -- the same one `apps/collab`'s
+      // `onAuthenticate` calls -- proving this is a real, correctly-signed connection token, not
+      // merely a string that looks like one. Verified at "now", not at `body.expiresAt` itself --
+      // the two are equal at the instant of minting (`expiresAt` is exactly `exp`), and
+      // verification's own boundary condition (`exp <= now`) treats that instant as already
+      // expired, which would prove the wrong thing here.
+      const verification = await verifyConnectionToken(collabSecret, body.token, new Date());
+      expect(verification).toEqual({ outcome: 'valid', actorId: 'actor-1' });
+      // The single most important security property of this slice: decoding the token reveals
+      // nothing about role or entitlement. `resolveConnectionAuthorization` must keep resolving
+      // both from the database at connection time, or a client could forge read-only-to-editor by
+      // editing a claim -- there is no claim to edit.
+      const payloadBase64 = body.token.split('.')[1];
+      const payload = JSON.parse(Buffer.from(payloadBase64, 'base64url').toString('utf8'));
+      expect(payload).not.toHaveProperty('role');
+      expect(payload).not.toHaveProperty('entitlement');
+      expect(payload).not.toHaveProperty('readOnly');
+    } finally {
+      await collabApp.close();
+    }
+  });
+
+  it('mints a token scoped to the actor who authenticated the request, never a different one', async () => {
+    const otherActorAuth = {
+      ...collabAuth,
+      getActorId: async (requestHeaders: Headers) =>
+        requestHeaders.get('cookie') === 'session=other' ? 'actor-2' : null,
+    };
+    const collabApp = await buildApp({ auth: otherActorAuth, collab: { secret: collabSecret } });
+    try {
+      const response = await collabApp.inject({
+        method: 'POST',
+        url: '/api/collab/connection-token',
+        headers: { cookie: 'session=other', origin: 'https://app.example.test' },
+      });
+      expect(response.statusCode).toBe(200);
+      const verification = await verifyConnectionToken(
+        collabSecret,
+        response.json().token,
+        new Date(),
+      );
+      expect(verification).toEqual({ outcome: 'valid', actorId: 'actor-2' });
+    } finally {
+      await collabApp.close();
     }
   });
 });

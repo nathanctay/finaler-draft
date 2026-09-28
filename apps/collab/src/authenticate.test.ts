@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { TRANSIENT_SYNC_AUTH_FAILURE_REASON } from '@finaler-draft/config';
+import type { ConnectionTokenVerification } from '@finaler-draft/collab-token';
 import {
   authenticateConnection,
+  ExpiredConnectionTokenError,
   resolveConnectionAuthorization,
   TransientAuthenticationError,
   type Queryable,
@@ -115,15 +117,22 @@ describe('resolveConnectionAuthorization', () => {
 });
 
 /**
- * `resolveConnectionAuthorization` above never sees an `Origin` header or a missing session --
- * those are `authenticateConnection`'s own composition, and a mutation test (deleting the origin
- * check with no test anywhere failing) found neither had ever been exercised directly. These close
- * that gap; see `originGuard.test.ts` for the underlying predicate's own tests.
+ * `resolveConnectionAuthorization` above never sees an `Origin` header, a missing/expired/invalid
+ * token, or the token-verification wiring -- those are `authenticateConnection`'s own composition,
+ * and a mutation test (deleting the origin check with no test anywhere failing) found neither had
+ * ever been exercised directly. These close that gap; see `originGuard.test.ts` for the underlying
+ * predicate's own tests and `@finaler-draft/collab-token`'s own `index.test.ts` for
+ * `verifyConnectionToken` itself (mint/verify round trips, expiry, wrong key, malformed, absent).
+ * These tests use a fake `verifyToken` rather than the real `verifyConnectionToken`: the real
+ * function's own behaviour is that package's responsibility to prove; this file's job is proving
+ * `authenticateConnection` reacts correctly to each of the three outcomes it can return.
  */
 describe('authenticateConnection', () => {
   const trustedOrigins = ['http://127.0.0.1:4000'];
   const headersWithOrigin = (origin: string | undefined) =>
     new Headers(origin === undefined ? {} : { origin });
+  const validToken = (): Promise<ConnectionTokenVerification> =>
+    Promise.resolve({ outcome: 'valid', actorId });
 
   it('rejects a connection whose Origin is not on the trusted allowlist', async () => {
     const queryable = fakeQueryable({ role: 'owner', subscriptionStatus: 'active' });
@@ -132,73 +141,149 @@ describe('authenticateConnection', () => {
         {
           queryable,
           trustedOrigins,
-          getActorId: async () => actorId,
+          verifyToken: validToken,
         },
         {
           documentName: documentId,
           requestHeaders: headersWithOrigin('https://evil.example.test'),
+          token: 'irrelevant',
           now,
         },
       ),
     ).rejects.toThrow('Cross-origin connection rejected');
   });
 
-  it('rejects a connection with no Origin header at all, before ever checking the session', async () => {
-    let sessionChecked = false;
+  it('rejects a connection with no Origin header at all, before ever verifying the token', async () => {
+    let tokenChecked = false;
     const queryable = fakeQueryable({ role: 'owner', subscriptionStatus: 'active' });
     await expect(
       authenticateConnection(
         {
           queryable,
           trustedOrigins,
-          getActorId: async () => {
-            sessionChecked = true;
-            return actorId;
+          verifyToken: async () => {
+            tokenChecked = true;
+            return { outcome: 'valid', actorId };
           },
         },
-        { documentName: documentId, requestHeaders: headersWithOrigin(undefined), now },
+        {
+          documentName: documentId,
+          requestHeaders: headersWithOrigin(undefined),
+          token: 'irrelevant',
+          now,
+        },
       ),
     ).rejects.toThrow('Cross-origin connection rejected');
-    expect(sessionChecked).toBe(false);
+    expect(tokenChecked).toBe(false);
   });
 
-  it('rejects a connection with a trusted Origin but no valid session', async () => {
+  it('rejects a connection with a trusted Origin but an invalid token', async () => {
     const queryable = fakeQueryable({ role: 'owner', subscriptionStatus: 'active' });
     await expect(
       authenticateConnection(
         {
           queryable,
           trustedOrigins,
-          getActorId: async () => null,
+          verifyToken: async () => ({ outcome: 'invalid' }),
         },
-        { documentName: documentId, requestHeaders: headersWithOrigin(trustedOrigins[0]), now },
+        {
+          documentName: documentId,
+          requestHeaders: headersWithOrigin(trustedOrigins[0]),
+          token: 'not-a-real-token',
+          now,
+        },
       ),
     ).rejects.toThrow('Authentication required');
   });
 
-  it('rejects a connection to a document this actor has no role on, with a trusted origin and a valid session', async () => {
+  it('rejects a connection with a trusted Origin but an absent token, the same denial as an invalid one', async () => {
+    const queryable = fakeQueryable({ role: 'owner', subscriptionStatus: 'active' });
+    await expect(
+      authenticateConnection(
+        {
+          queryable,
+          trustedOrigins,
+          verifyToken: async (token) =>
+            token ? { outcome: 'valid', actorId } : { outcome: 'invalid' },
+        },
+        {
+          documentName: documentId,
+          requestHeaders: headersWithOrigin(trustedOrigins[0]),
+          token: '',
+          now,
+        },
+      ),
+    ).rejects.toThrow('Authentication required');
+  });
+
+  // Risk #1 from the brief, at the unit level: an expired token must produce
+  // `ExpiredConnectionTokenError` -- a distinct class from every permanent denial above, but one
+  // that shares `TRANSIENT_SYNC_AUTH_FAILURE_REASON` with `TransientAuthenticationError`, which is
+  // the one thing `apps/web/src/App.tsx`'s retry logic actually reads. See
+  // `collaboration.integration.test.ts` for the same property proven over a real socket, with a
+  // real reconnect actually recovering.
+  it('rejects an expired token with ExpiredConnectionTokenError, tagged transient, never as a permanent denial', async () => {
+    const queryable = fakeQueryable({ role: 'owner', subscriptionStatus: 'active' });
+    let rejection: unknown;
+    try {
+      await authenticateConnection(
+        {
+          queryable,
+          trustedOrigins,
+          verifyToken: async () => ({ outcome: 'expired' }),
+        },
+        {
+          documentName: documentId,
+          requestHeaders: headersWithOrigin(trustedOrigins[0]),
+          token: 'an-expired-token',
+          now,
+        },
+      );
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toBeInstanceOf(ExpiredConnectionTokenError);
+    expect((rejection as ExpiredConnectionTokenError).reason).toBe(
+      TRANSIENT_SYNC_AUTH_FAILURE_REASON,
+    );
+    // Must never be confused with the unexpected-failure class -- an expired token is not a
+    // database blip, and `server.ts`'s own rejection log tells the two apart by exactly this.
+    expect(rejection).not.toBeInstanceOf(TransientAuthenticationError);
+  });
+
+  it('rejects a connection to a document this actor has no role on, with a trusted origin and a valid token', async () => {
     const queryable = fakeQueryable({});
     await expect(
       authenticateConnection(
         {
           queryable,
           trustedOrigins,
-          getActorId: async () => actorId,
+          verifyToken: validToken,
         },
-        { documentName: documentId, requestHeaders: headersWithOrigin(trustedOrigins[0]), now },
+        {
+          documentName: documentId,
+          requestHeaders: headersWithOrigin(trustedOrigins[0]),
+          token: 'a-valid-token',
+          now,
+        },
       ),
     ).rejects.toThrow('This document is not visible to this account');
   });
 
-  it('resolves to the actor id and read-only flag once origin, session, and role/entitlement all clear, delegating the actual decision to resolveConnectionAuthorization', async () => {
+  it('resolves to the actor id and read-only flag once origin, token, and role/entitlement all clear, delegating the actual decision to resolveConnectionAuthorization', async () => {
     const queryable = fakeQueryable({ role: 'reviewer' });
     const result = await authenticateConnection(
       {
         queryable,
         trustedOrigins,
-        getActorId: async () => actorId,
+        verifyToken: validToken,
       },
-      { documentName: documentId, requestHeaders: headersWithOrigin(trustedOrigins[0]), now },
+      {
+        documentName: documentId,
+        requestHeaders: headersWithOrigin(trustedOrigins[0]),
+        token: 'a-valid-token',
+        now,
+      },
     );
     expect(result).toEqual({ actorId, readOnly: true });
   });
@@ -207,23 +292,28 @@ describe('authenticateConnection', () => {
   // thrown, unexpected error and a resolved, deliberate denial must produce differently-shaped
   // rejections, because `apps/web`'s `App.tsx` -- and `apps/collab`'s own `onAuthenticate` in
   // server.ts, via Hocuspocus's `error.reason` forwarding -- tells them apart by exactly this.
-  // Every `rejects.toThrow('...')` test above already proves the three deliberate denials stay
-  // plain `Error`s with their existing messages, unchanged by this class existing at all; these
-  // two prove the other half.
-  it('wraps a thrown error from the session lookup as transient, tagging it for the client to retry rather than treat as a denial', async () => {
+  // Every `rejects.toThrow('...')` test above already proves the deliberate denials stay plain
+  // `Error`s with their existing messages, unchanged by this class existing at all; these two
+  // prove the other half.
+  it('wraps a thrown error from token verification as transient, tagging it for the client to retry rather than treat as a denial', async () => {
     const queryable = fakeQueryable({ role: 'owner', subscriptionStatus: 'active' });
-    const sessionLookupFailure = new Error('connection terminated unexpectedly');
+    const tokenVerificationFailure = new Error('connection terminated unexpectedly');
     let rejection: unknown;
     try {
       await authenticateConnection(
         {
           queryable,
           trustedOrigins,
-          getActorId: async () => {
-            throw sessionLookupFailure;
+          verifyToken: async () => {
+            throw tokenVerificationFailure;
           },
         },
-        { documentName: documentId, requestHeaders: headersWithOrigin(trustedOrigins[0]), now },
+        {
+          documentName: documentId,
+          requestHeaders: headersWithOrigin(trustedOrigins[0]),
+          token: 'a-token',
+          now,
+        },
       );
     } catch (error) {
       rejection = error;
@@ -232,8 +322,8 @@ describe('authenticateConnection', () => {
     expect((rejection as TransientAuthenticationError).reason).toBe(
       TRANSIENT_SYNC_AUTH_FAILURE_REASON,
     );
-    expect((rejection as TransientAuthenticationError).cause).toBe(sessionLookupFailure);
-    expect((rejection as TransientAuthenticationError).stage).toBe('session-lookup');
+    expect((rejection as TransientAuthenticationError).cause).toBe(tokenVerificationFailure);
+    expect((rejection as TransientAuthenticationError).stage).toBe('token-verification');
   });
 
   it('wraps a thrown error from the role/entitlement lookup as transient, not as "not visible to this account"', async () => {
@@ -249,9 +339,14 @@ describe('authenticateConnection', () => {
         {
           queryable: brokenQueryable,
           trustedOrigins,
-          getActorId: async () => actorId,
+          verifyToken: validToken,
         },
-        { documentName: documentId, requestHeaders: headersWithOrigin(trustedOrigins[0]), now },
+        {
+          documentName: documentId,
+          requestHeaders: headersWithOrigin(trustedOrigins[0]),
+          token: 'a-valid-token',
+          now,
+        },
       );
     } catch (error) {
       rejection = error;

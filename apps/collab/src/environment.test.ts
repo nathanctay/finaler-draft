@@ -6,7 +6,28 @@ const validPersistence = {
   DATABASE_URL: 'postgresql://postgres:postgres@localhost:5432/finaler_draft',
   BETTER_AUTH_SECRET: 'a'.repeat(32),
   BETTER_AUTH_URL: 'http://localhost:3001',
+  COLLAB_TOKEN_SECRET: 'b'.repeat(32),
 };
+
+describe('requireCollabPersistenceEnvironment', () => {
+  it('requires a collab connection-token secret, unconditionally, in every environment', () => {
+    // Unlike apps/api (which can run health/static-only without persistence at all), apps/collab
+    // has no such fallback -- it cannot authenticate a single connection without this, in any
+    // environment, so this must throw even outside production.
+    expect(() =>
+      requireCollabPersistenceEnvironment({
+        DATABASE_URL: validPersistence.DATABASE_URL,
+        BETTER_AUTH_SECRET: validPersistence.BETTER_AUTH_SECRET,
+        BETTER_AUTH_URL: validPersistence.BETTER_AUTH_URL,
+      }),
+    ).toThrow(/COLLAB_TOKEN_SECRET is required/);
+  });
+
+  it('carries the collab connection-token secret through once present', () => {
+    const environment = requireCollabPersistenceEnvironment({ ...validPersistence });
+    expect(environment.COLLAB_TOKEN_SECRET).toBe(validPersistence.COLLAB_TOKEN_SECRET);
+  });
+});
 
 describe('shouldLoadRootEnvironment', () => {
   it('loads local configuration only for unset or development environments', () => {

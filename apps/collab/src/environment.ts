@@ -40,6 +40,17 @@ export interface CollabPersistenceEnvironment {
   readonly CLIENT_ORIGIN: string | undefined;
   readonly NODE_ENV: 'development' | 'test' | 'production';
   readonly PORT: number;
+  /**
+   * Verifies the short-lived connection token `onAuthenticate` reads off the WebSocket's own
+   * `AuthenticationMessage` (see `authenticate.ts`'s `verifyToken`) -- the replacement for the
+   * Better Auth session cookie this process can no longer read across the `app`/`collab`
+   * cross-host boundary. Required unconditionally, in every environment, exactly like
+   * `BETTER_AUTH_SECRET` just above: unlike `apps/api`, this process has no health/static-only
+   * mode to fall back to, so there is no environment where it is meaningful to start without
+   * this and simply not register a route -- there is no route, only this one server, and it
+   * cannot authenticate a single connection without it.
+   */
+  readonly COLLAB_TOKEN_SECRET: string;
 }
 
 export function requireCollabPersistenceEnvironment(
@@ -49,6 +60,7 @@ export function requireCollabPersistenceEnvironment(
   if (!parsed.DATABASE_URL) throw new Error('DATABASE_URL is required.');
   if (!parsed.BETTER_AUTH_SECRET) throw new Error('BETTER_AUTH_SECRET is required.');
   if (!parsed.BETTER_AUTH_URL) throw new Error('BETTER_AUTH_URL is required.');
+  if (!parsed.COLLAB_TOKEN_SECRET) throw new Error('COLLAB_TOKEN_SECRET is required.');
   return {
     DATABASE_URL: parsed.DATABASE_URL,
     BETTER_AUTH_SECRET: parsed.BETTER_AUTH_SECRET,
@@ -56,6 +68,7 @@ export function requireCollabPersistenceEnvironment(
     CLIENT_ORIGIN: parsed.CLIENT_ORIGIN,
     NODE_ENV: parsed.NODE_ENV,
     PORT: resolveCollabPort(environment, parsed),
+    COLLAB_TOKEN_SECRET: parsed.COLLAB_TOKEN_SECRET,
   };
 }
 

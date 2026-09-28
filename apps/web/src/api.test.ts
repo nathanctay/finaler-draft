@@ -75,6 +75,9 @@ describe('API client', () => {
           monthly: { amount: 500, currency: 'usd', interval: 'month' },
           annual: { amount: 5000, currency: 'usd', interval: 'year' },
         }),
+      )
+      .mockResolvedValueOnce(
+        response({ token: 'a-connection-token', expiresAt: '2026-09-25T12:05:00.000Z' }),
       );
 
     await expect(api.session()).resolves.toEqual({
@@ -139,12 +142,16 @@ describe('API client', () => {
       monthly: { amount: 500, currency: 'usd', interval: 'month' },
       annual: { amount: 5000, currency: 'usd', interval: 'year' },
     });
+    await expect(api.connectionToken()).resolves.toEqual({
+      token: 'a-connection-token',
+      expiresAt: '2026-09-25T12:05:00.000Z',
+    });
 
-    // 20, not 21: there is no longer a whole-document `PUT /api/screenplays/:id` call at all --
+    // 21, not 22: there is no longer a whole-document `PUT /api/screenplays/:id` call at all --
     // that route, and `api.saveScreenplay`, were deleted along with the `version` column in
     // collaboration slice 1 (see progress/collaboration-slice-1.md). Persistence for the
     // screenplay body now happens through the Yjs collab server instead.
-    expect(fetchMock).toHaveBeenCalledTimes(20);
+    expect(fetchMock).toHaveBeenCalledTimes(21);
     expect(fetchMock.mock.calls[1]).toEqual([
       '/api/auth/sign-in/email',
       expect.objectContaining({ credentials: 'include', method: 'POST' }),
@@ -199,6 +206,10 @@ describe('API client', () => {
     expect(fetchMock.mock.calls[19]).toEqual([
       '/api/billing/plans',
       expect.objectContaining({ credentials: 'include' }),
+    ]);
+    expect(fetchMock.mock.calls[20]).toEqual([
+      '/api/collab/connection-token',
+      expect.objectContaining({ method: 'POST' }),
     ]);
   });
 

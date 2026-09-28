@@ -21,6 +21,7 @@ import {
   tierForSubscriptionStatus,
   type EntitlementSnapshot,
 } from '@finaler-draft/entitlements';
+import { mintConnectionToken, CONNECTION_TOKEN_TTL_MS } from '@finaler-draft/collab-token';
 import type { EntitlementStore } from './entitlementStore.js';
 import type { MailMessage } from '@finaler-draft/auth-server/mail';
 import {
@@ -75,6 +76,20 @@ export interface StripeWebhookPort {
   ipAllowlist?: Pick<StripeIpAllowlist, 'isAllowed'> | undefined;
 }
 
+/**
+ * Backs `POST /api/collab/connection-token` -- the replacement for cookie-based WebSocket
+ * authentication (progress/collaboration-plan.md's connection-tokens slice). `secret` is
+ * `COLLAB_TOKEN_SECRET`, the same one `apps/collab`'s own `verifyToken` (server.ts) must be
+ * configured with, or every token this route mints would fail to verify there. Deliberately a
+ * bare secret, not a richer port: minting has no other dependency (no database, no third-party
+ * client) -- `@finaler-draft/collab-token`'s `mintConnectionToken` is a pure function of this
+ * secret, the authenticated actor's id, and the current time, all three already in scope at the
+ * route's own call site.
+ */
+export interface CollabTokenPort {
+  secret: string;
+}
+
 export interface BuildAppOptions {
   serveClient?: boolean;
   clientRoot?: URL;
@@ -126,6 +141,13 @@ export interface BuildAppOptions {
    * not registered at all, not that it is registered and denies.
    */
   testMail?: { latestTo(to: string): MailMessage | undefined } | undefined;
+  /**
+   * Backs `POST /api/collab/connection-token`. `undefined` here means the route is not
+   * registered at all (mirroring `stripe`/`billing`'s own "absent means no route" contract) --
+   * the correct behaviour for any environment without `COLLAB_TOKEN_SECRET` configured, the same
+   * gate `stripeConfigured` applies to the billing routes in server.ts.
+   */
+  collab?: CollabTokenPort | undefined;
   /**
    * The global per-client request cap (plan.md: "a global request cap, so a single client cannot
    * exhaust the API regardless of endpoint" -- distinct from Better Auth's own rate limiter in
@@ -277,6 +299,11 @@ const switchEditableScreenplayResponseSchema = z.object({
   screenplayId: z.string(),
   updatedAt: z.string(),
 });
+// Mirrors the route handler's own return shape below field for field, same convention as every
+// other response schema in this file. `expiresAt` is advisory only -- `apps/web`'s
+// `HocuspocusProvider` never reads it; it exists so a caller (or a future diagnostic) can see the
+// token's lifetime without decoding the JWT itself.
+const connectionTokenResponseSchema = z.object({ token: z.string(), expiresAt: z.string() });
 // `.strict()`: an unknown field (most pointedly a `userId` naming a different actor) is rejected
 // with 400 rather than silently ignored. This is the whole answer to "a user cannot create a
 // billing session for another user" -- the route always acts on `request.actorId!`, the
@@ -734,7 +761,10 @@ export async function buildApp(options: BuildAppOptions = {}) {
     });
   }
 
-  if (options.auth && (options.projects || options.entitlements || options.billing)) {
+  if (
+    options.auth &&
+    (options.projects || options.entitlements || options.billing || options.collab)
+  ) {
     // Runs as `preValidation`, not `preHandler`. Fastify's request lifecycle runs
     // preValidation -> schema validation -> preHandler -> the route handler, and before this
     // refactor every id/body check was a manual `.parse()` call inside the handler, i.e. later
@@ -744,17 +774,21 @@ export async function buildApp(options: BuildAppOptions = {}) {
     // in `preValidation` (ahead of validation too) is what keeps that precedence, and that
     // precedence, byte-identical to before.
     //
-    // `/api/entitlement` and `/api/billing` share this hook rather than getting their own: they
-    // carry the same authenticated-actor and same-origin requirements as every other route here,
-    // and reporting entitlement state or minting a Checkout/Portal session without knowing which
-    // actor is asking would defeat the point of either.
+    // `/api/entitlement`, `/api/billing`, and `/api/collab` share this hook rather than getting
+    // their own: they carry the same authenticated-actor and same-origin requirements as every
+    // other route here, and reporting entitlement state, minting a Checkout/Portal session, or
+    // minting a connection token without knowing which actor is asking would defeat the point of
+    // any of them -- the connection token in particular *is* this route's assertion of "this is
+    // the actor the browser's own session cookie names," the one fact `apps/collab` can no longer
+    // read off that cookie directly once `app` and `collab` are on two different hosts.
     app.addHook('preValidation', async (request, reply) => {
       if (
         !request.url.startsWith('/api/projects') &&
         !request.url.startsWith('/api/screenplays') &&
         !request.url.startsWith('/api/deleted') &&
         !request.url.startsWith('/api/entitlement') &&
-        !request.url.startsWith('/api/billing')
+        !request.url.startsWith('/api/billing') &&
+        !request.url.startsWith('/api/collab')
       )
         return;
       // Checked ahead of the session lookup: a forged cross-origin request is rejected outright
@@ -765,6 +799,30 @@ export async function buildApp(options: BuildAppOptions = {}) {
       if (!actorId) return reply.code(401).send({ error: 'Authentication required' });
       request.actorId = actorId;
     });
+  }
+
+  if (options.auth && options.collab) {
+    const collabSecret = options.collab.secret;
+    // The one route that closes the gap this whole slice exists for: the browser still has a
+    // valid Better Auth session cookie against `app` (the `preValidation` hook above just proved
+    // it), and that session is what authorizes minting a token scoped to a different purpose --
+    // connecting to `apps/collab` -- rather than forwarding the session cookie itself, which
+    // `apps/collab` cannot even receive once the two services are on different hosts. Deliberately
+    // carries no role or entitlement: `apps/collab/src/authenticate.ts`'s
+    // `resolveConnectionAuthorization` re-resolves both from the database at connection time,
+    // exactly as it did before this slice, so this route's only job is asserting *who* is asking.
+    typedApp.post(
+      '/api/collab/connection-token',
+      { schema: { response: { 200: connectionTokenResponseSchema } } },
+      async (request) => {
+        const now = new Date();
+        const token = await mintConnectionToken(collabSecret, request.actorId!, now);
+        return {
+          token,
+          expiresAt: new Date(now.getTime() + CONNECTION_TOKEN_TTL_MS).toISOString(),
+        };
+      },
+    );
   }
 
   if (options.auth && options.entitlements) {

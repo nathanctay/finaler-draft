@@ -56,7 +56,7 @@ import { SeamCaretExtension } from './seamCaret.js';
 import { SmartTypeGhostExtension } from './smartTypeGhost.js';
 import { SmartTypeList, SmartTypeListExtension } from './smartTypeList.js';
 import { ElementMenu, ElementMenuExtension } from './elementMenu.js';
-import { MessageApiError, type PersistedScreenplay } from './api.js';
+import { api, MessageApiError, type PersistedScreenplay } from './api.js';
 import { COLLAB_WS_URL } from './collabConfig.js';
 import { applyPageGeometryCssVariables } from './pageGeometryCss.js';
 import { TitlePageView } from './titlePageEditor.js';
@@ -590,14 +590,20 @@ export function App({
   //    second. This is what every unit test in this file exercises, and what any environment
   //    without `apps/collab` deployed yet falls back to.
   //  - Otherwise: a real `HocuspocusProvider` connects to `apps/collab` over `COLLAB_WS_URL`,
-  //    authenticating from the same session cookie the browser already attaches to every other
-  //    request (plan.md: "Hocuspocus authenticates from a cookie the browser attaches
-  //    automatically" -- no token or header is set here). Its document starts empty and is
-  //    populated by the provider's own sync the instant the connection completes;
-  //    `createScreenplayEditorInit` below reads whatever is already there for the first render,
-  //    empty or not, and every update after that reaches the editor through `ySyncPlugin`
-  //    automatically, with no action from this component. The title page/document settings
-  //    observer effect below follows the identical rule for `TITLE_PAGE_YJS_MAP`/
+  //    authenticating with a short-lived, collab-scoped connection token rather than the Better
+  //    Auth session cookie this app used to rely on (progress/collaboration-plan.md's
+  //    connection-tokens slice: that cookie is `httpOnly`/host-only and never reaches `apps/collab`
+  //    once it is deployed on a different host from this app -- see `api.ts`'s `connectionToken`
+  //    for the minting call this reads). `token` is an async *function*, not a plain string:
+  //    `@hocuspocus/provider`'s own `getToken()` awaits it fresh from `sendToken()` on every
+  //    `onOpen`, so every reconnection -- including the one that follows an expired token, per
+  //    `apps/collab/src/authenticate.ts`'s `ExpiredConnectionTokenError` -- fetches a brand-new
+  //    token automatically, with no page reload and no action from this component. Its document
+  //    starts empty and is populated by the provider's own sync the instant the connection
+  //    completes; `createScreenplayEditorInit` below reads whatever is already there for the
+  //    first render, empty or not, and every update after that reaches the editor through
+  //    `ySyncPlugin` automatically, with no action from this component. The title page/document
+  //    settings observer effect below follows the identical rule for `TITLE_PAGE_YJS_MAP`/
   //    `DOCUMENT_SETTINGS_YJS_MAP`.
   const collab = useMemo(() => {
     if (initialContent === undefined || !COLLAB_WS_URL) {
@@ -610,7 +616,11 @@ export function App({
         provider: undefined as HocuspocusProvider | undefined,
       };
     }
-    const provider = new HocuspocusProvider({ url: COLLAB_WS_URL, name: initial.id });
+    const provider = new HocuspocusProvider({
+      url: COLLAB_WS_URL,
+      name: initial.id,
+      token: async () => (await api.connectionToken()).token,
+    });
     return { doc: provider.document, provider };
     // `editorContent`/`initialContent` deliberately omitted: this must only ever run once per
     // mounted screenplay (a fresh `Y.Doc`/`HocuspocusProvider` every render would reconnect and
