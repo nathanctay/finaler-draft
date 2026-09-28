@@ -63,6 +63,9 @@ importers:
       '@finaler-draft/auth-server':
         specifier: workspace:*
         version: link:../../packages/auth-server
+      '@finaler-draft/collab-token':
+        specifier: workspace:*
+        version: link:../../packages/collab-token
       '@finaler-draft/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -118,6 +121,9 @@ importers:
       '@finaler-draft/auth-server':
         specifier: workspace:*
         version: link:../../packages/auth-server
+      '@finaler-draft/collab-token':
+        specifier: workspace:*
+        version: link:../../packages/collab-token
       '@finaler-draft/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -319,6 +325,19 @@ importers:
       better-auth:
         specifier: 1.6.25
         version: 1.6.25(drizzle-kit@0.31.10)(drizzle-orm@0.45.2(@types/pg@8.20.0)(kysely@0.29.4)(pg@8.22.0))(pg@8.22.0)(react-dom@19.1.1(react@19.1.1))(react@19.1.1)(vitest@3.2.4(@types/debug@4.1.13)(@types/node@24.3.0)(jsdom@26.1.0)(lightningcss@1.33.0)(tsx@4.23.9)(yaml@2.9.0))
+    devDependencies:
+      '@vitest/coverage-v8':
+        specifier: 3.2.4
+        version: 3.2.4(vitest@3.2.4(@types/debug@4.1.13)(@types/node@24.3.0)(jsdom@26.1.0)(lightningcss@1.33.0)(tsx@4.23.9)(yaml@2.9.0))
+      vitest:
+        specifier: 3.2.4
+        version: 3.2.4(@types/debug@4.1.13)(@types/node@24.3.0)(jsdom@26.1.0)(lightningcss@1.33.0)(tsx@4.23.9)(yaml@2.9.0)
+
+  packages/collab-token:
+    dependencies:
+      jose:
+        specifier: 6.2.8
+        version: 6.2.8
     devDependencies:
       '@vitest/coverage-v8':
         specifier: 3.2.4

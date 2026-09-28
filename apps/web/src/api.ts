@@ -65,6 +65,12 @@ const switchEditableScreenplayResponseSchema = z.object({
   screenplayId: z.string(),
   updatedAt: z.string(),
 });
+// Mirrors apps/api/src/app.ts's `connectionTokenResponseSchema` field for field. Backs
+// `App.tsx`'s `HocuspocusProvider` construction (collabConfig.ts's own doc comment, and
+// progress/collaboration-plan.md's connection-tokens slice): the short-lived, collab-scoped
+// token that replaced forwarding the Better Auth session cookie to `apps/collab`, which no
+// browser can do once `app` and `collab` are on two different hosts.
+const connectionTokenResponseSchema = z.object({ token: z.string(), expiresAt: z.string() });
 const billingSessionResponseSchema = z.object({ url: z.string() });
 // Not a zod schema: nothing here ever validates an incoming `plan` value at runtime (the caller
 // is always this app's own UI, already constrained by this same TypeScript union), so a schema
@@ -360,6 +366,13 @@ export const api = {
       switchEditableScreenplayResponseSchema,
       { body: JSON.stringify({ screenplayId }), method: 'PUT' },
     ),
+  // Mints a short-lived, collab-scoped connection token (see `connectionTokenResponseSchema`'s
+  // own comment). Called from `App.tsx`'s `HocuspocusProvider` construction as an async `token`
+  // function, not a bare string -- `@hocuspocus/provider`'s own `getToken()` calls that function
+  // fresh on every reconnect (`sendToken()`, on every `onOpen`), which is what lets an expired
+  // token recover with a fresh one automatically rather than a page reload.
+  connectionToken: () =>
+    json('/api/collab/connection-token', connectionTokenResponseSchema, { method: 'POST' }),
   // Redirects the browser to the returned url (Stripe-hosted Checkout or Customer Portal) --
   // callers never inspect these beyond `.url`; see externalRedirect.ts, the one place that
   // navigation actually happens.

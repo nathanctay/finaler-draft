@@ -4,6 +4,8 @@ import { Database } from '@hocuspocus/extension-database';
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from '@hocuspocus/provider';
 import { createAuth } from '@finaler-draft/auth-server';
 import type { MailMessage, MailPort } from '@finaler-draft/auth-server/mail';
+import { mintConnectionToken, verifyConnectionToken } from '@finaler-draft/collab-token';
+import type { ConnectionTokenVerification } from '@finaler-draft/collab-token';
 import { yXmlFragmentToProseMirrorRootNode } from 'y-prosemirror';
 import {
   createLocalScreenplayYDoc,
@@ -37,6 +39,13 @@ import {
   suppressPoolShutdownErrors,
 } from './integrationTestDatabase.js';
 
+// Any fixed, 32+ character string works: this is the shared secret `startServer`'s own
+// `verifyToken` and every `mintConnectionToken` call in this file agree on, standing in for the
+// real `COLLAB_TOKEN_SECRET` `apps/api` and `apps/collab` share in every real deployment. Not read
+// from the environment -- this suite never runs `requireCollabPersistenceEnvironment` at all; it
+// builds a `Server` by hand (`startServer` below), the same way it always has.
+const COLLAB_TOKEN_TEST_SECRET = 'integration-test-collab-token-secret-32-chars-minimum';
+
 /**
  * The end-to-end proof this slice's brief asks for, chosen deliberately over a Playwright test:
  * a node-level test driving two real `HocuspocusProvider` clients against a real, running
@@ -44,7 +53,8 @@ import {
  * Postgres database is a *more* direct exercise of the exact assertion that matters most --
  * "write rejection at the socket" -- than a browser test would be. A Playwright test would still
  * have to route through this same server to prove anything; it would add a full web build, a
- * running API for session cookies, and two browser contexts on top of the same claim, without
+ * running API for the session cookie and connection-token minting, and two browser contexts on
+ * top of the same claim, without
  * testing a different code path. What a Playwright test *would* additionally prove -- that the
  * Tiptap editor visually renders a remote peer's keystrokes -- is exactly what
  * `canonicalRoundTrip.test.ts` and `packages/screenplay-editor/src/editing.test.ts` already cover
@@ -77,24 +87,32 @@ const mail: MailPort = {
  * `onAuthenticate` -- against an ephemeral port so this suite (and, in the restart test, a second
  * instance standing in for the process having restarted) can run without a fixed port collision. */
 async function startServer(
-  wrapGetActorId: (
-    real: (headers: Headers) => Promise<string | null>,
-  ) => (headers: Headers) => Promise<string | null> = (real) => real,
+  wrapVerifyToken: (
+    real: (token: string, now: Date) => Promise<ConnectionTokenVerification>,
+  ) => (token: string, now: Date) => Promise<ConnectionTokenVerification> = (real) => real,
 ): Promise<Server> {
-  const realGetActorId = async (headers: Headers) =>
-    (await auth!.api.getSession({ headers }))?.user.id ?? null;
-  // Defaults to `realGetActorId` unchanged (every existing test calls `startServer()` with no
-  // argument) -- the two failure-classification tests below are the only callers that wrap it, to
-  // simulate a transient database error during exactly the session lookup without needing to
-  // actually break Postgres for this whole shared suite.
-  const getActorId = wrapGetActorId(realGetActorId);
+  const realVerifyToken = (token: string, now: Date) =>
+    verifyConnectionToken(COLLAB_TOKEN_TEST_SECRET, token, now);
+  // Defaults to `realVerifyToken` unchanged (every existing test calls `startServer()` with no
+  // argument) -- the transient-failure-classification test below is the only caller that wraps
+  // it, to simulate a database-shaped unexpected error during exactly the token-verification stage
+  // without needing to actually break Postgres for this whole shared suite. (Note this is a
+  // synthetic fault, not a real property of `verifyConnectionToken` -- that function is pure and
+  // never touches Postgres; see `authenticate.ts`'s own comment on why the wrapping is still
+  // meaningful: `authenticateConnection` must classify *whatever* `verifyToken` throws as
+  // transient, regardless of why it threw.)
+  const verifyToken = wrapVerifyToken(realVerifyToken);
   const instance = new Server({
     address: '127.0.0.1',
     extensions: [new Database({ fetch: createFetch(pool!), store: createStore(pool!) })],
     async onAuthenticate(data) {
       const { actorId, readOnly } = await authenticateConnection(
-        { queryable: pool!, getActorId, trustedOrigins: trustedOrigins! },
-        { documentName: data.documentName, requestHeaders: data.requestHeaders },
+        { queryable: pool!, verifyToken, trustedOrigins: trustedOrigins! },
+        {
+          documentName: data.documentName,
+          requestHeaders: data.requestHeaders,
+          token: data.token,
+        },
       );
       data.connectionConfig.readOnly = readOnly;
       const presence = await resolvePresenceIdentity(pool!, actorId);
@@ -157,8 +175,8 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     const { projectId, screenplayId } = await createProjectAndScreenplay(owner.actorId);
     await addMember(projectId, editor.actorId, 'editor');
 
-    const clientA = connectProvider(screenplayId, owner.cookie);
-    const clientB = connectProvider(screenplayId, editor.cookie);
+    const clientA = connectProvider(screenplayId, owner.token);
+    const clientB = connectProvider(screenplayId, editor.token);
     try {
       await Promise.all([waitForSynced(clientA), waitForSynced(clientB)]);
 
@@ -199,7 +217,7 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     // page and document settings this test asserts on stay the fixture's real, unmodified values.
     const { screenplayId } = await createProjectAndScreenplay(owner.actorId, editableBodyFields);
 
-    const client = connectProvider(screenplayId, owner.cookie);
+    const client = connectProvider(screenplayId, owner.token);
     try {
       await waitForSynced(client);
       expect(titlePageFromYMap(client.document.getMap(TITLE_PAGE_YJS_MAP))).toEqual(
@@ -237,7 +255,7 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
       [screenplayId, Buffer.from(Y.encodeStateAsUpdate(preSliceDoc))],
     );
 
-    const client = connectProvider(screenplayId, owner.cookie);
+    const client = connectProvider(screenplayId, owner.token);
     try {
       await waitForSynced(client);
       expect(projectedText(client)).toContain('Pre-existing collaborative content.');
@@ -266,7 +284,7 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
 
     // First open: the migration backfills the fixture's own title page, exactly like the test
     // above. A writer then edits it collaboratively to something new.
-    const firstOpen = connectProvider(screenplayId, owner.cookie);
+    const firstOpen = connectProvider(screenplayId, owner.token);
     const writersOwnTitlePage = {
       id: screenplayFixture.titlePages[0]!.id,
       title: "The Writer's Own Later Title",
@@ -319,7 +337,7 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     server = await startServer();
     serverUrl = server.webSocketURL;
 
-    const reopened = connectProvider(screenplayId, owner.cookie);
+    const reopened = connectProvider(screenplayId, owner.token);
     try {
       await waitForSynced(reopened);
       expect(titlePageFromYMap(reopened.document.getMap(TITLE_PAGE_YJS_MAP))).toEqual(
@@ -344,7 +362,7 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     );
     expect(stateBefore.rowCount).toBe(0);
 
-    const client = connectProvider(screenplayId, owner.cookie);
+    const client = connectProvider(screenplayId, owner.token);
     try {
       await waitForSynced(client);
       client.awareness!.setLocalStateField('user', { lastActiveAt: Date.now() });
@@ -379,8 +397,8 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     const { projectId, screenplayId } = await createProjectAndScreenplay(owner.actorId);
     await addMember(projectId, editor.actorId, 'editor');
 
-    const ownerClient = connectProvider(screenplayId, owner.cookie);
-    const editorClient = connectProvider(screenplayId, editor.cookie);
+    const ownerClient = connectProvider(screenplayId, owner.token);
+    const editorClient = connectProvider(screenplayId, editor.token);
     try {
       await Promise.all([waitForSynced(ownerClient), waitForSynced(editorClient)]);
 
@@ -424,8 +442,8 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     const { projectId, screenplayId } = await createProjectAndScreenplay(owner.actorId);
     await addMember(projectId, reviewer.actorId, 'reviewer');
 
-    const ownerClient = connectProvider(screenplayId, owner.cookie);
-    const reviewerClient = connectProvider(screenplayId, reviewer.cookie);
+    const ownerClient = connectProvider(screenplayId, owner.token);
+    const reviewerClient = connectProvider(screenplayId, reviewer.token);
     try {
       await Promise.all([waitForSynced(ownerClient), waitForSynced(reviewerClient)]);
       expect(reviewerClient.authorizedScope).toBe('readonly');
@@ -460,8 +478,8 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     const { projectId, screenplayId } = await createProjectAndScreenplay(owner.actorId);
     await addMember(projectId, reviewer.actorId, 'reviewer');
 
-    const ownerClient = connectProvider(screenplayId, owner.cookie);
-    const reviewerClient = connectProvider(screenplayId, reviewer.cookie);
+    const ownerClient = connectProvider(screenplayId, owner.token);
+    const reviewerClient = connectProvider(screenplayId, reviewer.token);
     try {
       await Promise.all([waitForSynced(ownerClient), waitForSynced(reviewerClient)]);
       expect(reviewerClient.authorizedScope).toBe('readonly');
@@ -533,8 +551,8 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
       [restrictedEditor.actorId, restrictedEditorsOwnScreenplayId],
     );
 
-    const ownerClient = connectProvider(screenplayId, owner.cookie);
-    const restrictedClient = connectProvider(screenplayId, restrictedEditor.cookie);
+    const ownerClient = connectProvider(screenplayId, owner.token);
+    const restrictedClient = connectProvider(screenplayId, restrictedEditor.token);
     try {
       await Promise.all([waitForSynced(ownerClient), waitForSynced(restrictedClient)]);
       // The connection itself must succeed -- "readable," not merely "connectable" -- and must be
@@ -571,7 +589,7 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     const owner = await signUp('owner-restart-test@example.test');
     const { screenplayId } = await createProjectAndScreenplay(owner.actorId);
 
-    const client = connectProvider(screenplayId, owner.cookie);
+    const client = connectProvider(screenplayId, owner.token);
     await waitForSynced(client);
     writeLine(client, 'This line must survive a restart.');
     await waitForCondition(() =>
@@ -597,7 +615,7 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     server = await startServer();
     serverUrl = server.webSocketURL;
 
-    const reconnected = connectProvider(screenplayId, owner.cookie);
+    const reconnected = connectProvider(screenplayId, owner.token);
     try {
       await waitForSynced(reconnected);
       expect(projectedText(reconnected)).toContain('This line must survive a restart.');
@@ -616,26 +634,68 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     const owner = await signUp('owner-transient-test@example.test');
     const { screenplayId } = await createProjectAndScreenplay(owner.actorId);
 
-    // Simulates Postgres being unreachable for exactly the first handshake attempt -- a thrown
-    // error from the real `getActorId` dependency `authenticateConnection` calls, run through the
+    // Simulates an unexpected failure during exactly the token-verification stage -- a thrown
+    // error from the `verifyToken` dependency `authenticateConnection` calls, run through the
     // real, shipped classification logic in `authenticate.ts`, not a shortcut around it. Recovers
-    // on its own after exactly one failure, standing in for a Postgres restart that has already
+    // on its own after exactly one failure, standing in for a transient outage that has already
     // finished by the time this test's own retry (`waitForSyncedAfterTransientRetry` below) fires.
     let failuresRemaining = 1;
     await server!.destroy();
-    server = await startServer((real) => async (headers) => {
+    server = await startServer((real) => async (token, now) => {
       if (failuresRemaining > 0) {
         failuresRemaining -= 1;
-        throw new Error('Simulated transient database outage (integration test fault injection)');
+        throw new Error('Simulated transient outage (integration test fault injection)');
       }
-      return real(headers);
+      return real(token, now);
     });
     serverUrl = server.webSocketURL;
 
-    const { provider, websocketProvider } = connectProviderWithSocket(screenplayId, owner.cookie);
+    const { provider, websocketProvider } = connectProviderWithSocket(screenplayId, owner.token);
     try {
       await waitForSyncedAfterTransientRetry(provider, websocketProvider);
       expect(provider.isSynced).toBe(true);
+    } finally {
+      provider.destroy();
+    }
+  }, 20_000);
+
+  // Risk #1 from the connection-tokens brief, proven end-to-end over a real socket rather than at
+  // the unit level alone (`authenticate.test.ts` proves the classification in isolation; this
+  // proves the *reconnection* actually recovers). "An expired token must produce a refresh, not a
+  // permanent denial. Slice 2's reconnection logic treats permanent denials as terminal and stops
+  // retrying. If an expired token lands in that bucket, a reconnecting tab gives up forever."
+  it('reconnects and syncs once its token has expired, rather than terminating', async () => {
+    const owner = await signUp('owner-expired-token-test@example.test');
+    const { screenplayId } = await createProjectAndScreenplay(owner.actorId);
+
+    // A token minted with `now` set an hour in the past is, by construction, already expired by
+    // the time the real server (using the real, current wall clock) verifies it -- deterministic,
+    // not a race against `CONNECTION_TOKEN_TTL_MS`. The second and later calls return
+    // `owner.token`, a real, currently-valid one -- standing in for `apps/web/src/App.tsx`'s async
+    // `token: () => api.connectionToken().then(...)`, which mints a fresh token from `apps/api`'s
+    // real endpoint on every reconnect. `@hocuspocus/provider`'s own `getToken()`/`sendToken()`
+    // (called on every `onOpen`, confirmed by reading the installed source) is what makes this
+    // function -- not a bare string -- the mechanism that lets a reconnect matter at all.
+    let tokenCalls = 0;
+    const tokenFn = async () => {
+      tokenCalls += 1;
+      if (tokenCalls === 1) {
+        return mintConnectionToken(
+          COLLAB_TOKEN_TEST_SECRET,
+          owner.actorId,
+          new Date(Date.now() - 60 * 60 * 1000),
+        );
+      }
+      return owner.token;
+    };
+
+    const { provider, websocketProvider } = connectProviderWithSocket(screenplayId, tokenFn);
+    try {
+      await waitForSyncedAfterTransientRetry(provider, websocketProvider);
+      expect(provider.isSynced).toBe(true);
+      // Proves the retry actually re-fetched a token, not that the first (expired) one somehow
+      // succeeded -- if this were 1, the sync above did not come from a refresh at all.
+      expect(tokenCalls).toBeGreaterThanOrEqual(2);
     } finally {
       provider.destroy();
     }
@@ -654,7 +714,7 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     server = await startServer();
     serverUrl = server.webSocketURL;
 
-    const client = connectProvider(screenplayId, stranger.cookie);
+    const client = connectProvider(screenplayId, stranger.token);
     try {
       const reason = await new Promise<string | undefined>((resolvePromise, rejectPromise) => {
         const timeout = setTimeout(
@@ -687,6 +747,53 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
       client.destroy();
     }
   }, 20_000);
+
+  // The security property the brief calls out explicitly: "An integration test proving a token
+  // minted for actor A cannot be used to reach a document only actor B may see." A's own token is
+  // real, honestly minted, currently valid, and identifies A correctly (unlike the "genuine
+  // denial" test above, which never mints a role-bearing token at all) -- the denial here can only
+  // come from `resolveConnectionAuthorization`'s own database-backed role lookup finding no row
+  // for A on this document, proving identity and authorization are resolved from two genuinely
+  // different places, exactly as the brief requires ("resolveConnectionAuthorization must keep
+  // resolving role and entitlement server-side from the database at connection time").
+  it('a token minted for one actor cannot be used to reach a document only another actor may see', async () => {
+    const actorA = await signUp('actor-a-cross-actor-test@example.test');
+    const actorB = await signUp('actor-b-cross-actor-test@example.test');
+    // Only B is ever added as a member -- A has a real account and a real, valid token, but no
+    // role on this document at all.
+    const { screenplayId } = await createProjectAndScreenplay(actorB.actorId);
+
+    await server!.destroy();
+    server = await startServer();
+    serverUrl = server.webSocketURL;
+
+    const client = connectProvider(screenplayId, actorA.token);
+    try {
+      const reason = await new Promise<string | undefined>((resolvePromise, rejectPromise) => {
+        const timeout = setTimeout(
+          () => rejectPromise(new Error('Timed out waiting for authenticationFailed.')),
+          5_000,
+        );
+        client.on('synced', () => {
+          clearTimeout(timeout);
+          rejectPromise(
+            new Error(
+              "This connection must never sync -- A's token is real, but A has no role on B's document.",
+            ),
+          );
+        });
+        client.on('authenticationFailed', ({ reason: failureReason }: { reason?: string }) => {
+          clearTimeout(timeout);
+          resolvePromise(failureReason);
+        });
+      });
+      expect(reason).not.toBe(TRANSIENT_SYNC_AUTH_FAILURE_REASON);
+      await sleep(500);
+      expect(client.isSynced).toBe(false);
+    } finally {
+      client.destroy();
+    }
+  }, 20_000);
 });
 
 function projectedText(provider: HocuspocusProvider): string {
@@ -710,31 +817,42 @@ function writeLine(provider: HocuspocusProvider, text: string): void {
   });
 }
 
-function connectProvider(screenplayId: string, cookie: string): HocuspocusProvider {
-  class CookieWebSocket extends WS {
+/**
+ * The one place this suite constructs a `HocuspocusProvider`/`HocuspocusProviderWebsocket` pair,
+ * shared by `connectProvider` and `connectProviderWithSocket` below (the two used to be near-
+ * identical copies of each other, one dropping the `websocketProvider` handle the other kept).
+ *
+ * `token` accepts the identical union `@hocuspocus/provider`'s own `configuration.token` does --
+ * a plain string, or a (possibly async) function -- so the one expired-token-reconnect test below
+ * can pass a stateful function that returns an already-expired token on its first call and a real
+ * one on every call after, standing in for `apps/web/src/App.tsx`'s real `token: async () =>
+ * (await api.connectionToken()).token`, while every other test keeps passing a plain string.
+ *
+ * No `Cookie` header is ever set here, unlike this file's own pre-connection-tokens version --
+ * that is the property this whole slice exists to prove: only `Origin` (a real browser always
+ * attaches this to a cross-origin WebSocket handshake; this Node test client does not unless told
+ * to, so it is set explicitly here to the one origin this suite's `BETTER_AUTH_URL` trusts) and
+ * the connection token itself, sent over the socket's own `AuthenticationMessage`, ever
+ * authenticate this handshake now.
+ */
+function buildProviderPair(
+  screenplayId: string,
+  token: string | (() => string) | (() => Promise<string>),
+): { provider: HocuspocusProvider; websocketProvider: HocuspocusProviderWebsocket } {
+  class OriginOnlyWebSocket extends WS {
     constructor(address: string, protocols?: string | string[]) {
-      // A real browser always attaches `Origin` to a cross-origin WebSocket handshake; this
-      // Node test client does not unless told to, so it is set explicitly here to the one origin
-      // this suite's `BETTER_AUTH_URL` trusts -- proving the origin guard passes a legitimate
-      // request, not merely that it exists.
-      super(address, protocols, {
-        headers: { Cookie: cookie, Origin: 'http://127.0.0.1:4000' },
-      });
+      super(address, protocols, { headers: { Origin: 'http://127.0.0.1:4000' } });
     }
   }
   const websocketProvider = new HocuspocusProviderWebsocket({
     url: serverUrl!,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    WebSocketPolyfill: CookieWebSocket as any,
+    WebSocketPolyfill: OriginOnlyWebSocket as any,
   });
-  const provider = new HocuspocusProvider({
-    websocketProvider,
-    name: screenplayId,
-    token: 'unused',
-  });
+  const provider = new HocuspocusProvider({ websocketProvider, name: screenplayId, token });
   // `HocuspocusProvider` only wires up its own forwarding listeners and connects automatically
   // (`manageSocket`) when it constructs its *own* internal `websocketProvider` from a bare `url`.
-  // Supplying one explicitly here (the only way to attach a per-connection `Cookie`/`Origin` via
+  // Supplying one explicitly here (the only way to attach a per-connection `Origin` via
   // `WebSocketPolyfill`) means this attachment must be done by hand -- confirmed by reading the
   // installed `@hocuspocus/provider` source and its own deprecation note on `connect()`/
   // `disconnect()`: "Please connect/disconnect on the websocketProvider, or attach/deattach
@@ -749,7 +867,14 @@ function connectProvider(screenplayId: string, cookie: string): HocuspocusProvid
     destroy();
     websocketProvider.destroy();
   };
-  return provider;
+  return { provider, websocketProvider };
+}
+
+function connectProvider(
+  screenplayId: string,
+  token: string | (() => string) | (() => Promise<string>),
+): HocuspocusProvider {
+  return buildProviderPair(screenplayId, token).provider;
 }
 
 async function waitForSynced(provider: HocuspocusProvider): Promise<void> {
@@ -773,42 +898,19 @@ async function waitForSynced(provider: HocuspocusProvider): Promise<void> {
 }
 
 /** Like `connectProvider` above, but also returns the underlying `HocuspocusProviderWebsocket` --
- * needed only by the transient-recovery test, which must call `disconnect()`/`connect()` on the
- * *socket* directly. `connectProvider`'s own comment explains why: with an explicit
- * `websocketProvider` supplied (the only way to attach the Cookie/Origin headers this suite
- * needs), `manageSocket` is `false`, so the per-document `HocuspocusProvider`'s own `connect()`/
- * `disconnect()` are deprecated no-ops (confirmed by reading the installed source) -- exactly the
- * opposite of `apps/web/src/App.tsx`'s real usage, where `HocuspocusProvider` constructs its own
- * internal socket and `manageSocket` is `true`, so calling `connect()`/`disconnect()` on the
- * per-document provider there is correct as written. */
+ * needed by the transient-recovery and expired-token-recovery tests below, both of which must call
+ * `disconnect()`/`connect()` on the *socket* directly. `buildProviderPair`'s own comment explains
+ * why: with an explicit `websocketProvider` supplied (the only way to attach the `Origin` header
+ * this suite needs), `manageSocket` is `false`, so the per-document `HocuspocusProvider`'s own
+ * `connect()`/`disconnect()` are deprecated no-ops (confirmed by reading the installed source) --
+ * exactly the opposite of `apps/web/src/App.tsx`'s real usage, where `HocuspocusProvider`
+ * constructs its own internal socket and `manageSocket` is `true`, so calling `connect()`/
+ * `disconnect()` on the per-document provider there is correct as written. */
 function connectProviderWithSocket(
   screenplayId: string,
-  cookie: string,
+  token: string | (() => string) | (() => Promise<string>),
 ): { provider: HocuspocusProvider; websocketProvider: HocuspocusProviderWebsocket } {
-  class CookieWebSocket extends WS {
-    constructor(address: string, protocols?: string | string[]) {
-      super(address, protocols, {
-        headers: { Cookie: cookie, Origin: 'http://127.0.0.1:4000' },
-      });
-    }
-  }
-  const websocketProvider = new HocuspocusProviderWebsocket({
-    url: serverUrl!,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    WebSocketPolyfill: CookieWebSocket as any,
-  });
-  const provider = new HocuspocusProvider({
-    websocketProvider,
-    name: screenplayId,
-    token: 'unused',
-  });
-  provider.attach();
-  const destroy = provider.destroy.bind(provider);
-  provider.destroy = () => {
-    destroy();
-    websocketProvider.destroy();
-  };
-  return { provider, websocketProvider };
+  return buildProviderPair(screenplayId, token);
 }
 
 /**
@@ -916,16 +1018,21 @@ async function addMember(
 }
 
 /**
- * Signs up, verifies the real email link (see `apps/api/src/persistence.integration.test.ts`'s
- * identically-named helper for why -- `requireEmailVerification: true` means sign-up alone
- * creates no session), and signs in, returning both a usable session cookie and the actor's own
- * user id (read straight back from the database, the same way that other suite's `userIdFor`
- * does). Calls `auth.handler` directly with a Fetch API `Request`/`Response` rather than going
- * through a Fastify app (`apps/api/src/app.ts`'s own route just forwards to this identical
- * handler) -- `apps/collab` never mounts one, and Better Auth's handler is framework-agnostic by
- * design.
+ * Signs up and verifies the real email link (see `apps/api/src/persistence.integration.test.ts`'s
+ * identically-named helper for why this step is needed at all), then mints a real connection
+ * token for the resulting actor directly via `mintConnectionToken` -- the identical function
+ * `apps/api`'s own `POST /api/collab/connection-token` route calls, minted here without going
+ * through that route (or a Better Auth session/cookie at all) because that HTTP-and-session layer
+ * is `apps/api`'s own responsibility to prove (`apps/api/src/app.test.ts`), not this file's; this
+ * file's job is proving `apps/collab` correctly verifies whatever token it is handed. Returns the
+ * actor's own user id too (read straight back from the database, the same way
+ * `persistence.integration.test.ts`'s `userIdFor` does) -- several tests need it to insert
+ * `project_members` rows directly. Calls `auth.handler` directly with a Fetch API
+ * `Request`/`Response` rather than going through a Fastify app (`apps/api/src/app.ts`'s own route
+ * just forwards to this identical handler) -- `apps/collab` never mounts one, and Better Auth's
+ * handler is framework-agnostic by design.
  */
-async function signUp(email: string): Promise<{ actorId: string; cookie: string }> {
+async function signUp(email: string): Promise<{ actorId: string; token: string }> {
   const signUpResponse = await auth!.handler(
     new Request('http://127.0.0.1:4000/api/auth/sign-up/email', {
       method: 'POST',
@@ -939,23 +1046,9 @@ async function signUp(email: string): Promise<{ actorId: string; cookie: string 
   );
   expect(signUpResponse.status).toBe(200);
   await verifyEmail(email);
-  const cookie = await signIn(email);
   const actorId = await userIdFor(email);
-  return { actorId, cookie };
-}
-
-async function signIn(email: string): Promise<string> {
-  const response = await auth!.handler(
-    new Request('http://127.0.0.1:4000/api/auth/sign-in/email', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email, password: 'correct-horse-battery-staple' }),
-    }),
-  );
-  expect(response.status).toBe(200);
-  const setCookie = response.headers.get('set-cookie');
-  expect(setCookie).toBeTypeOf('string');
-  return setCookie!.split(';', 1)[0]!;
+  const token = await mintConnectionToken(COLLAB_TOKEN_TEST_SECRET, actorId, new Date());
+  return { actorId, token };
 }
 
 async function verifyEmail(email: string): Promise<void> {

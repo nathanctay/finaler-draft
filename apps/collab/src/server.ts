@@ -1,12 +1,17 @@
 import { Server } from '@hocuspocus/server';
 import { Database } from '@hocuspocus/extension-database';
 import { createAuth } from '@finaler-draft/auth-server';
+import { verifyConnectionToken } from '@finaler-draft/collab-token';
 import {
   loadRootEnvironment,
   requireCollabPersistenceEnvironment,
   shouldLoadRootEnvironment,
 } from './environment.js';
-import { authenticateConnection, TransientAuthenticationError } from './authenticate.js';
+import {
+  authenticateConnection,
+  ExpiredConnectionTokenError,
+  TransientAuthenticationError,
+} from './authenticate.js';
 import { createFetch, createStore } from './database.js';
 import { unreachableMailPort } from './mailStub.js';
 import {
@@ -23,10 +28,19 @@ try {
   // Reused, not recomputed: `createAuth`'s own `trustedOrigins` (the identical
   // `[BETTER_AUTH_URL, CLIENT_ORIGIN?]` allowlist `apps/api`'s origin guard trusts) is the one
   // this WebSocket handshake must agree with byte-for-byte -- see `authenticate.ts`'s own comment
-  // on why an unvalidated `Origin` is a hijacking vulnerability here specifically.
-  const { auth, pool, trustedOrigins } = createAuth(environment, { mail: unreachableMailPort });
-  const getActorId = async (headers: Headers) =>
-    (await auth.api.getSession({ headers }))?.user.id ?? null;
+  // on why an unvalidated `Origin` is a hijacking vulnerability here specifically. `auth` itself
+  // (Better Auth's own session-verification surface) is deliberately not destructured: this
+  // process no longer reads a session cookie at all -- see `verifyToken` below -- and `createAuth`
+  // is called only for the `pool`/`trustedOrigins` it builds alongside that surface.
+  const { pool, trustedOrigins } = createAuth(environment, { mail: unreachableMailPort });
+  // The replacement for the Better Auth session cookie this process used to read directly off the
+  // handshake's own headers (`apps/collab/src/authenticate.ts`'s own module comment on why that
+  // cookie never reaches this process once `app` and `collab` are on two different hosts). Bound
+  // to this process's own `COLLAB_TOKEN_SECRET` here, at the one call site, rather than threaded
+  // through as a bare string -- `authenticateConnection` below never sees the secret itself, only
+  // this already-bound function, the same shape `getActorId` had before it.
+  const verifyToken = (token: string, now: Date) =>
+    verifyConnectionToken(environment.COLLAB_TOKEN_SECRET, token, now);
 
   const server = new Server({
     extensions: [
@@ -62,8 +76,12 @@ try {
     async onAuthenticate(data) {
       try {
         const { actorId, readOnly } = await authenticateConnection(
-          { queryable: pool, getActorId, trustedOrigins },
-          { documentName: data.documentName, requestHeaders: data.requestHeaders },
+          { queryable: pool, verifyToken, trustedOrigins },
+          {
+            documentName: data.documentName,
+            requestHeaders: data.requestHeaders,
+            token: data.token,
+          },
         );
         // Mutates the *same* `connectionConfig` object Hocuspocus later reads to decide the
         // connection's own `readOnly` flag (confirmed by reading the installed
@@ -87,26 +105,35 @@ try {
         // Previously silent: Hocuspocus reports only "permission-denied" (or, for a transient
         // failure, the same message tagged with `TransientAuthenticationError`'s own `reason`)
         // to the client, and nothing on this side ever recorded which of `authenticateConnection`'s
-        // four rejections actually fired -- three sessions of diagnosing a permanently-hung
+        // five rejections actually fired -- three sessions of diagnosing a permanently-hung
         // connection had to guess at the mechanism for exactly that reason. `error.message` is
-        // safe to log here specifically because all four rejections are fixed literal strings
+        // safe to log here specifically because all five rejections are fixed literal strings
         // this module defines (`'Cross-origin connection rejected'`, `'Authentication required'`,
-        // `'This document is not visible to this account'`, or `TransientAuthenticationError`'s
-        // own message) -- never interpolated with request data -- unlike `app.ts`'s Stripe
-        // webhook route, which logs only an error's `name` because *that* error can carry a raw
-        // header/payload. This never logs the cookie, the session token, or the request headers
-        // themselves; `causeName` is deliberately narrowed to the cause's own constructor name
-        // for the identical reason the Stripe route stays at `.name` rather than the object.
-        const transient = error instanceof TransientAuthenticationError;
-        const cause = transient ? error.cause : undefined;
+        // `'This document is not visible to this account'`, or `TransientAuthenticationError`'s/
+        // `ExpiredConnectionTokenError`'s own fixed messages) -- never interpolated with request
+        // data -- unlike `app.ts`'s Stripe webhook route, which logs only an error's `name`
+        // because *that* error can carry a raw header/payload. This never logs the cookie, the
+        // connection token, or the request headers themselves; `causeName` is deliberately
+        // narrowed to the cause's own constructor name for the identical reason the Stripe route
+        // stays at `.name` rather than the object.
+        //
+        // `transient` (for the log line) is true for either class that carries
+        // `TRANSIENT_SYNC_AUTH_FAILURE_REASON` -- a genuinely unexpected failure
+        // (`TransientAuthenticationError`, which alone carries a `.cause` and a `.stage`) and an
+        // ordinary expired token (`ExpiredConnectionTokenError`, which carries neither, since
+        // there is no underlying cause to report and no stage the expiry happened at -- it is not
+        // a failure of any lookup, it is the token's own clock running out).
+        const transientFailure = error instanceof TransientAuthenticationError;
+        const expiredToken = error instanceof ExpiredConnectionTokenError;
+        const cause = transientFailure ? error.cause : undefined;
         console.error(
           JSON.stringify({
             event: 'collab_authenticate_rejected',
             documentName: data.documentName,
             errorName: error instanceof Error ? error.name : 'UnknownError',
             reason: error instanceof Error ? error.message : String(error),
-            transient,
-            stage: transient ? error.stage : undefined,
+            transient: transientFailure || expiredToken,
+            stage: transientFailure ? error.stage : undefined,
             causeName:
               cause instanceof Error
                 ? cause.name
@@ -134,8 +161,9 @@ try {
       }
       sanitizeAwarenessStates(states, presence);
     },
-    // Closes this process's *own* database pool -- the one `getActorId`/`authenticateConnection`
-    // and the `Database` extension's `fetch`/`store` all share, built by `createAuth` above, and
+    // Closes this process's *own* database pool -- the one `authenticateConnection`'s role/
+    // entitlement queries and the `Database` extension's `fetch`/`store` all share, built by
+    // `createAuth` above, and
     // entirely outside anything Hocuspocus itself knows about. `onDestroy` is Hocuspocus's own
     // hook for exactly this: `Server.listen()` defaults `stopOnSignals` to `true` (confirmed by
     // reading the installed 4.6.0 source -- `defaultServerConfiguration`), so SIGINT/SIGQUIT/

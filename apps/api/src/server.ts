@@ -135,6 +135,16 @@ async function buildPersistentApp(
       persistence.STRIPE_PRICE_ID_MONTHLY &&
       persistence.STRIPE_PRICE_ID_ANNUAL,
   );
+  // Optional in every environment short of production (`requirePersistenceEnvironment` in
+  // `@finaler-draft/server-config` is what makes this mandatory there), mirroring
+  // `stripeConfigured` immediately below: a development or test process without
+  // `COLLAB_TOKEN_SECRET` set still starts, just without the connection-token minting route
+  // registered at all (see `BuildAppOptions.collab` in app.ts). This is the one gate that decides
+  // whether `apps/web`'s `HocuspocusProvider` can ever successfully authenticate against
+  // `apps/collab` in this environment -- see progress/collaboration-plan.md's connection-tokens
+  // slice for why cookie-based authentication no longer works once `app` and `collab` are on two
+  // different hosts.
+  const collabTokenConfigured = Boolean(persistence.COLLAB_TOKEN_SECRET);
   // `stripeConfigured` alone used to be the only gate here, which is exactly what let this
   // allowlist reject the developer's own `stripe listen` traffic in every local run: see
   // `shouldEnforceStripeIpAllowlist`'s own comment for the incident and the reasoning against a
@@ -185,6 +195,7 @@ async function buildPersistentApp(
     // this wrapper gates and what it deliberately leaves untouched.
     projects: createEntitlementEnforcedProjectStore(createPostgresProjectStore(pool), entitlements),
     entitlements,
+    collab: collabTokenConfigured ? { secret: persistence.COLLAB_TOKEN_SECRET! } : undefined,
     stripe: stripeConfigured
       ? {
           client: stripeClient!,

@@ -67,6 +67,22 @@ const serverEnvironment = z.object({
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
   STRIPE_PRICE_ID_MONTHLY: z.string().optional(),
   STRIPE_PRICE_ID_ANNUAL: z.string().optional(),
+  // Signs and verifies the short-lived, collab-scoped connection token that replaced cookie-based
+  // WebSocket authentication (progress/collaboration-plan.md's connection-tokens slice;
+  // `@finaler-draft/collab-token`). Optional here for the same reason as the Resend/Stripe fields
+  // above: a health/static-only `apps/api` process, and local development without it configured,
+  // both need to start -- `apps/api` simply does not register the token-minting route without it
+  // (mirroring `stripeConfigured`'s gating in server.ts). `requirePersistenceEnvironment` below
+  // makes it mandatory in production. `apps/collab`'s own `requireCollabPersistenceEnvironment`
+  // (apps/collab/src/environment.ts) requires it unconditionally, in every environment, since that
+  // process cannot do anything at all without persistence -- this schema only governs `apps/api`'s
+  // more permissive health/static-only mode.
+  //
+  // Deliberately a separate secret from `BETTER_AUTH_SECRET`, not a reuse of it: a leak of this
+  // secret lets someone mint a *connection* token, never a session -- Better Auth never accepts a
+  // bearer JWT as a session credential, so the blast radius of the two secrets is intentionally
+  // disjoint. See `@finaler-draft/collab-token`'s own top-of-file comment for the full reasoning.
+  COLLAB_TOKEN_SECRET: z.string().min(32).optional(),
 });
 
 export type ServerEnvironment = z.infer<typeof serverEnvironment>;
@@ -90,6 +106,7 @@ export function requirePersistenceEnvironment(environment: ServerEnvironment) {
       STRIPE_WEBHOOK_SECRET: z.string().optional(),
       STRIPE_PRICE_ID_MONTHLY: z.string().optional(),
       STRIPE_PRICE_ID_ANNUAL: z.string().optional(),
+      COLLAB_TOKEN_SECRET: z.string().min(32).optional(),
     })
     .parse(environment);
   if (environment.NODE_ENV === 'production') {
@@ -105,6 +122,17 @@ export function requirePersistenceEnvironment(environment: ServerEnvironment) {
       throw new Error(
         'RESEND_API_KEY and MAIL_FROM_ADDRESS are required in production: without them, ' +
           'password reset and email verification cannot be delivered.',
+      );
+    }
+    // Without this, `apps/api` cannot mint a connection token in production at all -- the
+    // token-minting route (server.ts's `collabTokenConfigured` gate) would simply never be
+    // registered, and every browser's `HocuspocusProvider` would fail every handshake with no
+    // token to send. Failing at startup turns that into a deploy-time error instead of every
+    // writer's first collaborative edit silently never reaching `apps/collab`.
+    if (!persistence.COLLAB_TOKEN_SECRET) {
+      throw new Error(
+        'COLLAB_TOKEN_SECRET is required in production: without it, this process cannot mint ' +
+          'the connection tokens apps/collab needs to authenticate a WebSocket handshake.',
       );
     }
     // plan.md: "Verify the webhook signature on every event ... Treat the signing secret with

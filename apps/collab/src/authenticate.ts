@@ -1,4 +1,5 @@
 import { checkEntitlement, type EntitlementSnapshot } from '@finaler-draft/entitlements';
+import type { ConnectionTokenVerification } from '@finaler-draft/collab-token';
 import { TRANSIENT_SYNC_AUTH_FAILURE_REASON } from '@finaler-draft/config';
 import { isTrustedConnectionOrigin } from './originGuard.js';
 
@@ -161,21 +162,29 @@ export async function resolveConnectionAuthorization(
   return { allowed: true, actorId, readOnly: !decision.allowed };
 }
 
-/** What `authenticateConnection` needs from the wider process: a database handle, the same
- * session-verification function `apps/api`'s own `AuthPort.getActorId` uses, and the origin
- * allowlist `createAuth` already builds. Bundled so `server.ts`'s `onAuthenticate` hook is a thin
- * wrapper reading fields off Hocuspocus's own payload, not a second place this logic could drift
- * from what this function actually does. */
+/** What `authenticateConnection` needs from the wider process: a database handle, a function that
+ * verifies the connection token the client sent (see `@finaler-draft/collab-token`'s
+ * `verifyConnectionToken`, bound to this process's own `COLLAB_TOKEN_SECRET` at the call site in
+ * `server.ts`), and the origin allowlist `createAuth` already builds. Bundled so `server.ts`'s
+ * `onAuthenticate` hook is a thin wrapper reading fields off Hocuspocus's own payload, not a
+ * second place this logic could drift from what this function actually does.
+ *
+ * `verifyToken` replaces this interface's former `getActorId(headers)` -- the Better Auth session
+ * cookie this process used to read directly off the WebSocket handshake's own headers. That
+ * cookie is host-only and never reaches this process once `app` and `collab` are on two different
+ * hosts (progress/collaboration-plan.md's connection-tokens slice); a short-lived, collab-scoped
+ * token sent over the socket's own `AuthenticationMessage` replaces it, verified here instead of
+ * looked up in a session store. */
 export interface AuthenticateConnectionDependencies {
   queryable: Queryable;
-  getActorId(headers: Headers): Promise<string | null>;
+  verifyToken(token: string, now: Date): Promise<ConnectionTokenVerification>;
   trustedOrigins: readonly string[];
 }
 
 /**
  * Tags a thrown error as *transient* -- an unexpected failure while trying to answer the
  * authentication/authorization question (a Postgres blip, a dropped pool connection during
- * `getActorId` or the role/entitlement queries), never a resolved decision. `authenticateConnection`
+ * `verifyToken` or the role/entitlement queries), never a resolved decision. `authenticateConnection`
  * below is the only place this is constructed: it wraps exactly the two calls that can fail for a
  * reason that has nothing to do with whether this actor may see this document, leaving the three
  * deliberate denials (cross-origin, no session, not visible) as plain `Error`s, unchanged from
@@ -194,9 +203,9 @@ export class TransientAuthenticationError extends Error {
   override readonly cause: unknown;
   /** Which of the two calls this wraps failed -- `server.ts`'s own rejection log reads this to
    * say precisely where a transient failure happened, not just that one did. */
-  readonly stage: 'session-lookup' | 'role-or-entitlement-lookup';
+  readonly stage: 'token-verification' | 'role-or-entitlement-lookup';
 
-  constructor(cause: unknown, stage: 'session-lookup' | 'role-or-entitlement-lookup') {
+  constructor(cause: unknown, stage: 'token-verification' | 'role-or-entitlement-lookup') {
     super(
       'Transient failure while authenticating this connection (a thrown error, not a resolved denial)',
     );
@@ -207,9 +216,40 @@ export class TransientAuthenticationError extends Error {
 }
 
 /**
+ * Risk #1 from the connection-tokens slice, named explicitly in the brief: "An expired token must
+ * produce a refresh, not a permanent denial." A token expiring is not a database blip or any
+ * other kind of unexpected failure -- `TransientAuthenticationError` above stays reserved for
+ * exactly that -- it is an ordinary, expected event a reconnect resolves on its own, because
+ * `@hocuspocus/provider` 4.6.0's `getToken()` (called from `sendToken()` on every `onOpen`, per
+ * the installed source) re-fetches a fresh token from `apps/api`'s minting endpoint on every
+ * reconnection when `HocuspocusProvider`'s own `token` option is an async function, which is
+ * exactly how `apps/web/src/App.tsx` configures it.
+ *
+ * This class exists, distinct from `TransientAuthenticationError`, purely so `server.ts`'s own
+ * rejection log can tell the two apart by name (an expired token is not a sign anything is
+ * broken) while sharing the *one* property that actually matters to the client:
+ * `.reason === TRANSIENT_SYNC_AUTH_FAILURE_REASON`. `apps/web/src/App.tsx`'s
+ * `handleAuthenticationFailed` -- and this file's own `authenticate.integration.test.ts` --
+ * dispatch on that reason alone, not on the error's class, so this is a drop-in member of the
+ * exact same "retry, don't give up" bucket `TransientAuthenticationError` already established.
+ */
+export class ExpiredConnectionTokenError extends Error {
+  readonly reason = TRANSIENT_SYNC_AUTH_FAILURE_REASON;
+
+  constructor() {
+    super(
+      'Connection token expired; a reconnect fetches a fresh one rather than a permanent denial',
+    );
+    this.name = 'ExpiredConnectionTokenError';
+  }
+}
+
+/**
  * The whole `onAuthenticate` decision, composed: reject a connection whose `Origin` is not on the
- * trusted allowlist (see `originGuard.ts`'s own comment for why this is not optional for a
- * cookie-authenticated WebSocket), reject one with no valid Better Auth session, and otherwise
+ * trusted allowlist (see `originGuard.ts`'s own comment for why this remains mandatory even though
+ * a cookie is no longer what authenticates the connection -- a token sent by a page on an
+ * untrusted origin is exactly the cross-site hijacking scenario this guard exists to close, token
+ * or cookie makes no difference), reject one whose connection token does not verify, and otherwise
  * resolve the role/entitlement-driven read/write decision via `resolveConnectionAuthorization`.
  * Throws for every rejection -- Hocuspocus's own `onAuthenticate` contract treats a thrown error
  * (or a rejected promise) as "deny this connection," exactly the behaviour plan.md requires:
@@ -220,37 +260,44 @@ export class TransientAuthenticationError extends Error {
  * the installed source -- the permission-denied path is a `send`, never a `close`), so a
  * permanently-denied connection and a connection that merely hit a database hiccup during this
  * exact handshake look identical to a client with no other signal. `TransientAuthenticationError`
- * is the fix for that: `deps.getActorId` and `resolveConnectionAuthorization` are the only two
+ * is the fix for that: `deps.verifyToken` and `resolveConnectionAuthorization` are the only two
  * calls here that can fail for a reason unrelated to the actor's actual access (a network error
  * talking to Postgres, not a decision about this actor and this document), so their failures alone
- * are wrapped and tagged transient. Every other rejection here is a resolved, deliberate answer to
- * "may this actor see this document" and stays a plain `Error` -- retrying it would never change
- * the outcome, so it is not worth the client's time to retry, and `apps/web` shows it as a clear
- * terminal state instead.
+ * are wrapped and tagged transient. An *expired* token is a third, deliberately distinct case --
+ * see `ExpiredConnectionTokenError`'s own comment -- routed into the identical client-visible
+ * transient bucket by `.reason` alone, without being a `TransientAuthenticationError` itself.
+ * Every other rejection here is a resolved, deliberate answer to "may this actor see this
+ * document" and stays a plain `Error` -- retrying it would never change the outcome, so it is not
+ * worth the client's time to retry, and `apps/web` shows it as a clear terminal state instead.
  */
 export async function authenticateConnection(
   deps: AuthenticateConnectionDependencies,
-  params: { documentName: string; requestHeaders: Headers; now?: Date },
+  params: { documentName: string; requestHeaders: Headers; token: string; now?: Date },
 ): Promise<{ actorId: string; readOnly: boolean }> {
   if (!isTrustedConnectionOrigin(params.requestHeaders.get('origin'), deps.trustedOrigins)) {
     throw new Error('Cross-origin connection rejected');
   }
-  let actorId: string | null;
+  const now = params.now ?? new Date();
+  let verification: ConnectionTokenVerification;
   try {
-    actorId = await deps.getActorId(params.requestHeaders);
+    verification = await deps.verifyToken(params.token, now);
   } catch (cause) {
-    throw new TransientAuthenticationError(cause, 'session-lookup');
+    throw new TransientAuthenticationError(cause, 'token-verification');
   }
-  if (!actorId) {
+  if (verification.outcome === 'expired') {
+    throw new ExpiredConnectionTokenError();
+  }
+  if (verification.outcome === 'invalid') {
     throw new Error('Authentication required');
   }
+  const actorId = verification.actorId;
   let authorization: ConnectionAuthorization;
   try {
     authorization = await resolveConnectionAuthorization(
       deps.queryable,
       params.documentName,
       actorId,
-      params.now ?? new Date(),
+      now,
     );
   } catch (cause) {
     throw new TransientAuthenticationError(cause, 'role-or-entitlement-lookup');
