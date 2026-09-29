@@ -13,6 +13,7 @@ export default defineConfig({
     '**/presence-persistence.spec.ts',
     '**/titlepage-persistence.spec.ts',
     '**/titlepage-cursors-persistence.spec.ts',
+    '**/offline-persistence.spec.ts',
   ],
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),

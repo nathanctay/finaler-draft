@@ -24,12 +24,18 @@ import * as Y from 'yjs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { TRANSIENT_SYNC_AUTH_FAILURE_REASON } from '@finaler-draft/config';
 import { authenticateConnection } from './authenticate.js';
-import { createFetch, createStore } from './database.js';
+import { createFetch, createStore, DEFAULT_EPOCH } from './database.js';
 import {
   resolvePresenceIdentity,
   sanitizeAwarenessStates,
   type ServerPresenceIdentity,
 } from './presence.js';
+import { appendUpdate } from './updateLog.js';
+import {
+  extractSyncUpdatePayload,
+  quarantineUpdate,
+  updateCarriesNewContent,
+} from './quarantine.js';
 import {
   createIntegrationDatabase,
   createIntegrationPool,
@@ -118,10 +124,34 @@ async function startServer(
       const presence = await resolvePresenceIdentity(pool!, actorId);
       return { actorId, presence };
     },
-    // Mirrors `server.ts`'s own `beforeHandleAwareness` -- this harness rebuilds the server's
-    // hook wiring rather than importing `server.ts` (a self-executing entrypoint, not an exported
-    // config), so it has to be kept in step by hand. The presence tests below exist specifically
-    // to catch that file and this one drifting apart.
+    // Mirrors `server.ts`'s own `onChange`/`beforeHandleMessage`/`beforeHandleAwareness` -- this
+    // harness rebuilds the server's hook wiring rather than importing `server.ts` (a
+    // self-executing entrypoint, not an exported config), so it has to be kept in step by hand.
+    // The tests below (append, compaction-under-load, quarantine, presence) exist specifically to
+    // catch that file and this one drifting apart.
+    async onChange({ document, documentName, update, context }) {
+      const actorId = (context as { actorId?: string } | undefined)?.actorId;
+      await appendUpdate(pool!, {
+        screenplayId: documentName,
+        epoch: DEFAULT_EPOCH,
+        update,
+        actorId,
+      });
+      void document;
+    },
+    async beforeHandleMessage({ connection, document, update, documentName, context }) {
+      if (!connection.readOnly) return;
+      const payload = extractSyncUpdatePayload(update);
+      if (!payload) return;
+      if (!updateCarriesNewContent(document, payload)) return;
+      const actorId = (context as { actorId?: string } | undefined)?.actorId;
+      await quarantineUpdate(pool!, {
+        screenplayId: documentName,
+        epoch: DEFAULT_EPOCH,
+        update: payload,
+        actorId,
+      });
+    },
     async beforeHandleAwareness({ states, context }) {
       const presence = (context as { presence?: ServerPresenceIdentity } | undefined)?.presence;
       if (!presence) {
@@ -189,6 +219,61 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     }
   }, 20_000);
 
+  // Slice 3's browser-offline story, proven server-side: a fully-entitled editor's socket drops,
+  // they keep writing locally (exactly what `y-indexeddb`/Yjs's own queue-and-flush behaviour lets
+  // `apps/web` do -- see progress/collaboration-offline-durable.md), and reconnecting catches the
+  // server up with no loss and no conflict, because there is nothing to reconcile beyond Yjs's own
+  // CRDT merge: both sides' edits survive.
+  it('an offline editor reconnects and catches the server up with no loss, and a concurrent edit made while they were away survives alongside theirs', async () => {
+    const owner = await signUp('owner-offline-catchup@example.test');
+    const editor = await signUp('editor-offline-catchup@example.test');
+    const { projectId, screenplayId } = await createProjectAndScreenplay(owner.actorId);
+    await addMember(projectId, editor.actorId, 'editor');
+
+    const { provider: editorClient, websocketProvider } = connectProviderWithSocket(
+      screenplayId,
+      editor.token,
+    );
+    const ownerClient = connectProvider(screenplayId, owner.token);
+    try {
+      await Promise.all([waitForSynced(editorClient), waitForSynced(ownerClient)]);
+
+      const disconnected = new Promise<void>((resolvePromise) => {
+        websocketProvider.on('disconnect', () => resolvePromise());
+      });
+      websocketProvider.disconnect();
+      await disconnected;
+
+      // Offline edit, made with no server in the loop at all.
+      writeLine(editorClient, 'Written while this editor was offline.');
+      // A genuinely concurrent edit from someone else, made *while* the first editor is away --
+      // the case a rollback-style "recover my version" flow would have forced a choice on; a CRDT
+      // has none to make.
+      writeLine(ownerClient, 'Written by the owner while the editor was offline.');
+      await waitForCondition(() =>
+        projectedText(ownerClient).includes('Written by the owner while the editor was offline.'),
+      );
+
+      websocketProvider.connect();
+      await waitForSynced(editorClient);
+
+      await waitForCondition(() =>
+        projectedText(ownerClient).includes('Written while this editor was offline.'),
+      );
+      await waitForCondition(() =>
+        projectedText(editorClient).includes('Written by the owner while the editor was offline.'),
+      );
+      // Both survive, on both sides -- no loss, and (correctly) no merge conflict to resolve.
+      expect(projectedText(editorClient)).toContain('Written while this editor was offline.');
+      expect(projectedText(editorClient)).toContain(
+        'Written by the owner while the editor was offline.',
+      );
+    } finally {
+      editorClient.destroy();
+      ownerClient.destroy();
+    }
+  }, 20_000);
+
   // The migration this slice's brief calls the highest-stakes part of the work: an existing
   // screenplay's title page and document settings, sitting only in `canonical_screenplay`, must
   // end up in the Yjs document the first time it is opened collaboratively -- and, for a
@@ -198,11 +283,11 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
   // the same logic in isolation) and through the real socket, the same way every other guarantee
   // in this file is proven.
   //
-  // Only the "first open, no `document_yjs_state` row yet" test below needs this: that is the only
-  // migration path that calls `editorContentFromScreenplay` (`createFetch`'s seed-from-canonical
-  // branch), so it is the only one `screenplayFixture`'s own `dual_dialogue`/`page_break`/note
-  // content -- deliberately unrepresentable in this editor -- would break. The backfill and
-  // idempotency tests insert `document_yjs_state` directly and never touch `blocks` at all.
+  // Only the "first open, no checkpoint yet" test below needs this: that is the only migration
+  // path that calls `editorContentFromScreenplay` (`createFetch`'s seed-from-canonical branch), so
+  // it is the only one `screenplayFixture`'s own `dual_dialogue`/`page_break`/note content --
+  // deliberately unrepresentable in this editor -- would break. The backfill and idempotency tests
+  // insert a checkpoint directly and never touch `blocks` at all.
   const editableBodyFields: Partial<typeof screenplayFixture> = {
     annotations: [],
     blocks: [{ id: randomUUID(), type: 'action', text: 'A single representable block.' }],
@@ -235,9 +320,10 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     const owner = await signUp('owner-migration-backfill@example.test');
     const { screenplayId } = await createProjectAndScreenplay(owner.actorId);
 
-    // Simulates a `document_yjs_state` row written before this slice shipped: real body content,
-    // but the title page/document settings maps were never written, since that concept did not
-    // exist yet. Inserted directly into the database, standing in for what a pre-this-slice
+    // Simulates a checkpoint written before this slice's title-page/document-settings migration
+    // shipped: real body content, but the title page/document settings maps were never written,
+    // since that concept did not exist yet. Inserted directly into the database as the document's
+    // one and only checkpoint (through_sequence 0, no log rows), standing in for what an earlier
     // `apps/collab` process would have persisted.
     const preSliceDoc = createLocalScreenplayYDoc({
       type: 'screenplayDocument',
@@ -250,8 +336,8 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
       ],
     });
     await pool!.query(
-      `insert into document_yjs_state (screenplay_id, state, updated_at)
-       values ($1, $2, now())`,
+      `insert into document_yjs_checkpoints (screenplay_id, epoch, through_sequence, merged_update)
+       values ($1, 0, 0, $2)`,
       [screenplayId, Buffer.from(Y.encodeStateAsUpdate(preSliceDoc))],
     );
 
@@ -271,14 +357,14 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     const owner = await signUp('owner-migration-idempotent@example.test');
     const { screenplayId } = await createProjectAndScreenplay(owner.actorId);
 
-    // Same pre-slice fixture as above: a `document_yjs_state` row with no title page map yet.
+    // Same pre-slice fixture as above: a checkpoint with no title page map yet.
     const preSliceDoc = createLocalScreenplayYDoc({
       type: 'screenplayDocument',
       content: [{ type: 'screenplayBlock', attrs: { element: 'action', id: randomUUID() } }],
     });
     await pool!.query(
-      `insert into document_yjs_state (screenplay_id, state, updated_at)
-       values ($1, $2, now())`,
+      `insert into document_yjs_checkpoints (screenplay_id, epoch, through_sequence, merged_update)
+       values ($1, 0, 0, $2)`,
       [screenplayId, Buffer.from(Y.encodeStateAsUpdate(preSliceDoc))],
     );
 
@@ -302,15 +388,17 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
           titlePageFromYMap(firstOpen.document.getMap(TITLE_PAGE_YJS_MAP))?.title ===
           writersOwnTitlePage.title,
       );
-      // Forces the debounced store to run now, persisting the writer's edit to
-      // `document_yjs_state` rather than waiting out the real debounce window.
+      // Forces the debounced store to run now, persisting the writer's edit into a fresh
+      // checkpoint rather than waiting out the real debounce window. The pre-slice fixture above
+      // already inserted one checkpoint (through_sequence 0); compaction absorbing the writer's
+      // title-page edit produces a second, later one.
       server!.hocuspocus.flushPendingStores();
       await waitForCondition(async () => {
         const row = await pool!.query(
-          'select updated_at as "updatedAt" from document_yjs_state where screenplay_id = $1',
+          'select count(*)::int as count from document_yjs_checkpoints where screenplay_id = $1',
           [screenplayId],
         );
-        return row.rowCount === 1;
+        return (row.rows[0]?.count ?? 0) >= 2;
       });
     } finally {
       firstOpen.destroy();
@@ -348,7 +436,7 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     }
   }, 30_000);
 
-  it('presence never reaches the database -- an awareness-only update leaves document_yjs_state and canonical_screenplay untouched', async () => {
+  it('presence never reaches the database -- an awareness-only update leaves the update log, the checkpoint count, and canonical_screenplay untouched', async () => {
     const owner = await signUp('owner-presence-db-test@example.test');
     const { screenplayId } = await createProjectAndScreenplay(owner.actorId);
 
@@ -356,25 +444,46 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
       'select updated_at as "updatedAt" from screenplays where id = $1',
       [screenplayId],
     );
-    const stateBefore = await pool!.query(
-      'select 1 from document_yjs_state where screenplay_id = $1',
+    const updatesBefore = await pool!.query(
+      'select 1 from document_yjs_updates where screenplay_id = $1',
       [screenplayId],
     );
-    expect(stateBefore.rowCount).toBe(0);
+    expect(updatesBefore.rowCount).toBe(0);
 
     const client = connectProvider(screenplayId, owner.token);
     try {
       await waitForSynced(client);
+      // Connecting for the first time itself seeds one checkpoint (`createFetch`'s "never opened
+      // collaboratively before" branch, via `writeCheckpoint`) -- captured *after* `waitForSynced`
+      // so the awareness-only assertion below is about what happens *beyond* that ordinary seed,
+      // not a false positive from it.
+      const checkpointsAfterSeed = await pool!.query(
+        'select count(*)::int as count from document_yjs_checkpoints where screenplay_id = $1',
+        [screenplayId],
+      );
+
       client.awareness!.setLocalStateField('user', { lastActiveAt: Date.now() });
       client.awareness!.setLocalStateField('cursor', { anchor: 'irrelevant', head: 'irrelevant' });
       // This slice's own addition to awareness -- the title page's own cursor, subject to the
       // identical guarantee `cursor` (the manuscript body's) already proves above: awareness never
-      // reaches `onStoreDocument`, regardless of which surface a cursor is for.
+      // reaches `onChange`/`onStoreDocument`, regardless of which surface a cursor is for.
       client.awareness!.setLocalStateField('titlePageCursor', { field: 'title', offset: 3 });
+      server!.hocuspocus.flushPendingStores();
       // No `waitForCondition` polling a positive signal here on purpose: this proves an absence,
       // which only a fixed wait can -- the same reasoning `collaboration.integration.test.ts`'s
       // own reviewer-write-rejection test gives for its identical choice.
       await sleep(500);
+
+      const updatesAfter = await pool!.query(
+        'select 1 from document_yjs_updates where screenplay_id = $1',
+        [screenplayId],
+      );
+      expect(updatesAfter.rowCount).toBe(0);
+      const checkpointsAfterAwareness = await pool!.query(
+        'select count(*)::int as count from document_yjs_checkpoints where screenplay_id = $1',
+        [screenplayId],
+      );
+      expect(checkpointsAfterAwareness.rows[0].count).toBe(checkpointsAfterSeed.rows[0].count);
     } finally {
       client.destroy();
     }
@@ -383,12 +492,7 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
       'select updated_at as "updatedAt" from screenplays where id = $1',
       [screenplayId],
     );
-    const stateAfter = await pool!.query(
-      'select 1 from document_yjs_state where screenplay_id = $1',
-      [screenplayId],
-    );
     expect(after.rows[0].updatedAt).toEqual(before.rows[0].updatedAt);
-    expect(stateAfter.rowCount).toBe(0);
   }, 20_000);
 
   it('a client cannot claim another writer’s name or colour -- the server, not the client, is authoritative for identity', async () => {
@@ -585,6 +689,157 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     }
   }, 20_000);
 
+  // Slice 3's quarantine (progress/collaboration-offline-durable.md): the tension between "a
+  // writer's honest offline work must never simply vanish" and "going offline must never become a
+  // way to keep editing without the entitlement that would otherwise gate it." This is the same
+  // restricted-slot writer as the test above, but instead of a single rejected live keystroke, it
+  // makes a real *offline* edit (disconnected socket, local Yjs mutation, exactly what this
+  // writer's editor keeps accepting locally while offline per plan.md) and reconnects -- the batch
+  // of accumulated local changes arrives at the server as this connection's own `SyncStep2`, the
+  // same message `beforeHandleMessage` (`server.ts`) inspects for any `readOnly` connection.
+  it('quarantine: a reconnecting writer outside their editable slot has their offline edit retained, but it never reaches the live document', async () => {
+    const owner = await signUp('owner-quarantine-test@example.test');
+    const { projectId, screenplayId } = await createProjectAndScreenplay(owner.actorId);
+
+    const restrictedEditor = await signUp('editor-quarantine-test@example.test');
+    await addMember(projectId, restrictedEditor.actorId, 'editor');
+    const { screenplayId: restrictedEditorsOwnScreenplayId } = await createProjectAndScreenplay(
+      restrictedEditor.actorId,
+    );
+    await pool!.query(
+      'insert into editable_slots (user_id, screenplay_id, updated_at) values ($1, $2, now())',
+      [restrictedEditor.actorId, restrictedEditorsOwnScreenplayId],
+    );
+
+    const { provider: restrictedClient, websocketProvider } = connectProviderWithSocket(
+      screenplayId,
+      restrictedEditor.token,
+    );
+    try {
+      await waitForSynced(restrictedClient);
+      expect(restrictedClient.authorizedScope).toBe('readonly');
+
+      // Go offline: close the socket, but the local `Y.Doc` -- and this writer's editor bound to
+      // it -- keeps working exactly as it would with a real dropped connection.
+      const disconnected = new Promise<void>((resolvePromise) => {
+        websocketProvider.on('disconnect', () => resolvePromise());
+      });
+      websocketProvider.disconnect();
+      await disconnected;
+
+      writeLine(restrictedClient, 'Offline edit made while entitlement had lapsed.');
+
+      // Reconnect. The accumulated local edit is what this connection's own first `SyncStep2`
+      // carries back to the server.
+      websocketProvider.connect();
+      await waitForSynced(restrictedClient);
+
+      // Retained: the server accepted and kept the bytes, even though it never merged them.
+      await waitForCondition(async () => {
+        const rows = await pool!.query(
+          'select 1 from document_yjs_quarantined_updates where screenplay_id = $1',
+          [screenplayId],
+        );
+        return (rows.rowCount ?? 0) > 0;
+      });
+      const quarantined = await pool!.query<{ actorId: string | null }>(
+        'select authenticated_actor_id as "actorId" from document_yjs_quarantined_updates where screenplay_id = $1',
+        [screenplayId],
+      );
+      expect(quarantined.rows.some((row) => row.actorId === restrictedEditor.actorId)).toBe(true);
+
+      // Never merged: a fresh connection -- the owner's -- never sees the offline edit's content.
+      const ownerClient = connectProvider(screenplayId, owner.token);
+      try {
+        await waitForSynced(ownerClient);
+        await sleep(300);
+        expect(projectedText(ownerClient)).not.toContain(
+          'Offline edit made while entitlement had lapsed.',
+        );
+      } finally {
+        ownerClient.destroy();
+      }
+    } finally {
+      restrictedClient.destroy();
+    }
+  }, 20_000);
+
+  // `updateLog.test.ts` proves compaction under concurrent appends against an in-memory model with
+  // a real FIFO mutex standing in for `pg_advisory_xact_lock`; this repeats the identical
+  // interleaving against a genuinely running Postgres, so the lock's real behaviour -- not a
+  // model of it -- is what this specific assertion rests on.
+  it('compaction survives a genuinely concurrent append against a real database', async () => {
+    const owner = await signUp('owner-compaction-race-test@example.test');
+    const { screenplayId } = await createProjectAndScreenplay(owner.actorId);
+    const { writeCheckpoint, appendUpdate, createCheckpoint, reconstructDocumentState } =
+      await import('./updateLog.js');
+
+    const base = createLocalScreenplayYDoc({
+      type: 'screenplayDocument',
+      content: [{ type: 'screenplayBlock', attrs: { element: 'action', id: randomUUID() } }],
+    });
+    await writeCheckpoint(pool!, {
+      screenplayId,
+      epoch: 0,
+      throughSequence: 0,
+      doc: base,
+    });
+
+    // `live` mirrors `base`'s exact state (via a fresh, empty `Y.Doc` that only ever receives
+    // `base`'s own bytes) rather than being independently constructed and then merged -- an
+    // independently-created doc's own content would carry origin references the checkpoint above
+    // never captured, and a later delta built against it could reference an item reconstruction
+    // has no way to resolve.
+    const live = new Y.Doc();
+    Y.applyUpdate(live, Y.encodeStateAsUpdate(base));
+    const captureUpdate = (mutate: () => void): Uint8Array => {
+      const before = Y.encodeStateVector(live);
+      mutate();
+      return Y.encodeStateAsUpdate(live, before);
+    };
+    const fragment = () => live.getXmlFragment(SCREENPLAY_YJS_FRAGMENT);
+    const firstUpdate = captureUpdate(() => {
+      const el = new Y.XmlElement('screenplayBlock');
+      el.setAttribute('element', 'action');
+      el.setAttribute('id', randomUUID());
+      const text = new Y.XmlText();
+      text.insert(0, 'First concurrent line.');
+      el.insert(0, [text]);
+      fragment().insert(fragment().length, [el]);
+    });
+    await appendUpdate(pool!, {
+      screenplayId,
+      epoch: 0,
+      update: firstUpdate,
+      actorId: owner.actorId,
+    });
+
+    // Compaction and a second, genuinely concurrent append race each other for real, against the
+    // real database -- not simulated timing.
+    const secondUpdate = captureUpdate(() => {
+      const el = new Y.XmlElement('screenplayBlock');
+      el.setAttribute('element', 'action');
+      el.setAttribute('id', randomUUID());
+      const text = new Y.XmlText();
+      text.insert(0, 'Second concurrent line.');
+      el.insert(0, [text]);
+      fragment().insert(fragment().length, [el]);
+    });
+    const [compactionResult] = await Promise.all([
+      createCheckpoint(pool!, { screenplayId, epoch: 0 }),
+      appendUpdate(pool!, { screenplayId, epoch: 0, update: secondUpdate, actorId: owner.actorId }),
+    ]);
+    expect(compactionResult).toBeDefined();
+
+    const reconstruction = await reconstructDocumentState(pool!, screenplayId, 0);
+    expect(reconstruction).toBeDefined();
+    const reconstructedText = reconstruction!.doc
+      .getXmlFragment(SCREENPLAY_YJS_FRAGMENT)
+      .toString();
+    expect(reconstructedText).toContain('First concurrent line.');
+    expect(reconstructedText).toContain('Second concurrent line.');
+  }, 20_000);
+
   it('the document survives a Hocuspocus restart', async () => {
     const owner = await signUp('owner-restart-test@example.test');
     const { screenplayId } = await createProjectAndScreenplay(owner.actorId);
@@ -600,9 +855,10 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
     // left untouched in this slice.
     server!.hocuspocus.flushPendingStores();
     await waitForCondition(async () => {
-      const row = await pool!.query('select 1 from document_yjs_state where screenplay_id = $1', [
-        screenplayId,
-      ]);
+      const row = await pool!.query(
+        'select 1 from document_yjs_checkpoints where screenplay_id = $1',
+        [screenplayId],
+      );
       return (row.rowCount ?? 0) > 0;
     });
     client.destroy();

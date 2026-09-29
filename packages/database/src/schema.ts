@@ -1,7 +1,9 @@
 import {
+  bigint,
   boolean,
   customType,
   index,
+  integer,
   jsonb,
   pgEnum,
   pgTable,
@@ -136,22 +138,151 @@ export const screenplays = pgTable(
   (table) => [index('screenplays_project_id_index').on(table.projectId)],
 );
 
-// The Hocuspocus Database extension's persistence target (apps/collab): one row per screenplay,
-// holding the full merged Yjs state (`Y.encodeStateAsUpdate`) for that document's collaboration
-// session. This is slice 1's *snapshot* durability -- progress/collaboration-plan.md is explicit
-// that it is not yet the append-only `document_yjs_updates`/`document_yjs_checkpoints` log
-// plan.md's schema sketch describes for revision history; that arrives in a later slice. A
-// screenplay created before this slice has no row here until its first collaborative edit --
-// `apps/collab`'s `fetch` seeds a fresh Yjs document from the existing `canonicalScreenplay` the
-// first time a document with no row here is opened, so nothing is lost, and this table gains a
-// row from that point on.
-export const documentYjsState = pgTable('document_yjs_state', {
-  screenplayId: uuid('screenplay_id')
-    .primaryKey()
-    .references(() => screenplays.id, { onDelete: 'cascade' }),
-  state: bytea('state').notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
-});
+// Collaboration slice 3 (durable append-only update log). Replaces slice 1's
+// `document_yjs_state` -- one row per screenplay holding only the latest merged snapshot -- with
+// two tables: an append-only log of every authenticated Yjs update (this table) and a
+// periodically-compacted merged snapshot (`documentYjsCheckpoints`, below). See that table's own
+// comment for why `document_yjs_state` does not survive alongside them as a third source of
+// truth.
+//
+// **Naming.** plan.md's own schema sketch names this column `document_id`; this codebase's
+// existing table (the now-removed `document_yjs_state`) called the identical foreign key
+// `screenplay_id`, because there is no `documents` table in this schema -- a screenplay *is* the
+// collaboration document. Kept as `screenplay_id` here for the same reason: matching a sketch
+// written before this table existed, over the name every sibling column and every query in
+// `apps/collab` already uses, would be adopting drift for its own sake.
+//
+// **`epoch`.** Not yet varied by anything in this slice -- every row is written with the default
+// `0`, and nothing here ever reads a document's "current epoch" from anywhere else, because no
+// such concept exists yet. Introduced now anyway, deliberately, because slice 5 (restore-as-
+// current, plan.md's "Restore as current") is specifically an *epoch cutover*: a restore creates
+// a fresh collaboration document, increments the epoch, and makes clients reconnect into a new
+// one while rejecting writes to the old one. Adding `epoch` after that slice needs it would mean
+// widening the primary key of a table that, by then, holds every update ever made to every
+// screenplay -- a rewrite of the largest table in the schema, under load, instead of a
+// zero-downtime `ALTER TABLE ... ADD COLUMN ... DEFAULT 0`. A column nothing varies yet is a far
+// smaller cost than that rewrite.
+export const documentYjsUpdates = pgTable(
+  'document_yjs_updates',
+  {
+    // A single globally-increasing identity column, not a counter reset to 1 per
+    // (screenplayId, epoch). Every ordering and cutoff comparison this slice needs --
+    // "give me every update after this checkpoint," "what is the latest update for this
+    // document" -- only requires *monotonic order*, not a dense per-document sequence starting at
+    // 1. A global identity column gets that ordering for free from Postgres's own
+    // `GENERATED ALWAYS AS IDENTITY`, which is safe under concurrent inserts with no
+    // application-level locking, counter table, or retry-on-conflict loop -- unlike a per-document
+    // counter, which would need one of those three to stay correct when two updates for the same
+    // document are appended concurrently (see `updateLog.ts`'s own comment on why this matters for
+    // the compaction invariant specifically).
+    sequence: bigint('sequence', { mode: 'number' }).generatedAlwaysAsIdentity().primaryKey(),
+    screenplayId: uuid('screenplay_id')
+      .notNull()
+      .references(() => screenplays.id, { onDelete: 'cascade' }),
+    epoch: integer('epoch').notNull().default(0),
+    update: bytea('update').notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true }).defaultNow().notNull(),
+    // Nullable: a future server-internal write (e.g. a migration backfill, or slice 5's own
+    // restore-seeding) has no human actor to attribute, and `onDelete: 'set null'` -- not
+    // `'cascade'` -- means a deleted user's past updates stay in the log with their authorship
+    // merely un-attributed, rather than the update rows themselves (and the document history they
+    // represent) disappearing along with the account that made them.
+    authenticatedActorId: text('authenticated_actor_id').references(() => user.id, {
+      onDelete: 'set null',
+    }),
+  },
+  (table) => [
+    index('document_yjs_updates_screenplay_epoch_index').on(table.screenplayId, table.epoch),
+  ],
+);
+
+// The compacted counterpart to `documentYjsUpdates` above, and the direct replacement for slice
+// 1's `document_yjs_state`. Deliberately append-only itself (a new row per compaction, never an
+// `update` to an existing one) rather than one upserted row per screenplay: `updateLog.ts`'s
+// `createCheckpoint` reconstruction logic only ever needs the *latest* checkpoint for a
+// (screenplayId, epoch) pair (highest `throughSequence`), so keeping the history costs one small
+// row per compaction and buys a diagnosable trail of exactly what was compacted and when, which an
+// upserted single row would destroy on every write.
+//
+// **What happened to `document_yjs_state`.** It does not survive alongside these two tables --
+// keeping it would mean three overlapping stores of the same information (the raw log, a
+// checkpoint, and a third "latest snapshot" row updated on every debounced save), with no
+// reader that would ever need the third once the first two exist, and a real risk of the third
+// drifting from what the log+checkpoint pair would reconstruct after a crash mid-write. This
+// table *is* the fast path `document_yjs_state` used to be: `updateLog.ts`'s `fetchDocumentState`
+// reads the latest checkpoint, decodes it, and applies only the (usually zero, at most a handful)
+// updates logged after it -- not a full replay of the document's entire history on every load.
+export const documentYjsCheckpoints = pgTable(
+  'document_yjs_checkpoints',
+  {
+    id: bigint('id', { mode: 'number' }).generatedAlwaysAsIdentity().primaryKey(),
+    screenplayId: uuid('screenplay_id')
+      .notNull()
+      .references(() => screenplays.id, { onDelete: 'cascade' }),
+    epoch: integer('epoch').notNull().default(0),
+    // The highest `documentYjsUpdates.sequence` this checkpoint's `mergedUpdate` already reflects
+    // -- reconstruction replays only updates with `sequence > throughSequence`, and compaction
+    // (`updateLog.ts`'s `createCheckpoint`) deletes only rows with `sequence <= throughSequence`,
+    // both for the identical (screenplayId, epoch) pair. This is the one column the sharp
+    // invariant ("compaction must never lose an update a checkpoint has not yet absorbed") is
+    // actually about: it is set, inside the same transaction that deletes the absorbed rows, to
+    // exactly the sequence a Postgres advisory lock (held for the duration of that transaction)
+    // guarantees no concurrent append could have raced past -- see `updateLog.ts`.
+    throughSequence: bigint('through_sequence', { mode: 'number' }).notNull(),
+    // Nullable, and expected to be null only for the one bootstrap checkpoint this slice's
+    // migration writes from each pre-existing `document_yjs_state` row (there is no way to
+    // recompute a Yjs state vector from raw SQL during that migration). Every checkpoint this
+    // application creates going forward (`updateLog.ts`'s `createCheckpoint`) always computes and
+    // stores a real one. Nothing in this slice's reconstruction path reads it -- `mergedUpdate`
+    // alone is sufficient to rebuild the document -- so a null value here is inert, not a
+    // correctness gap; it exists for a later slice that wants to diff a client's state vector
+    // against a checkpoint without decoding the full `mergedUpdate` first.
+    stateVector: bytea('state_vector'),
+    mergedUpdate: bytea('merged_update').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('document_yjs_checkpoints_screenplay_epoch_index').on(table.screenplayId, table.epoch),
+  ],
+);
+
+// Slice 3's quarantine: updates from a connection `apps/collab/src/authenticate.ts` resolved as
+// `readOnly` (a reviewer, or an owner/editor account whose subscription has lapsed and this
+// screenplay is not their one editable slot) are *accepted*, not rejected outright -- a writer's
+// real keystrokes, made honestly while offline, must never simply vanish -- but never merged into
+// the live document, because accepting silently would make going offline a way to keep editing
+// without the entitlement that would otherwise gate it. This table is where "accepted" lives:
+// `apps/collab`'s `beforeHandleMessage` hook persists here, instead of discarding, exactly the
+// update bytes Hocuspocus's own low-level `readOnly` check (confirmed by reading the installed
+// `@hocuspocus/server` source -- see `progress/collaboration-slice-1.md`'s "write-rejection
+// mechanism") would otherwise drop with no trace at all.
+//
+// Scope for this slice is detection and retention only -- the resubscribe-and-merge interface
+// (reading these rows back and offering them to a writer who regains entitlement) is explicitly
+// deferred, so there is no "resolved"/"merged" state column yet: every row here is, for now,
+// simply retained. Deleting a screenplay cascades away its quarantined updates along with
+// everything else scoped to it, the same as `documentYjsUpdates` and `documentYjsCheckpoints`.
+export const documentYjsQuarantinedUpdates = pgTable(
+  'document_yjs_quarantined_updates',
+  {
+    id: bigint('id', { mode: 'number' }).generatedAlwaysAsIdentity().primaryKey(),
+    screenplayId: uuid('screenplay_id')
+      .notNull()
+      .references(() => screenplays.id, { onDelete: 'cascade' }),
+    epoch: integer('epoch').notNull().default(0),
+    update: bytea('update').notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true }).defaultNow().notNull(),
+    authenticatedActorId: text('authenticated_actor_id').references(() => user.id, {
+      onDelete: 'set null',
+    }),
+  },
+  (table) => [
+    index('document_yjs_quarantined_updates_screenplay_epoch_index').on(
+      table.screenplayId,
+      table.epoch,
+    ),
+  ],
+);
 
 // Stripe's own Subscription.Status enum (esm/resources/Subscriptions.d.ts in the installed
 // `stripe` package, API version 2026-07-29.dahlia), reproduced here rather than imported: this

@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as Y from 'yjs';
 import {
   createLocalScreenplayYDoc,
@@ -16,7 +16,27 @@ import {
   writeTitlePageToYMap,
 } from '@finaler-draft/screenplay-editor';
 import { screenplaySchema, type DocumentSettings, type TitlePage } from '@finaler-draft/screenplay';
-import { createFetch, createStore } from './database.js';
+
+// `createFetch`/`createStore` (database.ts) now delegate the durable-log mechanics entirely to
+// `updateLog.ts` -- append, checkpoint, compaction, and reconstruction are proven directly against
+// a real row-level model in `updateLog.test.ts`. What is left to prove *here* is the orchestration
+// built on top: which of `updateLog.ts`'s functions `database.ts` calls, in what order, and with
+// what data, for each of createFetch's/createStore's own branches (already-seeded, migration
+// backfill, brand-new seed, invalid projection, deleted screenplay). Mocking `updateLog.ts` is what
+// makes that separation possible without database.test.ts also having to re-implement a SQL-level
+// fake of two tables it does not itself query.
+vi.mock('./updateLog.js', () => ({
+  reconstructDocumentState: vi.fn(),
+  writeCheckpoint: vi.fn(),
+  createCheckpoint: vi.fn(),
+}));
+
+import { createFetch, createStore, DEFAULT_EPOCH } from './database.js';
+import { reconstructDocumentState, writeCheckpoint, createCheckpoint } from './updateLog.js';
+
+const mockReconstructDocumentState = reconstructDocumentState as ReturnType<typeof vi.fn>;
+const mockWriteCheckpoint = writeCheckpoint as ReturnType<typeof vi.fn>;
+const mockCreateCheckpoint = createCheckpoint as ReturnType<typeof vi.fn>;
 
 /** A minimal screenplay this editor can actually represent -- `editorContentFromScreenplay`
  * (called inside `createFetch`'s seed path) rejects more than one title page, annotations, dual
@@ -33,70 +53,50 @@ function compatibleScreenplay(overrides: Partial<Record<string, unknown>> = {}) 
   });
 }
 
-/** A fake `pg.Pool` recording every query issued against it, with a table-driven response map
- * keyed on a recognisable fragment of each query's own SQL text -- the same convention
- * `authenticate.test.ts`'s fake `Queryable` uses. Records both the raw SQL text (`queries`, for
- * tests that only care *whether* a query ran) and `{ text, values }` pairs (`calls`, for tests
- * that need to inspect what was actually persisted). */
-function fakePool(responses: {
-  documentYjsState?: { state: Buffer } | undefined;
-  screenplay?: { title: string; canonicalScreenplay: unknown } | undefined;
-}) {
+/** A fake `pg.Pool` for the queries `database.ts` still issues directly (the `screenplays` table
+ * only -- everything durable-log-related goes through the mocked `updateLog.ts` above). */
+function fakePool(responses: { screenplay?: { title: string; canonicalScreenplay: unknown } }) {
   const queries: string[] = [];
   const calls: Array<{ text: string; values: readonly unknown[] | undefined }> = [];
-  const client = {
+  const pool = {
     async query(text: string, values?: readonly unknown[]) {
       queries.push(text);
       calls.push({ text, values });
-      if (text.includes('document_yjs_state') && text.startsWith('select')) {
-        return { rows: responses.documentYjsState ? [responses.documentYjsState] : [] };
-      }
-      // Checked before the more general "select ... canonical_screenplay" branch below: this is
-      // `createStore`'s own query, and it also needs `title` in the response.
-      if (text.startsWith('select title, canonical_screenplay')) {
-        return { rows: responses.screenplay ? [responses.screenplay] : [] };
-      }
-      if (text.includes('canonical_screenplay') && text.startsWith('select')) {
+      if (text.startsWith('select canonical_screenplay')) {
         return {
           rows: responses.screenplay
             ? [{ canonicalScreenplay: responses.screenplay.canonicalScreenplay }]
             : [],
         };
       }
-      if (text.startsWith('begin') || text.startsWith('commit') || text.startsWith('rollback')) {
-        return { rows: [] };
+      if (text.startsWith('select title, canonical_screenplay')) {
+        return { rows: responses.screenplay ? [responses.screenplay] : [] };
       }
-      if (text.includes('insert into document_yjs_state')) {
-        return { rows: [] };
-      }
-      if (text.includes('update screenplays')) {
+      if (text.startsWith('update screenplays')) {
         return { rows: [] };
       }
       throw new Error(
         `Unexpected query in test double: ${text} (values: ${JSON.stringify(values)})`,
       );
     },
-    release() {},
-  };
-  const pool = {
-    query: client.query,
-    async connect() {
-      return client;
-    },
   };
   return { pool: pool as unknown as Pool, queries, calls };
 }
 
-/** A seeded Y.Doc's encoded state, for a stored-state fixture -- `createFetch`'s "row already
- * exists" branch now genuinely decodes the stored bytes (to check whether the title page/document
- * settings maps are seeded), so a stored-state fixture must be real encoded Yjs, not arbitrary
- * bytes the way the old pass-through-only implementation could get away with. */
-function encodedState(doc: Y.Doc): Buffer {
-  return Buffer.from(Y.encodeStateAsUpdate(doc));
+function bareDoc(): Y.Doc {
+  return createLocalScreenplayYDoc(
+    createScreenplayEditorInit(new Y.Doc().getXmlFragment(SCREENPLAY_YJS_FRAGMENT)).content,
+  );
 }
 
+beforeEach(() => {
+  mockReconstructDocumentState.mockReset();
+  mockWriteCheckpoint.mockReset();
+  mockCreateCheckpoint.mockReset();
+});
+
 describe('createFetch', () => {
-  it('returns the stored state unchanged, with no canonical query at all, when the document is already fully seeded', async () => {
+  it('returns the reconstructed state unchanged, with no canonical query at all, when the document is already fully seeded', async () => {
     const seeded = seedScreenplayYDoc(
       createScreenplayEditorInit(new Y.Doc().getXmlFragment(SCREENPLAY_YJS_FRAGMENT)).content,
       { id: '00000000-0000-4000-8000-000000000050', title: 'Already Seeded' },
@@ -109,16 +109,19 @@ describe('createFetch', () => {
         autoMoreContinued: true,
       },
     );
-    const state = encodedState(seeded);
-    const { pool, calls } = fakePool({ documentYjsState: { state } });
+    mockReconstructDocumentState.mockResolvedValue({ doc: seeded, throughSequence: 5 });
+    const { pool, calls } = fakePool({});
 
     const result = await createFetch(pool)({ documentName: 'doc-1' } as never);
 
-    expect(result).toEqual(new Uint8Array(state));
-    expect(calls.some((call) => call.text.includes('canonical_screenplay'))).toBe(false);
+    expect(result).toEqual(Y.encodeStateAsUpdate(seeded));
+    expect(mockReconstructDocumentState).toHaveBeenCalledWith(pool, 'doc-1', DEFAULT_EPOCH);
+    expect(calls).toHaveLength(0);
+    expect(mockWriteCheckpoint).not.toHaveBeenCalled();
   });
 
-  it('seeds a fresh Yjs update -- body, title page, and document settings together -- when no state row exists', async () => {
+  it('seeds a fresh Yjs update -- body, title page, and document settings together -- and persists it as the first checkpoint, when no checkpoint exists yet', async () => {
+    mockReconstructDocumentState.mockResolvedValue(undefined);
     const screenplay = compatibleScreenplay({
       titlePages: [{ id: '00000000-0000-4000-8000-000000000060', title: 'A Real Title' }],
       documentSettings: {
@@ -133,7 +136,9 @@ describe('createFetch', () => {
     const { pool } = fakePool({
       screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
     });
+
     const result = await createFetch(pool)({ documentName: screenplay.id } as never);
+
     expect(result).not.toBeNull();
     const seededDoc = new Y.Doc();
     Y.applyUpdate(seededDoc, result!);
@@ -144,14 +149,20 @@ describe('createFetch', () => {
     expect(documentSettingsFromYMap(seededDoc.getMap(DOCUMENT_SETTINGS_YJS_MAP))).toEqual(
       screenplay.documentSettings,
     );
+    // The seed is durable *before* fetch returns -- writeCheckpoint at throughSequence 0, so a
+    // future delta appended relative to it has a real base to integrate against.
+    expect(mockWriteCheckpoint).toHaveBeenCalledWith(
+      pool,
+      expect.objectContaining({
+        screenplayId: screenplay.id,
+        epoch: DEFAULT_EPOCH,
+        throughSequence: 0,
+      }),
+    );
   });
 
   it('seeds exactly one empty action block when the canonical screenplay has no blocks at all, so there is somewhere for the caret to go', async () => {
-    // A brand-new (or emptied-out) screenplay's `blocks` is genuinely `[]`
-    // (`routes/projects/$projectId/index.tsx`'s own `create` mutation) -- caught directly, not
-    // wired into the persistence end-to-end harness, after that harness first exposed it: every
-    // existing test above seeds from a screenplay with a real block, so none of them could have
-    // caught a collaborative document seeded with zero.
+    mockReconstructDocumentState.mockResolvedValue(undefined);
     const screenplay = compatibleScreenplay({ blocks: [] });
     const { pool } = fakePool({
       screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
@@ -167,13 +178,16 @@ describe('createFetch', () => {
     expect(projection.screenplay.blocks[0]?.type).toBe('action');
   });
 
-  it('returns null when neither a state row nor a screenplay row exists', async () => {
+  it('returns null, writing no checkpoint, when neither a checkpoint nor a screenplay row exists', async () => {
+    mockReconstructDocumentState.mockResolvedValue(undefined);
     const { pool } = fakePool({});
     const result = await createFetch(pool)({ documentName: 'missing' } as never);
     expect(result).toBeNull();
+    expect(mockWriteCheckpoint).not.toHaveBeenCalled();
   });
 
   it('returns null, rather than throwing, when the canonical screenplay has features this editor cannot represent', async () => {
+    mockReconstructDocumentState.mockResolvedValue(undefined);
     const screenplay = compatibleScreenplay({
       titlePages: [
         { id: '00000000-0000-4000-8000-000000000002' },
@@ -185,17 +199,13 @@ describe('createFetch', () => {
     });
     const result = await createFetch(pool)({ documentName: screenplay.id } as never);
     expect(result).toBeNull();
+    expect(mockWriteCheckpoint).not.toHaveBeenCalled();
   });
 
   describe('migration: a Yjs document that predates title pages/document settings living in Yjs', () => {
-    it('backfills the title page and document settings from canonical_screenplay when the stored document has neither', async () => {
-      // Models a screenplay that was already opened collaboratively under the pre-this-slice
-      // code: it has a real `document_yjs_state` row (body content only -- the title page and
-      // document settings maps were never written, since that concept didn't exist yet).
-      const preSliceDoc = createLocalScreenplayYDoc(
-        createScreenplayEditorInit(new Y.Doc().getXmlFragment(SCREENPLAY_YJS_FRAGMENT)).content,
-      );
-      const state = encodedState(preSliceDoc);
+    it('backfills the title page and document settings from canonical_screenplay when the reconstructed document has neither, and persists a supplementary checkpoint', async () => {
+      const preSliceDoc = bareDoc();
+      mockReconstructDocumentState.mockResolvedValue({ doc: preSliceDoc, throughSequence: 7 });
       const canonicalTitlePage: TitlePage = {
         id: '00000000-0000-4000-8000-000000000070',
         title: 'The Owner Real Screenplay',
@@ -213,41 +223,36 @@ describe('createFetch', () => {
         titlePages: [canonicalTitlePage],
         documentSettings: canonicalSettings,
       });
-      const { pool, calls } = fakePool({
-        documentYjsState: { state },
+      const { pool } = fakePool({
         screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
       });
 
       const result = await createFetch(pool)({ documentName: screenplay.id } as never);
 
       expect(result).not.toBeNull();
-      // The migration is a real, distinct write, not a no-op: the returned bytes differ from what
-      // was stored.
-      expect(result).not.toEqual(new Uint8Array(state));
-      expect(calls.some((call) => call.text.includes('canonical_screenplay'))).toBe(true);
-
       const migratedDoc = new Y.Doc();
       Y.applyUpdate(migratedDoc, result!);
       expect(titlePageFromYMap(migratedDoc.getMap(TITLE_PAGE_YJS_MAP))).toEqual(canonicalTitlePage);
       expect(documentSettingsFromYMap(migratedDoc.getMap(DOCUMENT_SETTINGS_YJS_MAP))).toEqual(
         canonicalSettings,
       );
-      // The pre-existing body content is untouched -- the migration only ever adds the two maps,
-      // never rebuilds the document.
       expect(migratedDoc.getXmlFragment(SCREENPLAY_YJS_FRAGMENT).toString()).toEqual(
         preSliceDoc.getXmlFragment(SCREENPLAY_YJS_FRAGMENT).toString(),
       );
+      // The supplementary checkpoint carries the *existing* throughSequence forward unchanged --
+      // this enriches the checkpoint's content, it does not claim to have absorbed anything new.
+      expect(mockWriteCheckpoint).toHaveBeenCalledWith(
+        pool,
+        expect.objectContaining({
+          screenplayId: screenplay.id,
+          epoch: DEFAULT_EPOCH,
+          throughSequence: 7,
+        }),
+      );
     });
 
-    it('is idempotent: never overwrites a title page a writer has already edited collaboratively, even when canonical_screenplay disagrees', async () => {
-      // A writer already edited the title page collaboratively (through this slice's own save
-      // path) since the document was first opened -- the map is seeded, with content that has
-      // since diverged from whatever is sitting in `canonical_screenplay` (a stale read, or a
-      // debounce window not yet flushed). This is exactly the scenario the migration must never
-      // clobber.
-      const doc = createLocalScreenplayYDoc(
-        createScreenplayEditorInit(new Y.Doc().getXmlFragment(SCREENPLAY_YJS_FRAGMENT)).content,
-      );
+    it('is idempotent: never overwrites a title page a writer has already edited collaboratively, even when canonical_screenplay disagrees, and writes no supplementary checkpoint', async () => {
+      const doc = bareDoc();
       const writerEditedTitlePage: TitlePage = {
         id: '00000000-0000-4000-8000-000000000080',
         title: "The Writer's Current Title",
@@ -255,7 +260,7 @@ describe('createFetch', () => {
       doc.transact(() => {
         writeTitlePageToYMap(doc.getMap(TITLE_PAGE_YJS_MAP), writerEditedTitlePage);
       });
-      const state = encodedState(doc);
+      mockReconstructDocumentState.mockResolvedValue({ doc, throughSequence: 3 });
 
       const staleCanonicalTitlePage: TitlePage = {
         id: '00000000-0000-4000-8000-000000000081',
@@ -263,7 +268,6 @@ describe('createFetch', () => {
       };
       const screenplay = compatibleScreenplay({ titlePages: [staleCanonicalTitlePage] });
       const { pool } = fakePool({
-        documentYjsState: { state },
         screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
       });
 
@@ -272,21 +276,23 @@ describe('createFetch', () => {
       expect(result).not.toBeNull();
       const resultDoc = new Y.Doc();
       Y.applyUpdate(resultDoc, result!);
-      // The writer's own collaborative edit survives untouched -- not overwritten by the stale
-      // canonical row.
       expect(titlePageFromYMap(resultDoc.getMap(TITLE_PAGE_YJS_MAP))).toEqual(
         writerEditedTitlePage,
+      );
+      // Document settings are unseeded here too but the fixture has real settings, so a
+      // supplementary write still happens for *that* map -- only a fully-seeded document skips it
+      // entirely (covered by the "already fully seeded" test above).
+      expect(mockWriteCheckpoint).toHaveBeenCalledWith(
+        pool,
+        expect.objectContaining({ throughSequence: 3 }),
       );
     });
 
     it('leaves a genuinely title-page-less screenplay unseeded, not inventing content from nothing', async () => {
-      const preSliceDoc = createLocalScreenplayYDoc(
-        createScreenplayEditorInit(new Y.Doc().getXmlFragment(SCREENPLAY_YJS_FRAGMENT)).content,
-      );
-      const state = encodedState(preSliceDoc);
+      const preSliceDoc = bareDoc();
+      mockReconstructDocumentState.mockResolvedValue({ doc: preSliceDoc, throughSequence: 0 });
       const screenplay = compatibleScreenplay({ titlePages: [] });
       const { pool } = fakePool({
-        documentYjsState: { state },
         screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
       });
 
@@ -296,30 +302,24 @@ describe('createFetch', () => {
       const resultDoc = new Y.Doc();
       Y.applyUpdate(resultDoc, result!);
       expect(isTitlePageMapSeeded(resultDoc.getMap(TITLE_PAGE_YJS_MAP))).toBe(false);
-      // Document settings are real on this fixture (`compatibleScreenplay`'s schema default), so
-      // that map is still backfilled even though the title page is not -- the two are independent.
       expect(isDocumentSettingsMapSeeded(resultDoc.getMap(DOCUMENT_SETTINGS_YJS_MAP))).toBe(true);
     });
 
-    it('hands back the stored state unchanged, not throwing, when the screenplay row has been deleted since', async () => {
-      const preSliceDoc = createLocalScreenplayYDoc(
-        createScreenplayEditorInit(new Y.Doc().getXmlFragment(SCREENPLAY_YJS_FRAGMENT)).content,
-      );
-      const state = encodedState(preSliceDoc);
-      const { pool } = fakePool({ documentYjsState: { state } });
+    it('hands back the reconstructed state unchanged, not throwing and writing no checkpoint, when the screenplay row has been deleted since', async () => {
+      const preSliceDoc = bareDoc();
+      mockReconstructDocumentState.mockResolvedValue({ doc: preSliceDoc, throughSequence: 2 });
+      const { pool } = fakePool({});
 
       const result = await createFetch(pool)({ documentName: 'gone' } as never);
 
-      expect(result).toEqual(new Uint8Array(state));
+      expect(result).toEqual(Y.encodeStateAsUpdate(preSliceDoc));
+      expect(mockWriteCheckpoint).not.toHaveBeenCalled();
     });
   });
 });
 
 describe('createStore', () => {
-  it("reads the title page and document settings from the Y.Doc's own maps, not the existing row -- proving the old pass-through is gone", async () => {
-    // The existing row deliberately disagrees with the Y.Doc: if `createStore` still read from the
-    // row (the pre-this-slice pass-through), the persisted projection would carry the row's stale
-    // values instead of the doc's real ones.
+  it("reads the title page and document settings from the Y.Doc's own maps, not the existing row -- proving the old pass-through is gone -- and compacts via createCheckpoint", async () => {
     const staleRowTitlePage: TitlePage = {
       id: '00000000-0000-4000-8000-000000000090',
       title: 'Stale Row Title Page',
@@ -328,6 +328,7 @@ describe('createStore', () => {
     const { pool, calls } = fakePool({
       screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
     });
+    mockCreateCheckpoint.mockResolvedValue({ throughSequence: 4 });
 
     const liveTitlePage: TitlePage = {
       id: '00000000-0000-4000-8000-000000000091',
@@ -362,22 +363,23 @@ describe('createStore', () => {
       state: Buffer.from(Y.encodeStateAsUpdate(seeded)),
     } as never);
 
-    const updateCall = calls.find((call) => call.text.includes('update screenplays'));
+    expect(mockCreateCheckpoint).toHaveBeenCalledWith(pool, {
+      screenplayId: screenplay.id,
+      epoch: DEFAULT_EPOCH,
+    });
+    const updateCall = calls.find((call) => call.text.startsWith('update screenplays'));
     expect(updateCall).toBeDefined();
     const persisted = JSON.parse(updateCall!.values![0] as string);
     expect(persisted.titlePages).toEqual([liveTitlePage]);
     expect(persisted.documentSettings).toEqual(liveSettings);
   });
 
-  it('skips the screenplays update entirely when the projection is invalid', async () => {
+  it('skips the screenplays update entirely when the projection is invalid, but still compacts', async () => {
     const screenplay = compatibleScreenplay();
     const { pool, queries } = fakePool({
       screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
     });
-    // A `screenplayBlock` whose `element` attribute is not one of `screenplayElementTypes` --
-    // valid ProseMirror (the schema does not constrain the attribute's runtime value), but
-    // `mapBlock` (screenplay-editor's projection) refuses it, exactly the "mid-edit or otherwise
-    // unrepresentable" state `createStore`'s own doc comment names.
+    mockCreateCheckpoint.mockResolvedValue(undefined);
     const invalidDoc = new Y.Doc();
     const fragment = invalidDoc.getXmlFragment(SCREENPLAY_YJS_FRAGMENT);
     fragment.doc!.transact(() => {
@@ -393,13 +395,11 @@ describe('createStore', () => {
       state: Buffer.from(Y.encodeStateAsUpdate(invalidDoc)),
     } as never);
 
-    expect(queries.some((query) => query.includes('update screenplays'))).toBe(false);
-    // The raw Yjs state is still persisted regardless -- durability must not depend on the
-    // projection being valid.
-    expect(queries.some((query) => query.includes('insert into document_yjs_state'))).toBe(true);
+    expect(mockCreateCheckpoint).toHaveBeenCalled();
+    expect(queries.some((query) => query.startsWith('update screenplays'))).toBe(false);
   });
 
-  it('does nothing when the screenplay row no longer exists (deleted between open and this debounced flush)', async () => {
+  it('does nothing -- not even compaction -- when the screenplay row no longer exists (deleted between open and this debounced flush)', async () => {
     const { pool, queries } = fakePool({});
     const emptyDoc = new Y.Doc();
 
@@ -409,7 +409,7 @@ describe('createStore', () => {
       state: Buffer.from(Y.encodeStateAsUpdate(emptyDoc)),
     } as never);
 
-    expect(queries.some((query) => query.includes('insert into document_yjs_state'))).toBe(false);
-    expect(queries.some((query) => query.includes('update screenplays'))).toBe(false);
+    expect(queries.some((query) => query.startsWith('update screenplays'))).toBe(false);
+    expect(mockCreateCheckpoint).not.toHaveBeenCalled();
   });
 });

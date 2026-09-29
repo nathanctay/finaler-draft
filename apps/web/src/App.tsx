@@ -24,6 +24,7 @@ import { TRANSIENT_SYNC_AUTH_FAILURE_REASON } from '@finaler-draft/config';
 import type { Editor } from '@tiptap/core';
 import { EditorContent, useEditor } from '@tiptap/react';
 import { HocuspocusProvider } from '@hocuspocus/provider';
+import { IndexeddbPersistence } from 'y-indexeddb';
 import {
   convertActiveScreenplayBlock,
   createRemotePresenceExtension,
@@ -614,6 +615,7 @@ export function App({
           initialContent === undefined ? undefined : initial.screenplay.documentSettings,
         ),
         provider: undefined as HocuspocusProvider | undefined,
+        indexeddbPersistence: undefined as IndexeddbPersistence | undefined,
       };
     }
     const provider = new HocuspocusProvider({
@@ -621,7 +623,25 @@ export function App({
       name: initial.id,
       token: async () => (await api.connectionToken()).token,
     });
-    return { doc: provider.document, provider };
+    // The browser-offline half of this slice (progress/collaboration-offline-durable.md):
+    // `y-indexeddb` -- not a hand-rolled `localStorage` blob -- because it already solves exactly
+    // this problem for a Yjs document: it binds to `provider.document` (the *same* `Y.Doc`
+    // instance `ySyncPlugin` renders and `HocuspocusProvider` syncs, not a separate copy an editor
+    // could drift from), persists every local update to IndexedDB as it happens, and replays
+    // whatever it finds back into the doc on construction -- before this browser has ever reached
+    // the server again. That is what "an editor that loses its connection keeps working" actually
+    // requires: the *local* copy must survive a full page reload, tab close, or offline stretch,
+    // not merely a transient socket drop (Yjs's own in-memory queue already covers that case on
+    // its own, with no persistence needed -- see the sync-status effect below). Keyed on
+    // `initial.id`: one local database per screenplay, matching this slice's other per-screenplay
+    // Yjs state exactly.
+    //
+    // No explicit "wait for IndexedDB to load before syncing" ordering is needed: whatever
+    // IndexedDB replays and whatever the server's own first sync delivers are both just Yjs
+    // updates applied to the identical `Y.Doc`, and Yjs's CRDT merge is commutative -- the two
+    // can arrive in either order and the document converges to the same content either way.
+    const indexeddbPersistence = new IndexeddbPersistence(initial.id, provider.document);
+    return { doc: provider.document, provider, indexeddbPersistence };
     // `editorContent`/`initialContent` deliberately omitted: this must only ever run once per
     // mounted screenplay (a fresh `Y.Doc`/`HocuspocusProvider` every render would reconnect and
     // re-seed on every keystroke), and `initial.id` alone already uniquely identifies which
@@ -766,6 +786,10 @@ export function App({
     return () => {
       pendingProviderTeardown.current = setTimeout(() => {
         collab.provider?.destroy();
+        // Closes this screenplay's IndexedDB connection -- does not delete the stored data, which
+        // is exactly the point: it is still there, keyed on this screenplay's id, the next time it
+        // is opened (including by a page reload with no server connection at all).
+        collab.indexeddbPersistence?.destroy();
       }, 0);
     };
   }, [collab]);

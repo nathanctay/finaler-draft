@@ -12,13 +12,19 @@ import {
   ExpiredConnectionTokenError,
   TransientAuthenticationError,
 } from './authenticate.js';
-import { createFetch, createStore } from './database.js';
+import { createFetch, createStore, DEFAULT_EPOCH } from './database.js';
 import { unreachableMailPort } from './mailStub.js';
 import {
   resolvePresenceIdentity,
   sanitizeAwarenessStates,
   type ServerPresenceIdentity,
 } from './presence.js';
+import { appendUpdate } from './updateLog.js';
+import {
+  extractSyncUpdatePayload,
+  quarantineUpdate,
+  updateCarriesNewContent,
+} from './quarantine.js';
 
 try {
   if (shouldLoadRootEnvironment(process.env)) {
@@ -144,6 +150,50 @@ try {
         );
         throw error;
       }
+    },
+    // The append-only durable update log (progress/collaboration-offline-durable.md). `onChange`
+    // -- not the debounced `onStoreDocument` `Database` extension hook above -- is the correct
+    // place to append: reading the installed `@hocuspocus/server` source confirms `onChange`
+    // fires once per individual Yjs update, synchronously with `handleDocumentUpdate`, and hands
+    // back that update's own raw bytes; `onStoreDocument` only ever sees Hocuspocus's own merged,
+    // debounced result of possibly many such updates, which cannot be un-merged back into the
+    // individual writes an append-only log exists to preserve. A read-only connection's writes
+    // never reach here at all -- Hocuspocus's own low-level `readOnly` check (the same one
+    // `progress/collaboration-slice-1.md`'s "write-rejection mechanism" documents) drops them
+    // before they are ever applied to `document`, and `onChange` only fires for updates that
+    // *were* applied -- so this hook, by construction, only ever logs a write from a connection
+    // that was actually allowed to make one.
+    async onChange({ document, documentName, update, context }) {
+      const actorId = (context as { actorId?: string } | undefined)?.actorId;
+      await appendUpdate(pool, {
+        screenplayId: documentName,
+        epoch: DEFAULT_EPOCH,
+        update,
+        actorId,
+      });
+      void document; // reconstruction reads the durable log, not this live object -- see updateLog.ts.
+    },
+    // Quarantine (progress/collaboration-offline-durable.md): the detection and retention half of
+    // "accept the data, never grant editing access" for a reconnecting client whose connection
+    // `authenticate.ts` resolved as `readOnly` -- a reviewer, or an owner/editor account whose
+    // subscription lapsed while it was offline. Runs *before* Hocuspocus's own low-level
+    // `readOnly` check (confirmed by reading the installed source: `beforeHandleMessage` fires on
+    // the raw wire bytes before `MessageReceiver.apply` ever inspects them), which is what makes
+    // it possible to retain exactly the bytes that check is about to silently drop with no trace.
+    // Never applies anything to `document` itself -- the live document staying unchanged does not
+    // depend on this hook at all; Hocuspocus's own existing drop already guarantees that.
+    async beforeHandleMessage({ connection, document, update, documentName, context }) {
+      if (!connection.readOnly) return;
+      const payload = extractSyncUpdatePayload(update);
+      if (!payload) return;
+      if (!updateCarriesNewContent(document, payload)) return;
+      const actorId = (context as { actorId?: string } | undefined)?.actorId;
+      await quarantineUpdate(pool, {
+        screenplayId: documentName,
+        epoch: DEFAULT_EPOCH,
+        update: payload,
+        actorId,
+      });
     },
     // Presence: the awareness-protocol half of this slice (plan.md's "Cursors and presence are
     // transient and never belong in history" -- see `presence.ts`'s own comment for the full

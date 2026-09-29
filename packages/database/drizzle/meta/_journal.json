@@ -50,6 +50,13 @@
       "when": 1788558371632,
       "tag": "0006_remove_screenplay_version_add_document_yjs_state",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790655733279,
+      "tag": "0007_empty_king_cobra",
+      "breakpoints": true
     }
   ]
 }

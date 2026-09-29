@@ -5,7 +5,13 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],
-      include: ['src/authenticate.ts', 'src/database.ts', 'src/presence.ts'],
+      include: [
+        'src/authenticate.ts',
+        'src/database.ts',
+        'src/presence.ts',
+        'src/updateLog.ts',
+        'src/quarantine.ts',
+      ],
       thresholds: { lines: 80, functions: 80, branches: 80, statements: 80 },
     },
   },
