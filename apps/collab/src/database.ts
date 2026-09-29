@@ -15,6 +15,18 @@ import {
   writeTitlePageToYMap,
 } from '@finaler-draft/screenplay-editor';
 import * as Y from 'yjs';
+import { createCheckpoint, reconstructDocumentState, writeCheckpoint } from './updateLog.js';
+
+/**
+ * The collaboration epoch this slice writes and reads exclusively. `document_yjs_updates`/
+ * `document_yjs_checkpoints` carry a real `epoch` column (see `packages/database/src/schema.ts`'s
+ * own comment on why it was introduced now rather than deferred) but nothing in this codebase
+ * varies it yet -- there is no restore-as-current, no epoch cutover, and therefore exactly one
+ * epoch per screenplay. A single named constant, not a literal `0` scattered across this file and
+ * `updateLog.ts`'s callers, is what makes that assumption legible and gives slice 5 one place to
+ * start threading a real per-document epoch through instead of a silent literal.
+ */
+export const DEFAULT_EPOCH = 0;
 
 type CanonicalScreenplayRow = {
   titlePages?: TitlePage[];
@@ -87,29 +99,36 @@ function backfillTitlePageAndDocumentSettings(
 }
 
 /**
- * Loads this document's durable Yjs state (`packages/database`'s `document_yjs_state`, one row
- * per screenplay -- see that table's own doc comment for why this is snapshot durability, not yet
- * the append-only update log a later slice adds). Two top-level cases:
+ * Loads this document's durable Yjs state, reconstructed from `document_yjs_checkpoints` plus
+ * whatever `document_yjs_updates` holds after the latest one (`updateLog.ts`'s
+ * `reconstructDocumentState` -- see that module's own comment for why compaction and
+ * reconstruction are both driven purely by what is in Postgres, never by a live in-memory
+ * `Y.Doc`). Two top-level cases:
  *
- *  - A row already exists: this is an ordinary reconnect (or the server restarting). The stored
- *    `state` -- the full merged `Y.encodeStateAsUpdate` from the last `store` -- is decoded far
- *    enough to check whether its title page and document settings maps are seeded
+ *  - A checkpoint already exists: this is an ordinary reconnect (or the server restarting, or an
+ *    offline client catching back up). The reconstructed document is decoded far enough to check
+ *    whether its title page and document settings maps are seeded
  *    (`backfillTitlePageAndDocumentSettings`'s own comment explains exactly what "seeded" means
  *    and why checking it is safe to repeat). If both already are (the overwhelming common case
- *    once every collaboratively-opened screenplay has been through this once), the original bytes
- *    are handed back completely unchanged -- no extra query, no re-encoding. Only when a map is
- *    genuinely unseeded does this query `canonical_screenplay` and backfill it, returning the
- *    freshly re-encoded state instead.
- *  - No row exists yet: this screenplay has never been opened collaboratively at all. Its
+ *    once every collaboratively-opened screenplay has been through this once), the reconstructed
+ *    bytes are handed back as-is. Only when a map is genuinely unseeded does this query
+ *    `canonical_screenplay` and backfill it, writing a supplementary checkpoint
+ *    (`writeCheckpoint`) so a client update appended afterward is never a delta against content
+ *    that exists only in this function's own return value and nowhere in the log.
+ *  - No checkpoint exists yet: this screenplay has never been opened collaboratively at all. Its
  *    `canonical_screenplay` (the JSON a writer's last REST `PUT` produced, back when that route
  *    existed, or the collab server's own debounced projection since) is the only record of its
  *    content, so it is projected into editor content and encoded as a *fresh* Yjs document's
  *    initial state via `seedScreenplayYDoc` -- body, title page, and document settings together,
- *    exactly once, the first time this screenplay is opened after this slice ships.
+ *    exactly once, the first time this screenplay is opened after this slice ships. That seed is
+ *    persisted immediately as the document's first checkpoint (`throughSequence: 0`) *before*
+ *    this function returns -- see `writeCheckpoint`'s own comment on why a seed that only ever
+ *    existed in this function's return value, with nothing in the log to anchor a future delta
+ *    against, would silently corrupt the very first genuine edit made afterward.
  *    `createLocalScreenplayYDoc`'s own doc comment (which `seedScreenplayYDoc` delegates to for
  *    the body) is explicit that this conversion must never be used to *rehydrate* an
  *    already-collaborative document, which is precisely why this branch is reached only when no
- *    `document_yjs_state` row exists to rehydrate from in the first place.
+ *    checkpoint exists to rehydrate from in the first place.
  *
  * A screenplay with canonical content this editor cannot represent (more than one title page,
  * notes, dual dialogue, page breaks -- `editorContentFromScreenplay`'s own guard) cannot be seeded
@@ -119,27 +138,30 @@ function backfillTitlePageAndDocumentSettings(
  */
 export function createFetch(pool: Pool) {
   return async function fetch({ documentName }: fetchPayload): Promise<Uint8Array | null> {
-    const stored = await pool.query<{ state: Buffer }>(
-      'select state from document_yjs_state where screenplay_id = $1',
-      [documentName],
-    );
-    const storedState = stored.rows[0]?.state;
-    if (storedState) {
-      const doc = new Y.Doc();
-      Y.applyUpdate(doc, storedState);
+    const reconstruction = await reconstructDocumentState(pool, documentName, DEFAULT_EPOCH);
+    if (reconstruction) {
+      const { doc, throughSequence } = reconstruction;
       const alreadySeeded =
         isTitlePageMapSeeded(doc.getMap(TITLE_PAGE_YJS_MAP)) &&
         isDocumentSettingsMapSeeded(doc.getMap(DOCUMENT_SETTINGS_YJS_MAP));
-      if (alreadySeeded) return new Uint8Array(storedState);
+      if (alreadySeeded) return Y.encodeStateAsUpdate(doc);
 
       const canonical = await fetchCanonicalTitlePageAndDocumentSettings(pool, documentName);
       // The screenplay row is gone (deleted between the document being opened and this fetch) --
-      // nothing to backfill from; hand back the stored state exactly as found rather than treating
-      // a vanished row as a reason to invent content.
-      if (!canonical) return new Uint8Array(storedState);
+      // nothing to backfill from; hand back the reconstructed state exactly as found rather than
+      // treating a vanished row as a reason to invent content.
+      if (!canonical) return Y.encodeStateAsUpdate(doc);
 
       const migrated = backfillTitlePageAndDocumentSettings(doc, canonical);
-      return migrated ? Y.encodeStateAsUpdate(doc) : new Uint8Array(storedState);
+      if (migrated) {
+        await writeCheckpoint(pool, {
+          screenplayId: documentName,
+          epoch: DEFAULT_EPOCH,
+          throughSequence,
+          doc,
+        });
+      }
+      return Y.encodeStateAsUpdate(doc);
     }
 
     const existing = await pool.query<{ canonicalScreenplay: unknown }>(
@@ -161,6 +183,12 @@ export function createFetch(pool: Pool) {
         screenplay.titlePages[0],
         screenplay.documentSettings,
       );
+      await writeCheckpoint(pool, {
+        screenplayId: documentName,
+        epoch: DEFAULT_EPOCH,
+        throughSequence: 0,
+        doc: seeded,
+      });
       return Y.encodeStateAsUpdate(seeded);
     } catch (error) {
       console.error(
@@ -180,80 +208,75 @@ function canonicalHash(canonicalJson: string): string {
 }
 
 /**
- * Persists this document's current Yjs state, debounced by Hocuspocus itself (`onStoreDocument`,
+ * Persists this document's current state, debounced by Hocuspocus itself (`onStoreDocument`,
  * tuned via `debounce`/`maxDebounce` in server.ts -- see that file's own comment on the chosen
- * values). Two writes in one transaction:
+ * values). Two independent operations, deliberately not one shared transaction:
  *
- *  1. `document_yjs_state`: the raw merged state, so a restart or a reconnect resumes from exactly
- *     here (`createFetch` above).
+ *  1. `createCheckpoint` (`updateLog.ts`): compacts `document_yjs_updates` into a fresh
+ *     `document_yjs_checkpoints` row, so a restart or a reconnect resumes from exactly here
+ *     (`createFetch` above) without replaying an ever-growing log from the beginning of time.
+ *     Reads purely from what is already durable in Postgres -- this function's own `document`/
+ *     `state` parameters are never consulted for this part, on purpose (see `createCheckpoint`'s
+ *     own comment on why durability must not depend on exactly when Hocuspocus happens to call
+ *     `store`, only on what earlier `onChange`-driven `appendUpdate` calls already committed).
  *  2. `screenplays.canonical_screenplay`/`canonical_hash`: the projection -- "the canonical
  *     screenplay is a projection of the Yjs document rather than the thing clients PUT." Every
  *     export, every REST read (`GET /api/screenplays/:id`), and pagination all read this column
- *     unchanged from before this slice; only what keeps it current has changed.
+ *     unchanged from before this slice; only what keeps it current has changed. This part *does*
+ *     read the live `document` Hocuspocus handed this call, because the projection needs the
+ *     actual Yjs structure (`projectYDocScreenplay`), not raw update bytes.
  *
- * `titlePages`/`documentSettings` are no longer read from the *existing* row and passed through --
- * that pass-through was correct while these lived outside the Yjs document at all (the previous
- * comment here explained exactly that), but it is wrong now that they live in `document`'s own
- * `TITLE_PAGE_YJS_MAP`/`DOCUMENT_SETTINGS_YJS_MAP`: `projectYDocScreenplay` reads both directly off
- * `document`, the same `Y.Doc` this function is already storing, so there is exactly one source for
- * them, not two. Only the screenplay's `title` (a project-level field distinct from the title
- * *page*, and still not part of Yjs) still needs a fallback read from the existing row.
+ * Splitting these into two operations means a crash between them can leave the checkpoint durable
+ * but the canonical projection briefly stale -- acceptable, since the projection is a derived
+ * read-model that the *next* debounced save recomputes regardless, and the underlying Yjs content
+ * (the only thing a writer would actually lose) is exactly what step 1 already made durable.
  *
- * Skips the write entirely when the projection is invalid (a mid-edit or otherwise unrepresentable
- * document state) -- the same "never persist an invalid projection" rule the deleted client-side
- * `scheduleSave` enforced, now enforced here since this is the only remaining writer.
+ * `titlePages`/`documentSettings` are read from `document`'s own `TITLE_PAGE_YJS_MAP`/
+ * `DOCUMENT_SETTINGS_YJS_MAP` via `projectYDocScreenplay`, not from the existing row -- there is
+ * exactly one source for them, not two. Only the screenplay's `title` (a project-level field
+ * distinct from the title *page*, and still not part of Yjs) needs a fallback read from the
+ * existing row.
+ *
+ * Skips the canonical write entirely when the projection is invalid (a mid-edit or otherwise
+ * unrepresentable document state) -- the same "never persist an invalid projection" rule the
+ * deleted client-side `scheduleSave` enforced, now enforced here since this is the only remaining
+ * writer. Compaction still runs regardless of projection validity -- the raw Yjs content is
+ * durable independently of whether it happens to represent a screenplay well-formed enough to
+ * project right now.
  */
 export function createStore(pool: Pool) {
-  return async function store({ documentName, document, state }: storePayload): Promise<void> {
-    const client = await pool.connect();
-    try {
-      await client.query('begin');
-      const existing = await client.query<{
-        title: string;
-        canonicalScreenplay: { title?: string };
-      }>(
-        `select title, canonical_screenplay as "canonicalScreenplay"
-           from screenplays
-          where id = $1 and deleted_at is null
-          for update`,
-        [documentName],
+  return async function store({ documentName, document }: storePayload): Promise<void> {
+    const existing = await pool.query<{
+      title: string;
+      canonicalScreenplay: { title?: string };
+    }>(
+      `select title, canonical_screenplay as "canonicalScreenplay"
+         from screenplays
+        where id = $1 and deleted_at is null`,
+      [documentName],
+    );
+    const row = existing.rows[0];
+    if (!row) {
+      // The screenplay was deleted (or never existed) between this document being opened and this
+      // debounced flush running. Nothing to persist to -- every table this slice writes is
+      // FK-cascaded from `screenplays`, so leaving them untouched here is correct, not a leak.
+      return;
+    }
+
+    await createCheckpoint(pool, { screenplayId: documentName, epoch: DEFAULT_EPOCH });
+
+    const projection = projectYDocScreenplay(document, {
+      id: documentName,
+      title: row.canonicalScreenplay.title ?? row.title,
+    });
+    if (projection.valid) {
+      const canonicalJson = JSON.stringify(projection.screenplay);
+      await pool.query(
+        `update screenplays
+            set canonical_screenplay = $1::jsonb, canonical_hash = $2, updated_at = now()
+          where id = $3`,
+        [canonicalJson, canonicalHash(canonicalJson), documentName],
       );
-      const row = existing.rows[0];
-      if (!row) {
-        // The screenplay was deleted (or never existed) between this document being opened and
-        // this debounced flush running. Nothing to persist to -- `document_yjs_state` is
-        // FK-cascaded from `screenplays`, so leaving it untouched here is correct, not a leak.
-        await client.query('rollback');
-        return;
-      }
-
-      await client.query(
-        `insert into document_yjs_state (screenplay_id, state, updated_at)
-         values ($1, $2, now())
-         on conflict (screenplay_id) do update set state = excluded.state, updated_at = excluded.updated_at`,
-        [documentName, Buffer.from(state)],
-      );
-
-      const projection = projectYDocScreenplay(document, {
-        id: documentName,
-        title: row.canonicalScreenplay.title ?? row.title,
-      });
-      if (projection.valid) {
-        const canonicalJson = JSON.stringify(projection.screenplay);
-        await client.query(
-          `update screenplays
-              set canonical_screenplay = $1::jsonb, canonical_hash = $2, updated_at = now()
-            where id = $3`,
-          [canonicalJson, canonicalHash(canonicalJson), documentName],
-        );
-      }
-
-      await client.query('commit');
-    } catch (error) {
-      await client.query('rollback');
-      throw error;
-    } finally {
-      client.release();
     }
   };
 }

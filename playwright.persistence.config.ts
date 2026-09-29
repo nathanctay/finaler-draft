@@ -9,6 +9,7 @@ export default defineConfig({
     '**/presence-persistence.spec.ts',
     '**/titlepage-persistence.spec.ts',
     '**/titlepage-cursors-persistence.spec.ts',
+    '**/offline-persistence.spec.ts',
   ],
   timeout: 30_000,
   reporter: 'list',
