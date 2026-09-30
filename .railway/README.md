@@ -40,6 +40,29 @@ Apply the planned changes:
 railway config apply
 ```
 
+## Deploys are automatic; infrastructure changes are not
+
+`.github/workflows/quality.yml` has a `deploy` job, gated on the full `checks` job, that deploys
+`app`, `collab` and `landing` on every push to `main`. Two consequences worth stating explicitly:
+
+- **Railway's own GitHub auto-deploy must stay off.** It deploys on push with no knowledge of whether
+  the test suite passed, so enabling it alongside this workflow would reopen the exact hole the
+  gating closes. No service declares a watched `branch` in `railway.ts`, and that omission is
+  deliberate.
+- **`railway config apply` is still a manual, reviewed step.** Nothing in CI applies this file. That
+  is partly by construction -- the workflow authenticates with a Railway _project token_, which
+  cannot apply configuration -- and partly on purpose: omitting a variable or a service from
+  `railway.ts` deletes it, so the `railway config plan` output is the only warning before a
+  destructive change, and a human should read it. Run `railway config plan`, read it, then
+  `railway config apply`.
+
+The deploy job uses `railway up`, which uploads the checked-out tree, rather than
+`railway redeploy --from-source`, which would re-resolve the branch head at deploy time and could
+build a commit the suite never tested.
+
+`app` deploys before `collab` because `app`'s `preDeploy` runs `db:migrate`, and `collab` reads the
+same database.
+
 ## Notes
 
 - `railway config plan` is safe and does not change Railway.
