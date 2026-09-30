@@ -67,7 +67,7 @@
  * second time for one more kind of cursor.
  */
 import { Extension } from '@tiptap/core';
-import { Plugin } from '@tiptap/pm/state';
+import { Plugin, Selection } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
 import { yCursorPlugin, ySyncPluginKey } from 'y-prosemirror';
 import type { Awareness } from 'y-protocols/awareness';
@@ -227,6 +227,93 @@ export function buildRemoteCursorWidget(user: PresenceUser): HTMLElement {
   wrapper.append(label);
 
   return wrapper;
+}
+
+/**
+ * The click-through fix: the owner's own words, "when another user's cursor is clicked on, it
+ * should move your cursor there as if you had clicked on the spot without any other cursor there."
+ *
+ * `.remote-cursor-caret` (`styles.css`) deliberately keeps a hit target wider than its painted
+ * stripe -- `padding-inline`/`background-clip: content-box`, see that rule's own comment -- so the
+ * name label is easy to reach on hover, per the owner's slice-2 decision. `pointer-events: none`
+ * would make the whole widget unhoverable and silently remove that reveal, so the caret stays fully
+ * hit-testable and this plugin instead *forwards* the click, in JS, to the position it would have
+ * landed at with no widget there at all.
+ *
+ * `view.posAtCoords` is what makes that forwarding exact rather than approximate: it is
+ * ProseMirror's own pixel-to-position mapping, computed by measuring each line's own rendered
+ * `getClientRects()` (see `seamCaret.ts`'s own comment: "`posAtCoords` for a click at the top of
+ * page 2 returns that same position"), not by asking the browser which *element* is topmost at
+ * that point the way `elementFromPoint`/native hit-testing would. `.remote-cursor` is `position:
+ * absolute` with no layout footprint of its own (this file's own comment on `buildRemoteCursorWidget`
+ * -- "displaces nothing"), so it never shifts where the *underlying* text is measured to be; the
+ * same `(x, y)` therefore resolves to the same document position whether or not the widget is
+ * sitting on top of it. `Selection.near` is the identical call ProseMirror's own default mousedown
+ * handling falls back to (`prosemirror-view`'s `LeftMouseDown.up`, via `updateSelection`) once it
+ * has a position and no other plugin has claimed the click -- reused here, not re-derived, so this
+ * plugin's placement agrees with an ordinary click by construction, not by coincidence.
+ *
+ * ## mousedown, not click
+ *
+ * Registered as `handleDOMEvents.mousedown`, which ProseMirror's own `initInput` guarantees runs
+ * *before* its own built-in mousedown handling for the same event (`runCustomHandler` is checked
+ * first; returning `true` here skips ProseMirror's own `handlers.mousedown` entirely for this
+ * event -- confirmed by reading the installed `prosemirror-view` source, not assumed). Text
+ * selection -- both the browser's native one and ProseMirror's own -- begins on mousedown, not on
+ * click (which fires only after mouseup); waiting for `click` would be a beat late, and by then the
+ * browser's own default mousedown handling of a `contentEditable="false"` node -- this widget's own
+ * wrapper -- would already have run, which is the defect itself. Only `mousedown` can pre-empt it.
+ *
+ * ## Drag is out of scope, by construction, not merely undocumented
+ *
+ * Returning `true` from this handler causes ProseMirror to skip constructing its own `LeftMouseDown`
+ * tracker for this mousedown (`runCustomHandler`'s short-circuit, same mechanism as above) --
+ * `LeftMouseDown` is what extends a single click into a drag-selection on `mousemove`. A drag that
+ * *starts* with the mouse down on a remote cursor's widget therefore always collapses to a single
+ * caret placement at the click point: the caret moves there, and the subsequent drag is inert (no
+ * selection extends) until the writer releases and presses down again somewhere ordinary. A drag
+ * that only *passes over* a remote cursor after already starting elsewhere is unaffected -- this
+ * handler only ever runs for a mousedown whose own target is the widget.
+ */
+function remoteCursorClickThroughPlugin(): Plugin {
+  return new Plugin({
+    props: {
+      handleDOMEvents: {
+        mousedown(view, event) {
+          const target = event.target;
+          if (!(target instanceof Element) || !target.closest('.remote-cursor')) {
+            return false;
+          }
+          return forwardRemoteCursorClick(view, { left: event.clientX, top: event.clientY }, event);
+        },
+      },
+    },
+  });
+}
+
+/**
+ * The placement half of `remoteCursorClickThroughPlugin`, split out so it is directly testable
+ * without reaching into plugin internals or simulating a real DOM `MouseEvent` dispatch -- the same
+ * "test the mechanism, not only the wiring" split this module's other exports already follow. `event`
+ * is optional and, when supplied, has `preventDefault()` called on it only once a real position was
+ * found -- a click that resolves to nothing (`posAtCoords` returning `null`, which ProseMirror's own
+ * types allow for a coordinate genuinely outside the document) is left for the browser's own default
+ * handling rather than silently swallowed.
+ */
+export function forwardRemoteCursorClick(
+  view: EditorView,
+  coords: { left: number; top: number },
+  event?: { preventDefault(): void },
+): boolean {
+  const result = view.posAtCoords(coords);
+  if (!result) return false;
+  event?.preventDefault();
+  if (!view.hasFocus()) view.focus();
+  const selection = Selection.near(view.state.doc.resolve(result.pos));
+  if (!view.state.selection.eq(selection)) {
+    view.dispatch(view.state.tr.setSelection(selection).setMeta('pointer', true));
+  }
+  return true;
 }
 
 /**
@@ -464,6 +551,7 @@ export function createRemotePresenceExtension(awareness: Awareness) {
           selectionBuilder: noRemoteSelectionAttrs,
         }),
         presenceHeartbeatPlugin(awareness, glow),
+        remoteCursorClickThroughPlugin(),
       ];
     },
     name: 'remotePresence',

@@ -240,6 +240,136 @@ export function computeOverlayPosition(
 }
 
 /**
+ * The click-through fix for this surface -- the owner's own words, "when another user's cursor is
+ * clicked on, it should move your cursor there as if you had clicked on the spot without any other
+ * cursor there" -- applied to the title page's own remote-cursor widgets (`buildRemoteCursorWidget`,
+ * appended directly into `.title-page`, per this module's top-of-file comment).
+ *
+ * The manuscript body (`presence.ts`'s `forwardRemoteCursorClick`) can lean on `EditorView.
+ * posAtCoords`, ProseMirror's own pixel-to-position mapping, which measures the *underlying* text's
+ * own rendered rects rather than asking the browser which element is topmost at a point -- so the
+ * widget sitting on top of that text never enters into it. The title page has no such API: it is
+ * bare `contentEditable` divs, not a ProseMirror document, so the only tool available is the DOM's
+ * own point-to-caret lookup (`caretPositionFromPoint`/`caretRangeFromPoint`), and unlike
+ * `posAtCoords`, that lookup *is* ordinary hit-testing -- it returns a position inside whichever
+ * element is actually topmost at the point, respecting `pointer-events` exactly the way a real
+ * click would (the same property `pointer-events: none` on `.remote-cursor-label` already relies on
+ * to let clicks fall through to whatever is under it). Landing on `.remote-cursor-caret` -- the
+ * widget's own hit-testable child, kept deliberately wider than its painted stripe for an easy
+ * hover target (`styles.css`'s own comment) -- would therefore resolve to a position *inside* the
+ * widget itself, not the field text under it, exactly the defect this exists to fix.
+ *
+ * `suppressPointerEvents` is the fix for that gap: it sets the caret's own `pointer-events` to
+ * `none` for the single synchronous duration of the lookup call, then restores whatever value was
+ * there before. This is deliberately *not* the same thing `styles.css`'s own comment warns against
+ * ("`pointer-events: none` is the wrong fix") -- that warning is about a permanent CSS rule, which
+ * would make the widget unhoverable for as long as it is mounted. This toggle exists for exactly
+ * one synchronous call, inside one mousedown handler, with no repaint in between the `none` and the
+ * restore (both DOM writes happen in the same JS task, before the browser's next paint) -- so
+ * `:hover` never has a chance to visibly drop, and every other moment (including the very next
+ * frame) the widget is precisely as hoverable as it was before this handler ran.
+ *
+ * This is also this module's own answer to "one shared mechanism or two" (`presence.ts`'s own
+ * comment on the identical question makes the case for the body's half): the two surfaces' hit-
+ * testing models are genuinely different -- one measures text geometry directly and is immune to
+ * DOM z-order, the other is native point-in-element hit-testing that has to be told, per call, to
+ * look through one specific element -- so forcing them through one shared function would mean
+ * branching on which model applies inside a supposedly-shared abstraction, which is not sharing,
+ * it is one function pretending to be two. Two small, surface-specific implementations, not one
+ * general one, is the same call `presence.ts`'s own click-through comment reaches for the body.
+ */
+function suppressPointerEvents(element: HTMLElement): () => void {
+  const previous = element.style.pointerEvents;
+  element.style.pointerEvents = 'none';
+  return () => {
+    element.style.pointerEvents = previous;
+  };
+}
+
+/**
+ * Resolves the DOM `(node, offset)` nearest `(x, y)` via the standard `Document.
+ * caretPositionFromPoint`, falling back to WebKit's older, non-standard `caretRangeFromPoint` where
+ * the standard method is not implemented (Safari, as of this writing -- both are fully typed in
+ * this project's DOM lib, so this is a runtime feature check, not a type-level one). Returns
+ * `undefined` for whichever of "neither API exists" or "the point resolved to nothing" applies --
+ * both read as "no position found" to every caller here, which already treats that as "do not
+ * intercept this click" rather than a distinct error to report.
+ */
+export function resolveCaretFromPoint(
+  x: number,
+  y: number,
+): { node: Node; offset: number } | undefined {
+  if (typeof document.caretPositionFromPoint === 'function') {
+    const position = document.caretPositionFromPoint(x, y);
+    if (!position) return undefined;
+    return { node: position.offsetNode, offset: position.offset };
+  }
+  if (typeof document.caretRangeFromPoint === 'function') {
+    const range = document.caretRangeFromPoint(x, y);
+    if (!range) return undefined;
+    return { node: range.startContainer, offset: range.startOffset };
+  }
+  return undefined;
+}
+
+/** Which live `[data-title-page-field]` element `node` (a text node, or the field element itself
+ * for an empty field -- the same two shapes `titlePageCursorFromSelection`'s own `startContainer`
+ * handles) sits inside, or `undefined` if it names no field at all -- a click that, despite landing
+ * on a remote-cursor widget, resolves somewhere outside every field once the widget is looked
+ * through (not expected in practice, since the widget is always positioned exactly at some field's
+ * own caret rect, but never assumed). */
+function fieldContainingCaretTarget(node: Node): HTMLElement | undefined {
+  const element = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  const field = element instanceof Element ? element.closest('[data-title-page-field]') : null;
+  return field instanceof HTMLElement ? field : undefined;
+}
+
+/**
+ * The whole of the title page's click-through fix: given the widget a mousedown landed on and the
+ * pointer's own viewport coordinates, looks through that widget (`suppressPointerEvents`), resolves
+ * the field position underneath it (`resolveCaretFromPoint` + `fieldContainingCaretTarget`), and --
+ * only once both succeed -- focuses that field and collapses the real DOM selection there, exactly
+ * where an ordinary click at those same coordinates would have landed had the widget never been
+ * there at all. Returns `false`, doing nothing else, for every case that does not reach that point,
+ * so the caller (`useTitlePagePresence`'s own mousedown listener) knows whether to suppress the
+ * browser's own default handling of the event or leave it alone.
+ *
+ * `root` scopes the result to one mounted title page (matching `titlePageCursorFromSelection`'s own
+ * `root.contains` check) -- defensive, not load-bearing in the single-title-page-per-document shape
+ * this app has today, but keeps this function honest about what it actually guarantees rather than
+ * assuming there is only ever one `.title-page` in the document.
+ */
+export function forwardTitlePageRemoteCursorClick(
+  root: Element,
+  widget: Element,
+  clientX: number,
+  clientY: number,
+): boolean {
+  const caret = widget.querySelector('.remote-cursor-caret');
+  const restore = caret instanceof HTMLElement ? suppressPointerEvents(caret) : undefined;
+  let resolved: { node: Node; offset: number } | undefined;
+  try {
+    resolved = resolveCaretFromPoint(clientX, clientY);
+  } finally {
+    restore?.();
+  }
+  if (!resolved) return false;
+
+  const fieldEl = fieldContainingCaretTarget(resolved.node);
+  if (!fieldEl || !root.contains(fieldEl)) return false;
+
+  fieldEl.focus();
+  const selection = document.getSelection();
+  if (!selection) return false;
+  const range = document.createRange();
+  range.setStart(resolved.node, resolved.offset);
+  range.setEnd(resolved.node, resolved.offset);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return true;
+}
+
+/**
  * Wires the local broadcast and the remote render together for one mounted title page. `awareness`
  * is `undefined` in local, no-collaboration-server mode (matching `createRemotePresenceExtension`'s
  * own omission in that mode, `App.tsx`) -- there is no other participant who could ever appear, and
@@ -365,8 +495,29 @@ export function useTitlePagePresence({
     // collaborators already present did not appear on join."
     render();
     awareness.on('change', render);
+
+    // The click-through fix (see `forwardTitlePageRemoteCursorClick`'s own comment for the full
+    // mechanism): a mousedown whose target is one of *this* hook's own widgets is forwarded to the
+    // field position underneath it; every other mousedown -- including one that lands on this same
+    // container but misses every widget -- is left completely alone.
+    const handleMouseDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const widget = target.closest('.remote-cursor');
+      if (!widget || !container.contains(widget)) return;
+      const handled = forwardTitlePageRemoteCursorClick(
+        container,
+        widget,
+        event.clientX,
+        event.clientY,
+      );
+      if (handled) event.preventDefault();
+    };
+    container.addEventListener('mousedown', handleMouseDown);
+
     return () => {
       awareness.off('change', render);
+      container.removeEventListener('mousedown', handleMouseDown);
       renderRef.current = undefined;
       glow.destroy();
       for (const widget of nodes.values()) widget.remove();
