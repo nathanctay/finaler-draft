@@ -5,12 +5,14 @@ import * as Y from 'yjs';
 import {
   buildRemoteCursorWidget,
   createRemotePresenceExtension,
+  forwardRemoteCursorClick,
   listPresentParticipants,
   PRESENCE_ACTIVE_WINDOW_MS,
   PRESENCE_TYPING_GLOW_MS,
   type RemoteParticipant,
 } from './presence.js';
 import {
+  createLocalScreenplayEditorInit,
   createLocalScreenplayYDoc,
   createScreenplayEditorInit,
   SCREENPLAY_YJS_FRAGMENT,
@@ -24,6 +26,22 @@ const simpleContent: EditorContent = {
       type: 'screenplayBlock',
       attrs: { element: 'action', id: '00000000-0000-4000-8000-000000000001' },
       content: [{ type: 'text', text: 'A long enough line to place a caret inside.' }],
+    },
+  ],
+};
+
+const twoBlockContent: EditorContent = {
+  type: 'screenplayDocument',
+  content: [
+    {
+      type: 'screenplayBlock',
+      attrs: { element: 'action', id: '00000000-0000-4000-8000-000000000002' },
+      content: [{ type: 'text', text: 'First block of text.' }],
+    },
+    {
+      type: 'screenplayBlock',
+      attrs: { element: 'action', id: '00000000-0000-4000-8000-000000000003' },
+      content: [{ type: 'text', text: 'Second block of text.' }],
     },
   ],
 };
@@ -156,6 +174,121 @@ describe('buildRemoteCursorWidget', () => {
       lastActiveAt: Date.now() - PRESENCE_TYPING_GLOW_MS - 1,
     });
     expect(stale.hasAttribute('data-remote-cursor-active')).toBe(false);
+  });
+});
+
+/**
+ * The placement half of the click-through fix (`remoteCursorClickThroughPlugin`'s own comment has
+ * the full mechanism), tested directly against a real, bare (non-Yjs) editor rather than through a
+ * simulated DOM event -- jsdom has no real layout, so `view.posAtCoords` is stubbed here the same
+ * way `App.test.tsx`'s own comment documents ("jsdom has no `elementFromPoint`, which
+ * `EditorView.posAtCoords` needs for a real mousedown-driven caret placement"). The plugin wiring
+ * itself -- that a real mousedown event landing on `.remote-cursor` actually reaches this function,
+ * with the browser's own default handling suppressed -- is proven separately below, through
+ * `createRemotePresenceExtension`'s own describe block, by dispatching a real `MouseEvent`.
+ */
+describe('forwardRemoteCursorClick', () => {
+  function buildBareEditor() {
+    const mount = document.createElement('div');
+    document.body.append(mount);
+    const editor = new Editor({
+      element: mount,
+      ...createLocalScreenplayEditorInit(twoBlockContent),
+    });
+    return { editor, mount };
+  }
+
+  it('does nothing and returns false when posAtCoords finds no position -- a coordinate genuinely outside the document', () => {
+    const { editor, mount } = buildBareEditor();
+    try {
+      vi.spyOn(editor.view, 'posAtCoords').mockReturnValue(null);
+      const preventDefault = vi.fn();
+      const before = editor.state.selection;
+
+      const handled = forwardRemoteCursorClick(
+        editor.view,
+        { left: 0, top: 0 },
+        { preventDefault },
+      );
+
+      expect(handled).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(editor.state.selection.eq(before)).toBe(true);
+    } finally {
+      editor.destroy();
+      mount.remove();
+    }
+  });
+
+  it('places the selection at the resolved position, focuses the view, and prevents the event’s default -- the position a plain click at those coordinates would have produced', () => {
+    const { editor, mount } = buildBareEditor();
+    try {
+      // The start of the second block -- a position distinct from the document's own initial
+      // selection (which Tiptap places at the very start, inside the first block), so a passing
+      // test cannot be explained by the selection having already been there.
+      const secondBlockStart = editor.state.doc.content.firstChild!.nodeSize + 1;
+      vi.spyOn(editor.view, 'posAtCoords').mockReturnValue({ pos: secondBlockStart, inside: -1 });
+      const preventDefault = vi.fn();
+
+      const handled = forwardRemoteCursorClick(
+        editor.view,
+        { left: 42, top: 7 },
+        { preventDefault },
+      );
+
+      expect(handled).toBe(true);
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(editor.state.selection.empty).toBe(true);
+      expect(editor.state.selection.from).toBe(secondBlockStart);
+      expect(editor.view.hasFocus()).toBe(true);
+    } finally {
+      editor.destroy();
+      mount.remove();
+    }
+  });
+
+  it('is a no-op call with no event argument at all -- the event is optional, for direct callers that have nothing to prevent', () => {
+    const { editor, mount } = buildBareEditor();
+    try {
+      vi.spyOn(editor.view, 'posAtCoords').mockReturnValue({ pos: 1, inside: -1 });
+      expect(() => forwardRemoteCursorClick(editor.view, { left: 0, top: 0 })).not.toThrow();
+      expect(editor.state.selection.from).toBe(1);
+    } finally {
+      editor.destroy();
+      mount.remove();
+    }
+  });
+
+  it('does not dispatch a redundant transaction when the resolved position already matches the current selection, but still reports the click as handled', () => {
+    const { editor, mount } = buildBareEditor();
+    try {
+      // A real, synchronous focus first (not `editor.commands.focus`, which Tiptap defers to a
+      // microtask -- confirmed directly: a first version of this test installed the spy right
+      // after that call and still caught one dispatch, Tiptap's own deferred internal "focus" meta
+      // transaction firing only once this function's own `view.focus()` call below forced it
+      // synchronously). `view.hasFocus()` true *before* the spy is installed is what actually
+      // isolates the property this test cares about -- no further focus-related dispatch of any
+      // kind left to happen.
+      editor.view.focus();
+      expect(editor.view.hasFocus()).toBe(true);
+      const startPos = editor.state.selection.from;
+      vi.spyOn(editor.view, 'posAtCoords').mockReturnValue({ pos: startPos, inside: -1 });
+      const dispatchSpy = vi.spyOn(editor.view, 'dispatch');
+      const preventDefault = vi.fn();
+
+      const handled = forwardRemoteCursorClick(
+        editor.view,
+        { left: 1, top: 1 },
+        { preventDefault },
+      );
+
+      expect(handled).toBe(true);
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(dispatchSpy).not.toHaveBeenCalled();
+    } finally {
+      editor.destroy();
+      mount.remove();
+    }
   });
 });
 
@@ -312,6 +445,62 @@ describe('createRemotePresenceExtension', () => {
     expect(labels).toContain('Present Peer');
     expect(labels).not.toContain('Stale Peer');
   });
+
+  /**
+   * The click-through fix, proven through the real wiring this time -- a genuine DOM `MouseEvent`
+   * dispatched at the actual `.remote-cursor-caret` element `buildRemoteCursorWidget` built, rather
+   * than calling `forwardRemoteCursorClick` directly (that direct call is its own describe block
+   * above; this is the "does the plugin actually receive it" half). `view.posAtCoords` is stubbed
+   * -- jsdom has no real layout for it to measure -- but the event dispatch, the `target.closest(
+   * '.remote-cursor')` match, ProseMirror's own `runCustomHandler` short-circuit of its built-in
+   * mousedown handling, and the resulting `view.dispatch` are all real.
+   */
+  it('a real mousedown dispatched at the remote cursor’s own caret element forwards the click and suppresses the browser’s own default handling', async () => {
+    const ystate = yCursorPluginKeyState(editor);
+    const relativeCursor = Y.relativePositionToJSON(
+      Y.createRelativePositionFromTypeIndex(ystate.type, 0),
+    );
+    const peerClientId = 777;
+    awareness.states.set(peerClientId, {
+      user: { name: 'Clicked On', color: '#123456', lastActiveAt: Date.now() },
+      cursor: { anchor: relativeCursor, head: relativeCursor },
+    });
+    awareness.emit('change', [{ added: [peerClientId], updated: [], removed: [] }, 'local']);
+    await settleAwarenessDecorations();
+
+    const caret = mount.querySelector('.remote-cursor-caret');
+    expect(caret).not.toBeNull();
+
+    // A position distinct from wherever the document's own default selection starts, so a passing
+    // assertion below cannot be explained by the selection already being there.
+    const targetPos = editor.state.doc.content.size - 1;
+    vi.spyOn(editor.view, 'posAtCoords').mockReturnValue({ pos: targetPos, inside: -1 });
+
+    const event = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 12,
+      clientY: 34,
+    });
+    caret!.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(editor.state.selection.empty).toBe(true);
+    expect(editor.state.selection.from).toBe(targetPos);
+    // The widget itself is untouched by handling its own click -- still attached, still the
+    // mechanism the label's hover reveal depends on.
+    expect(mount.querySelector('.remote-cursor')).not.toBeNull();
+  });
+
+  /**
+   * Mutation check for the property above, performed by hand rather than left as permanent code:
+   * commenting out `remoteCursorClickThroughPlugin()`'s registration in `createRemotePresenceExtension`
+   * and re-running this file reproduces the pre-fix defect -- the dispatched mousedown above is no
+   * longer intercepted (`event.defaultPrevented` reads `false`, and the selection never moves to
+   * `targetPos`), which is exactly the "hard to click into that spot" report this whole change
+   * exists to close. See progress/remote-cursor-click-through.md for the confirmed result of that
+   * run and the revert back to the registered plugin.
+   */
 
   /**
    * The defect this module exists to fix, reproduced and then proven closed: a widget built

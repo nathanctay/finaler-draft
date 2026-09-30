@@ -223,6 +223,50 @@ async function collapseCaretToEnd(page: Page, field: Locator): Promise<void> {
   await page.keyboard.press('ArrowRight');
 }
 
+/**
+ * The title-page equivalent of `presence-persistence.spec.ts`'s own click-through equivalence
+ * test's own click-point technique -- see that file's own comment for the full shape this proves
+ * ("the same position a plain click would have produced", not merely "somewhere reasonable") and
+ * why. The only thing that differs here is the anchor: title-page fields are centred/right-aligned
+ * text, not a fixed character grid, so "click past the end of a short line" is not a reliable way
+ * to reach a known position the way it is for the manuscript body. This instead reads the real
+ * rendered geometry of a collapsed `Range` at the end of the field's own text -- the identical
+ * anchor `measureTitlePageCaretPlacement` already reads for placement, and the same shape
+ * `resolveCaretFromPoint` (`titlePageCursors.ts`) is proven against at the unit level.
+ */
+function endOfFieldPoint(page: Page, fieldSelector: string): Promise<{ x: number; y: number }> {
+  return page.evaluate((selector) => {
+    const field = document.querySelector(selector);
+    if (!field) throw new Error(`Missing field: ${selector}`);
+    const textNode = field.firstChild;
+    if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
+      throw new Error(`Field has no text node: ${selector}`);
+    }
+    const length = textNode.textContent?.length ?? 0;
+    const range = document.createRange();
+    range.setStart(textNode, length);
+    range.setEnd(textNode, length);
+    const rect = range.getClientRects()[0] ?? range.getBoundingClientRect();
+    // A pixel past the collapsed boundary -- landing definitively inside the last character's own
+    // "after" zone, the same nudge a real click just past the end of a line relies on.
+    return { x: rect.left + 1, y: rect.top + rect.height / 2 };
+  }, fieldSelector);
+}
+
+/** Reads the resulting position through the real, native DOM `Selection` -- the title page's own
+ * fields are bare `contentEditable` divs, so this *is* the position, not a proxy for one kept in
+ * sync with it the way `presence-persistence.spec.ts`'s ProseMirror equivalent is. No debug hook
+ * added to the app for this. */
+function readSelection(page: Page) {
+  return page.evaluate(() => {
+    const selection = window.getSelection();
+    return {
+      text: selection?.anchorNode?.textContent ?? null,
+      offset: selection?.anchorOffset ?? null,
+    };
+  });
+}
+
 test.describe('title-page presence: two real browser contexts, real remote cursor', () => {
   test('context B sees context A’s title-page caret at the right field, paints and is placed correctly, does not displace the title page, and stays correct under zoom', async ({
     page: pageA,
@@ -383,6 +427,111 @@ test.describe('title-page presence: two real browser contexts, real remote curso
       if (!paint)
         throw new Error('Expected .remote-cursor-caret to still exist after the glow expires.');
       expect(paint.contentWidthPx).toBeGreaterThan(0);
+    } finally {
+      await contextB.close();
+    }
+  });
+
+  test('clicking exactly on a remote title-page cursor places the local caret at the same position a plain click at those coordinates would -- click-through equivalence, not merely "somewhere reasonable"', async ({
+    page: pageA,
+    browser,
+  }) => {
+    test.setTimeout(60_000);
+    const { email, password } = await createAndOpenScreenplay(pageA);
+    await expect(pageA.getByText(/^Synced/)).toBeVisible();
+
+    const screenplayUrl = pageA.url();
+    const contextB = await browser.newContext();
+    const pageB = await contextB.newPage();
+    try {
+      await openScreenplayAsSecondSession(pageB, email, password, screenplayUrl);
+      await requireCourierPrime(pageB);
+
+      const titleSelector = '[data-title-page-field="title"]';
+      const clickPoint = await endOfFieldPoint(pageB, titleSelector);
+
+      // Control: B clicks that exact pixel before A has ever placed a title-page cursor at all --
+      // nothing drawn over it yet.
+      await pageB.mouse.click(clickPoint.x, clickPoint.y);
+      const control = await readSelection(pageB);
+      const titleText = await pageB.evaluate(
+        (selector) => document.querySelector(selector)?.textContent ?? null,
+        titleSelector,
+      );
+      expect(control).toEqual({ text: titleText, offset: titleText?.length ?? 0 });
+
+      // A moves its own caret to the identical, end-of-text position -- `collapseCaretToEnd`, the
+      // same reliable technique this file's other tests already use -- so B's remote-cursor widget
+      // comes to sit exactly where B just clicked.
+      const titleFieldA = pageA.getByRole('textbox', { name: 'Title page: title' });
+      await collapseCaretToEnd(pageA, titleFieldA);
+
+      const remoteCaret = pageB.locator('.title-page .remote-cursor-caret');
+      await expect(remoteCaret).toBeAttached();
+      // Confirms the widget actually reached the same pixel B is about to click again --
+      // otherwise this test would not be exercising click-through at all, only coincidence.
+      await expect
+        .poll(
+          async () => {
+            const box = await remoteCaret.boundingBox();
+            if (!box) return false;
+            return (
+              box.x <= clickPoint.x &&
+              clickPoint.x <= box.x + box.width &&
+              box.y <= clickPoint.y &&
+              clickPoint.y <= box.y + box.height
+            );
+          },
+          { timeout: CARET_CONVERGENCE_TIMEOUT_MS },
+        )
+        .toBe(true);
+
+      // The proof: the identical pixel, clicked again, now with A's remote-cursor widget sitting
+      // exactly on it.
+      await pageB.mouse.click(clickPoint.x, clickPoint.y);
+      await expect.poll(() => readSelection(pageB)).toEqual(control);
+    } finally {
+      await contextB.close();
+    }
+  });
+
+  /**
+   * The regression this fix is most likely to cause, named directly in the brief: looking through
+   * the caret via a momentary `pointer-events` toggle (`suppressPointerEvents`, `titlePageCursors
+   * .ts`) must not have cost the hover reveal slice 2 shipped for the body and this slice shipped
+   * for the title page. Isolated from the typing-glow reveal (`data-remote-cursor-active`, already
+   * covered by this file's other tests) by waiting the glow window out first, so the *only* thing
+   * that can be revealing the label by the time this test hovers is a real `:hover` match.
+   */
+  test('hovering a remote title-page cursor’s caret still reveals the writer’s name, after the click-through fix', async ({
+    page: pageA,
+    browser,
+  }) => {
+    test.setTimeout(60_000);
+    const { email, password } = await createAndOpenScreenplay(pageA);
+    await expect(pageA.getByText(/^Synced/)).toBeVisible();
+
+    const titleFieldA = pageA.getByRole('textbox', { name: 'Title page: title' });
+    await collapseCaretToEnd(pageA, titleFieldA);
+    await pageA.waitForTimeout(PRESENCE_TYPING_GLOW_MS + 500);
+
+    const screenplayUrl = pageA.url();
+    const contextB = await browser.newContext();
+    const pageB = await contextB.newPage();
+    try {
+      await openScreenplayAsSecondSession(pageB, email, password, screenplayUrl);
+
+      const remoteCaret = pageB.locator('.title-page .remote-cursor-caret');
+      await expect(remoteCaret).toBeAttached();
+      await expect(pageB.locator('.title-page .remote-cursor')).not.toHaveAttribute(
+        'data-remote-cursor-active',
+        'true',
+      );
+      await expect(pageB.locator('.title-page .remote-cursor-label')).toHaveCSS('opacity', '0');
+
+      await remoteCaret.hover();
+      await expect(pageB.locator('.title-page .remote-cursor-label')).toHaveCSS('opacity', '1');
+      await expect(pageB.locator('.title-page .remote-cursor-label')).toHaveText('Writer');
     } finally {
       await contextB.close();
     }
