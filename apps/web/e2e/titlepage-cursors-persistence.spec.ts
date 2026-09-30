@@ -292,6 +292,21 @@ test.describe('title-page presence: two real browser contexts, real remote curso
       const authorFieldA = pageA.getByRole('textbox', { name: 'Title page: author line 1' });
       await authorFieldA.click();
       await pageA.keyboard.insertText('Morgan Vale');
+      // `collapseCaretToEnd` (its own comment above carries the full reasoning for why this is
+      // native `ControlOrMeta+a`/`ArrowRight` rather than a jump-navigation key), called here for
+      // the same reason it is needed at all: measured directly (progress/title-page-caret-
+      // flake.md), `insertText` into a field that had *zero* children before this call -- the
+      // author line's own first character -- does not reliably leave this harness's own
+      // `selectionchange` listener with the end-of-text position under real multi-worker
+      // contention. Without this, `titlePageCursorFromSelection`'s broadcast can be built from the
+      // transient empty-field selection the field's own initial click produced, not from the text
+      // just inserted, and stays there -- not a converging value, a wrong one that never changes,
+      // confirmed by a direct measurement showing the identical wrong offset from the very first
+      // poll attempt through to timeout, never trending toward correct. This is a real position a
+      // caret can reach, not this test's own tolerance being too tight, so the fix is forcing the
+      // same explicit, native, already-trusted end-of-text confirmation `collapseCaretToEnd`
+      // already relies on for the title field, not loosening what this test accepts.
+      await collapseCaretToEnd(pageA, authorFieldA);
 
       await expect
         .poll(async () => (await remoteCaret.boundingBox())?.y)
