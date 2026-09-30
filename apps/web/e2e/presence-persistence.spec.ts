@@ -500,4 +500,200 @@ test.describe('presence: two real browser contexts, real remote cursor', () => {
       await contextB.close();
     }
   });
+
+  /**
+   * The owner's own report, made precise: "when another user's cursor is clicked on, it should
+   * move your cursor there as if you had clicked on the spot without any other cursor there." Not
+   * "somewhere reasonable" -- the *same* position a plain click at those exact coordinates would
+   * have produced. Proven here by clicking the literal same pixel twice: once with nothing drawn
+   * over it (the control), once with A's own remote-cursor widget sitting exactly on it (the
+   * click-through case) -- see `packages/screenplay-editor/src/presence.ts`'s own
+   * `forwardRemoteCursorClick` comment for why `view.posAtCoords` makes this equal by construction,
+   * not by luck.
+   *
+   * Reads the resulting position through the real, native DOM `Selection` ProseMirror keeps in sync
+   * with its own document selection (`view.updateState`'s own `selectionToDOM`) -- no debug hook
+   * added to the app for this, and no risk of a false pass from typing-then-undoing a marker
+   * character, since nothing is ever typed at all.
+   */
+  test('clicking exactly on a remote cursor places the local caret at the same position a plain click at those coordinates would -- click-through equivalence, not merely "somewhere reasonable"', async ({
+    page: pageA,
+    browser,
+  }) => {
+    test.setTimeout(60_000);
+    const { canvas: canvasA, email, password } = await createAndOpenScreenplay(pageA);
+    await expect(pageA.getByText(/^Synced/)).toBeVisible();
+
+    await canvasA.click();
+    await pageA.keyboard.insertText(FIRST_LINE);
+    await pageA.keyboard.press('Enter');
+    await pageA.keyboard.insertText(SEEDED_LINE);
+
+    const screenplayUrl = pageA.url();
+    const contextB = await browser.newContext();
+    const pageB = await contextB.newPage();
+    try {
+      const { canvas: canvasB } = await openScreenplayAsSecondSession(
+        pageB,
+        email,
+        password,
+        screenplayUrl,
+      );
+      await expect(canvasB).toContainText(SEEDED_LINE);
+      // Required before any coordinate-dependent click in this file (see the first test's own
+      // `requireCourierPrime` call): without it, text can still be mid-swap from a fallback font
+      // to Courier Prime when a bounding box is read, so a click computed from that box can land
+      // somewhere the page has since reflowed away from -- confirmed directly, not assumed: a
+      // first version of this test, without this call, read back the *footer's* own status text
+      // instead of the manuscript, because the page was still reflowing under the fallback font
+      // when the click coordinates were captured.
+      await requireCourierPrime(pageB);
+      // A's own remote caret, as B sees it, starts at the end of the *second* block -- A's own
+      // last edit -- nowhere near the first block, so the control click below lands on ordinary
+      // text with no widget anywhere near it.
+      await expect(pageB.locator('.remote-cursor')).toBeAttached();
+
+      const readSelection = (page: Page) =>
+        page.evaluate(() => {
+          const selection = window.getSelection();
+          return {
+            text: selection?.anchorNode?.textContent ?? null,
+            offset: selection?.anchorOffset ?? null,
+          };
+        });
+
+      /**
+       * The precise pixel at the very end of `block`'s own text -- a collapsed `Range`'s own
+       * rendered rect, the identical anchor `measureCaretPlacement` (this file, above) and
+       * `titlepage-cursors-persistence.spec.ts`'s own `endOfFieldPoint` both read. Deliberately
+       * *not* "click anywhere past the end of the line, it snaps" (the technique the first test in
+       * this file uses to move a caret): that technique tolerates any x on the line because it
+       * only needs the *resulting position* to be right, but this test additionally needs the
+       * *remote-cursor widget itself* to land within a few pixels of the point it clicks a second
+       * time -- and the widget renders at the real end-of-text column, not at the block element's
+       * own right edge (action blocks span the full text column, far wider than a short line's own
+       * glyphs). A first version of this test used the wider, click-anywhere technique and its own
+       * click-through assertion never converged, for exactly this reason, confirmed directly: the
+       * chosen pixel and the widget's own rendered position were never within reach of each other
+       * at all.
+       */
+      function endOfBlockPoint(block: Locator): Promise<{ x: number; y: number }> {
+        return block.evaluate((element) => {
+          const textNode = element.firstChild;
+          if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
+            throw new Error('Block has no text node.');
+          }
+          const length = textNode.textContent?.length ?? 0;
+          const range = document.createRange();
+          range.setStart(textNode, length);
+          range.setEnd(textNode, length);
+          const rect = range.getClientRects()[0] ?? range.getBoundingClientRect();
+          return { x: rect.left + 1, y: rect.top + rect.height / 2 };
+        });
+      }
+
+      const firstBlockB = canvasB.locator('[data-screenplay-block]').first();
+      // `toContainText(SEEDED_LINE)` above only proves the *second* block's own text arrived --
+      // under real contention (this suite's own full parallel run, `CARET_CONVERGENCE_TIMEOUT_MS`'s
+      // comment documents the identical concern for a different poll in this codebase) the two
+      // blocks' own DOM commits were observed to land a beat apart, and `endOfBlockPoint` below
+      // reads `firstChild` synchronously with no wait of its own -- so this waits for the *first*
+      // block's own text specifically, the one this test is about to measure and click.
+      await expect(firstBlockB).toHaveText(FIRST_LINE);
+      // B never typed or clicked into the canvas the way A did while composing this content, so
+      // nothing has scrolled B's own view to bring the manuscript body into frame yet -- B's
+      // initial scroll position shows the title page above it. Confirmed directly, not assumed: a
+      // version of this test without this call read back the *footer's* own status text instead
+      // of the manuscript, because the raw pixel coordinates this test computes next landed below
+      // B's actual visible viewport. `scrollIntoViewIfNeeded` is what A's own earlier typing did
+      // implicitly (a caret landing somewhere always scrolls it into view) and B needs done
+      // explicitly, having never moved a caret here at all.
+      await firstBlockB.scrollIntoViewIfNeeded();
+      const clickPoint = await endOfBlockPoint(firstBlockB);
+
+      // Control: B clicks that exact pixel while nothing is drawn over it.
+      await pageB.mouse.click(clickPoint.x, clickPoint.y);
+      const control = await readSelection(pageB);
+      expect(control).toEqual({ text: FIRST_LINE, offset: FIRST_LINE.length });
+
+      // A now moves its own caret to the identical end-of-text position -- read from A's own page
+      // the same way -- so B's remote-cursor widget comes to sit exactly where B just clicked.
+      await pageA.bringToFront();
+      const firstBlockA = canvasA.locator('[data-screenplay-block]').first();
+      const clickPointA = await endOfBlockPoint(firstBlockA);
+      await pageA.mouse.click(clickPointA.x, clickPointA.y);
+
+      const remoteCaret = pageB.locator('.remote-cursor-caret');
+      await expect(remoteCaret).toBeAttached();
+      // Confirms the widget actually reached the same pixel B is about to click again --
+      // otherwise this test would not be exercising click-through at all, only coincidence.
+      await expect
+        .poll(async () => {
+          const box = await remoteCaret.boundingBox();
+          if (!box) return false;
+          return (
+            box.x <= clickPoint.x &&
+            clickPoint.x <= box.x + box.width &&
+            box.y <= clickPoint.y &&
+            clickPoint.y <= box.y + box.height
+          );
+        })
+        .toBe(true);
+
+      // The proof: the identical pixel, clicked again, now with A's remote-cursor widget sitting
+      // exactly on it.
+      await pageB.mouse.click(clickPoint.x, clickPoint.y);
+      await expect.poll(() => readSelection(pageB)).toEqual(control);
+    } finally {
+      await contextB.close();
+    }
+  });
+
+  /**
+   * The regression this fix is most likely to cause, named directly in the brief: making the caret
+   * hit-testable again (rather than `pointer-events: none`, which would have made click-through
+   * trivial at the cost of silently breaking this) must not have cost the hover reveal slice 2
+   * shipped. Isolated from the typing-glow reveal (`data-remote-cursor-active`, already covered by
+   * this file's other tests) by waiting the glow window out first, so the *only* thing that can be
+   * revealing the label by the time this test hovers is a real `:hover` match.
+   */
+  test('hovering a remote cursor’s caret still reveals the writer’s name, after the click-through fix', async ({
+    page: pageA,
+    browser,
+  }) => {
+    test.setTimeout(60_000);
+    const { canvas: canvasA, email, password } = await createAndOpenScreenplay(pageA);
+    await expect(pageA.getByText(/^Synced/)).toBeVisible();
+
+    await canvasA.click();
+    await pageA.keyboard.insertText(SEEDED_LINE);
+    await pageA.waitForTimeout(PRESENCE_TYPING_GLOW_MS + 500);
+
+    const screenplayUrl = pageA.url();
+    const contextB = await browser.newContext();
+    const pageB = await contextB.newPage();
+    try {
+      const { canvas: canvasB } = await openScreenplayAsSecondSession(
+        pageB,
+        email,
+        password,
+        screenplayUrl,
+      );
+      await expect(canvasB).toContainText(SEEDED_LINE);
+
+      const remoteCaret = pageB.locator('.remote-cursor-caret');
+      await expect(remoteCaret).toBeAttached();
+      await expect(pageB.locator('.remote-cursor')).not.toHaveAttribute(
+        'data-remote-cursor-active',
+        'true',
+      );
+      await expect(pageB.locator('.remote-cursor-label')).toHaveCSS('opacity', '0');
+
+      await remoteCaret.hover();
+      await expect(pageB.locator('.remote-cursor-label')).toHaveCSS('opacity', '1');
+      await expect(pageB.locator('.remote-cursor-label')).toHaveText('Writer');
+    } finally {
+      await contextB.close();
+    }
+  });
 });
