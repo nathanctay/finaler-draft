@@ -64,3 +64,50 @@ jobs:
             playwright-report/
           retention-days: 14
           if-no-files-found: ignore
+
+  # Continuous deployment. Deliberately a second job gated on `checks` rather than Railway's own
+  # GitHub auto-deploy: Railway deploys on push the moment a commit lands, with no knowledge of
+  # whether this workflow passed, so enabling it would let a commit that fails `checks` reach
+  # production. Gating here means the suite above is the only route to a deploy. Railway's own
+  # auto-deploy must therefore stay off -- no service declares a watched `branch` in
+  # `.railway/railway.ts`, and that omission is load-bearing, not an oversight.
+  #
+  # Runs only for a real push to `main`. A pull request never deploys (its `checks` run still
+  # gates the merge), and neither does a fork, which cannot read the secret below in any case.
+  deploy:
+    needs: checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Two merges in quick succession must not race each other into production, and the later one
+    # must not be cancelled -- it carries the newer code. Queue them instead.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    env:
+      # A Railway **project token**, scoped to one environment and limited to deployment actions
+      # (Railway's CLI docs: "Project tokens are scoped to a specific environment and can only
+      # perform deployment-related actions"). Deliberately not an account token: this workflow
+      # never needs to read or write anything beyond deploying, and notably a project token cannot
+      # run `railway config apply` -- see `.railway/README.md` on why applying infrastructure
+      # changes stays a reviewed, manual step rather than something a merge can do.
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      # `railway up` uploads *this checkout* rather than asking Railway to pull the latest commit
+      # from GitHub. That is the point: it deploys byte-for-byte the tree `checks` just passed on.
+      # `railway redeploy --from-source` would re-resolve the branch head at deploy time, so a
+      # commit landing while this workflow ran could be built without ever having been tested.
+      #
+      # The CLI is pinned. It is installed here rather than taken from this repo's own `railway`
+      # devDependency, which ships only the IaC binary (`railway-iac-ts`) and not the CLI.
+      #
+      # `app` goes first, and the order matters: its `preDeploy` runs `db:migrate`, so the schema is
+      # migrated before `collab` -- the other service reading the same database -- restarts against
+      # it. Sequential, fail-fast: if `app` cannot deploy, `collab` must not be pointed at a schema
+      # that may be half-migrated.
+      - name: Deploy app (migrates the database via preDeploy)
+        run: npx --yes @railway/cli@5.63.1 up --ci --service app
+      - name: Deploy collab
+        run: npx --yes @railway/cli@5.63.1 up --ci --service collab
+      - name: Deploy landing
+        run: npx --yes @railway/cli@5.63.1 up --ci --service landing
