@@ -10,11 +10,14 @@ import { TitlePageView } from './titlePageEditor.js';
 import type { TitlePageState } from './titlePageState.js';
 import {
   computeOverlayPosition,
+  forwardTitlePageRemoteCursorClick,
   locateTitlePageCursorField,
   measureCaretRect,
+  resolveCaretFromPoint,
   titlePageCursorFromSelection,
   type TitlePageCursor,
 } from './titlePageCursors.js';
+import { buildRemoteCursorWidget } from '@finaler-draft/screenplay-editor';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -275,6 +278,146 @@ describe('computeOverlayPosition', () => {
   });
 });
 
+describe('resolveCaretFromPoint', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(document, 'caretPositionFromPoint');
+    Reflect.deleteProperty(document, 'caretRangeFromPoint');
+  });
+
+  it('returns undefined when neither the standard nor the WebKit API is implemented -- this project’s own jsdom test environment, confirmed directly rather than assumed', () => {
+    expect(document.caretPositionFromPoint).toBeUndefined();
+    expect(document.caretRangeFromPoint).toBeUndefined();
+    expect(resolveCaretFromPoint(1, 2)).toBeUndefined();
+  });
+
+  it('uses the standard caretPositionFromPoint when it exists, mapping offsetNode/offset straight across', () => {
+    const node = document.createTextNode('hello');
+    document.caretPositionFromPoint = () => ({
+      offset: 3,
+      offsetNode: node,
+      getClientRect: () => null,
+    });
+    expect(resolveCaretFromPoint(10, 20)).toEqual({ node, offset: 3 });
+  });
+
+  it('returns undefined when caretPositionFromPoint itself resolves to nothing', () => {
+    document.caretPositionFromPoint = () => null;
+    expect(resolveCaretFromPoint(10, 20)).toBeUndefined();
+  });
+
+  it('falls back to the WebKit caretRangeFromPoint when the standard method is not implemented', () => {
+    const node = document.createTextNode('hello');
+    document.body.append(node);
+    const range = document.createRange();
+    range.setStart(node, 2);
+    range.setEnd(node, 2);
+    document.caretRangeFromPoint = () => range;
+    expect(resolveCaretFromPoint(10, 20)).toEqual({ node, offset: 2 });
+  });
+
+  it('returns undefined when caretRangeFromPoint itself resolves to nothing', () => {
+    document.caretRangeFromPoint = () => null;
+    expect(resolveCaretFromPoint(10, 20)).toBeUndefined();
+  });
+
+  it('prefers the standard method over the WebKit fallback when both are implemented', () => {
+    const standardNode = document.createTextNode('standard');
+    document.caretPositionFromPoint = () => ({
+      offset: 1,
+      offsetNode: standardNode,
+      getClientRect: () => null,
+    });
+    document.caretRangeFromPoint = () => {
+      throw new Error('must not be called when the standard method is implemented');
+    };
+    expect(resolveCaretFromPoint(0, 0)).toEqual({ node: standardNode, offset: 1 });
+  });
+});
+
+/**
+ * `forwardTitlePageRemoteCursorClick`'s own comment (`titlePageCursors.ts`) has the full mechanism
+ * this exercises directly: looking through the widget's own hit-testable caret via a momentary
+ * `pointer-events` toggle, resolving the field position underneath, and collapsing the real DOM
+ * selection there. The wiring that gets a real mousedown *to* this function -- the hook's own
+ * `container.addEventListener('mousedown', ...)` listener -- is proven separately below, in
+ * `useTitlePagePresence`'s own describe block, by dispatching a real `MouseEvent`.
+ */
+describe('forwardTitlePageRemoteCursorClick', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(document, 'caretPositionFromPoint');
+  });
+
+  function renderTitlePageWithWidget() {
+    const { container } = render(
+      <TitlePageView awareness={undefined} onChange={vi.fn()} state={populatedState()} />,
+    );
+    const root = container.querySelector('.title-page')!;
+    const widget = buildRemoteCursorWidget({ name: 'Peer', color: '#123456' });
+    root.append(widget);
+    return { root, widget };
+  }
+
+  it('returns false and touches neither focus nor selection when the point resolves to nothing', () => {
+    const { root, widget } = renderTitlePageWithWidget();
+    document.caretPositionFromPoint = () => null;
+    const activeBefore = document.activeElement;
+
+    expect(forwardTitlePageRemoteCursorClick(root, widget, 5, 5)).toBe(false);
+    expect(document.activeElement).toBe(activeBefore);
+  });
+
+  it('returns false when the resolved point names no title-page field at all', () => {
+    const { root, widget } = renderTitlePageWithWidget();
+    const outside = document.createElement('div');
+    outside.textContent = 'not a field';
+    document.body.append(outside);
+    document.caretPositionFromPoint = () => ({
+      offset: 0,
+      offsetNode: outside.firstChild!,
+      getClientRect: () => null,
+    });
+
+    expect(forwardTitlePageRemoteCursorClick(root, widget, 5, 5)).toBe(false);
+  });
+
+  it('focuses the target field and collapses the real DOM selection at the resolved offset -- the position a plain click at those coordinates would have produced', () => {
+    const { root, widget } = renderTitlePageWithWidget();
+    const titleField = screen.getByRole('textbox', { name: 'Title page: title' });
+    const textNode = titleField.firstChild as Text;
+    document.caretPositionFromPoint = () => ({
+      offset: 4,
+      offsetNode: textNode,
+      getClientRect: () => null,
+    });
+
+    const handled = forwardTitlePageRemoteCursorClick(root, widget, 5, 5);
+
+    expect(handled).toBe(true);
+    expect(document.activeElement).toBe(titleField);
+    const selection = document.getSelection();
+    expect(selection?.anchorNode).toBe(textNode);
+    expect(selection?.anchorOffset).toBe(4);
+  });
+
+  it('restores the caret’s own pointer-events after the lookup, whether it finds a position or not -- the exact property hover depends on afterward', () => {
+    const { root, widget } = renderTitlePageWithWidget();
+    const caret = widget.querySelector('.remote-cursor-caret') as HTMLElement;
+    // A starting value distinguishable from both `'none'` and `''`, so this test cannot pass by
+    // coincidence of an empty string round-tripping through an empty string.
+    caret.style.pointerEvents = 'auto';
+    let seenDuringLookup: string | undefined;
+    document.caretPositionFromPoint = () => {
+      seenDuringLookup = caret.style.pointerEvents;
+      return null;
+    };
+
+    forwardTitlePageRemoteCursorClick(root, widget, 5, 5);
+
+    expect(seenDuringLookup).toBe('none');
+    expect(caret.style.pointerEvents).toBe('auto');
+  });
+});
+
 describe('useTitlePagePresence (through TitlePageView)', () => {
   it('renders no remote cursor at all with no awareness -- local, unconnected mode', () => {
     render(<TitlePageView awareness={undefined} onChange={vi.fn()} state={populatedState()} />);
@@ -385,6 +528,78 @@ describe('useTitlePagePresence (through TitlePageView)', () => {
     expect(widget?.closest('[data-title-page-field]')).toBeNull();
     // Its own direct parent is the title-page article itself.
     expect(widget?.parentElement).toHaveClass('title-page');
+  });
+
+  /**
+   * The click-through fix, proven through the hook's own real wiring -- a genuine DOM
+   * `MouseEvent` dispatched at the actual `.remote-cursor-caret` element, rather than calling
+   * `forwardTitlePageRemoteCursorClick` directly (that direct call is its own describe block
+   * above; this is the "does the hook's own mousedown listener actually receive it" half).
+   */
+  it('a real mousedown dispatched at a rendered remote cursor’s own caret element forwards the click, focuses the target field, and prevents the browser’s own default handling', () => {
+    const awareness = new Awareness(new Y.Doc());
+    const peer = otherAwareness();
+    awareness.states.set(peer.clientID, {
+      user: { name: 'Writer', color: '#16a34a', lastActiveAt: Date.now() },
+      titlePageCursor: { field: 'credit', offset: 0 },
+    });
+    render(<TitlePageView awareness={awareness} onChange={vi.fn()} state={populatedState()} />);
+
+    const caret = document.querySelector('.remote-cursor-caret');
+    expect(caret).not.toBeNull();
+
+    const creditField = screen.getByRole('textbox', { name: 'Title page: written by' });
+    const textNode = creditField.firstChild as Text;
+    document.caretPositionFromPoint = () => ({
+      offset: 3,
+      offsetNode: textNode,
+      getClientRect: () => null,
+    });
+
+    try {
+      const event = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 9,
+        clientY: 9,
+      });
+      caret!.dispatchEvent(event);
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(creditField);
+      const selection = document.getSelection();
+      expect(selection?.anchorNode).toBe(textNode);
+      expect(selection?.anchorOffset).toBe(3);
+      // The widget itself is untouched by handling its own click.
+      expect(document.querySelector('.remote-cursor')).not.toBeNull();
+    } finally {
+      Reflect.deleteProperty(document, 'caretPositionFromPoint');
+    }
+  });
+
+  it('a mousedown that lands on the title page but misses every remote-cursor widget is left completely alone', () => {
+    const awareness = new Awareness(new Y.Doc());
+    const peer = otherAwareness();
+    awareness.states.set(peer.clientID, {
+      user: { name: 'Writer', color: '#16a34a', lastActiveAt: Date.now() },
+      titlePageCursor: { field: 'credit', offset: 0 },
+    });
+    const { container } = render(
+      <TitlePageView awareness={awareness} onChange={vi.fn()} state={populatedState()} />,
+    );
+    const root = container.querySelector('.title-page')!;
+    const lookup = vi.fn(() => null);
+    document.caretPositionFromPoint = lookup;
+
+    try {
+      const event = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+      root.dispatchEvent(event);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(lookup).not.toHaveBeenCalled();
+    } finally {
+      Reflect.deleteProperty(document, 'caretPositionFromPoint');
+    }
   });
 
   it('a widget built while its peer is active loses the glow on its own once the window passes, with no further awareness change', async () => {
