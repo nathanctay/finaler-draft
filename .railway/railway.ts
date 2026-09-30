@@ -47,7 +47,16 @@ export default defineRailway(() => {
     },
     start: 'pnpm --filter @finaler-draft/landing start',
     replicas: { 'us-west2': 1 },
-    deploy: { restartPolicyType: 'ON_FAILURE', restartPolicyMaxRetries: 3 },
+    // `restartPolicyType` is deliberately not declared here. Railway's own default already is
+    // `ON_FAILURE` (its Restart Policy docs: "The default is On Failure with a maximum of 10
+    // restarts"), and Railway does not store a value matching its own default -- so declaring
+    // it produced a change this file proposed on every `railway config plan`, forever, that
+    // applying never resolved. Permanent phantom drift costs more than the explicitness was
+    // worth: a plan that always reports pending changes teaches a reader to skim past plan
+    // output, and that output is the only warning before omitting a variable from this file
+    // silently deletes it in production. `restartPolicyMaxRetries` stays declared because 3
+    // genuinely differs from the default 10, so Railway does store it and it does not drift.
+    deploy: { restartPolicyMaxRetries: 3 },
     env: { PUBLIC_APP_ORIGIN: preserve(), PUBLIC_SITE_URL: preserve() },
   });
   const app = service('app', {
@@ -63,7 +72,16 @@ export default defineRailway(() => {
     // `select 1` reachability check, not a schema check). See progress/deploy-config.md.
     preDeploy: 'pnpm --filter @finaler-draft/database db:migrate',
     replicas: { 'us-west2': 1 },
-    deploy: { restartPolicyType: 'ON_FAILURE', restartPolicyMaxRetries: 3 },
+    // `restartPolicyType` is deliberately not declared here. Railway's own default already is
+    // `ON_FAILURE` (its Restart Policy docs: "The default is On Failure with a maximum of 10
+    // restarts"), and Railway does not store a value matching its own default -- so declaring
+    // it produced a change this file proposed on every `railway config plan`, forever, that
+    // applying never resolved. Permanent phantom drift costs more than the explicitness was
+    // worth: a plan that always reports pending changes teaches a reader to skim past plan
+    // output, and that output is the only warning before omitting a variable from this file
+    // silently deletes it in production. `restartPolicyMaxRetries` stays declared because 3
+    // genuinely differs from the default 10, so Railway does store it and it does not drift.
+    deploy: { restartPolicyMaxRetries: 3 },
     env: {
       BETTER_AUTH_SECRET: preserve(),
       BETTER_AUTH_URL: preserve(),
@@ -115,7 +133,16 @@ export default defineRailway(() => {
     healthcheck: '/',
     healthcheckTimeout: 100,
     replicas: { 'us-west2': 1 },
-    deploy: { restartPolicyType: 'ON_FAILURE', restartPolicyMaxRetries: 3 },
+    // `restartPolicyType` is deliberately not declared here. Railway's own default already is
+    // `ON_FAILURE` (its Restart Policy docs: "The default is On Failure with a maximum of 10
+    // restarts"), and Railway does not store a value matching its own default -- so declaring
+    // it produced a change this file proposed on every `railway config plan`, forever, that
+    // applying never resolved. Permanent phantom drift costs more than the explicitness was
+    // worth: a plan that always reports pending changes teaches a reader to skim past plan
+    // output, and that output is the only warning before omitting a variable from this file
+    // silently deletes it in production. `restartPolicyMaxRetries` stays declared because 3
+    // genuinely differs from the default 10, so Railway does store it and it does not drift.
+    deploy: { restartPolicyMaxRetries: 3 },
     env: {
       BETTER_AUTH_SECRET: preserve(),
       BETTER_AUTH_URL: preserve(),
