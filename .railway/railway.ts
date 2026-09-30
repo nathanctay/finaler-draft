@@ -47,7 +47,16 @@ export default defineRailway(() => {
     },
     start: 'pnpm --filter @finaler-draft/landing start',
     replicas: { 'us-west2': 1 },
-    deploy: { restartPolicyType: 'ON_FAILURE', restartPolicyMaxRetries: 3 },
+    // `restartPolicyType` is deliberately not declared here. Railway's own default already is
+    // `ON_FAILURE` (its Restart Policy docs: "The default is On Failure with a maximum of 10
+    // restarts"), and Railway does not store a value matching its own default -- so declaring
+    // it produced a change this file proposed on every `railway config plan`, forever, that
+    // applying never resolved. Permanent phantom drift costs more than the explicitness was
+    // worth: a plan that always reports pending changes teaches a reader to skim past plan
+    // output, and that output is the only warning before omitting a variable from this file
+    // silently deletes it in production. `restartPolicyMaxRetries` stays declared because 3
+    // genuinely differs from the default 10, so Railway does store it and it does not drift.
+    deploy: { restartPolicyMaxRetries: 3 },
     env: { PUBLIC_APP_ORIGIN: preserve(), PUBLIC_SITE_URL: preserve() },
   });
   const app = service('app', {
@@ -63,11 +72,29 @@ export default defineRailway(() => {
     // `select 1` reachability check, not a schema check). See progress/deploy-config.md.
     preDeploy: 'pnpm --filter @finaler-draft/database db:migrate',
     replicas: { 'us-west2': 1 },
-    deploy: { restartPolicyType: 'ON_FAILURE', restartPolicyMaxRetries: 3 },
+    // `restartPolicyType` is deliberately not declared here. Railway's own default already is
+    // `ON_FAILURE` (its Restart Policy docs: "The default is On Failure with a maximum of 10
+    // restarts"), and Railway does not store a value matching its own default -- so declaring
+    // it produced a change this file proposed on every `railway config plan`, forever, that
+    // applying never resolved. Permanent phantom drift costs more than the explicitness was
+    // worth: a plan that always reports pending changes teaches a reader to skim past plan
+    // output, and that output is the only warning before omitting a variable from this file
+    // silently deletes it in production. `restartPolicyMaxRetries` stays declared because 3
+    // genuinely differs from the default 10, so Railway does store it and it does not drift.
+    deploy: { restartPolicyMaxRetries: 3 },
     env: {
       BETTER_AUTH_SECRET: preserve(),
       BETTER_AUTH_URL: preserve(),
       CLIENT_ORIGIN: preserve(),
+      // Signs the short-lived, collab-scoped connection token this service mints at
+      // `POST /api/collab/connection-token` and `collab` verifies on every WebSocket handshake
+      // (progress/collaboration-connection-tokens.md). **The value must be identical in both
+      // services.** A mismatch does not crash or warn -- every handshake simply fails as
+      // "Authentication required," which looks exactly like the cookie defect this token replaced,
+      // so it is the first thing to check if collaboration stops connecting. Deliberately distinct
+      // from `BETTER_AUTH_SECRET`: the two credentials protect different things, and sharing one
+      // secret would mean a leak of either compromised both.
+      COLLAB_TOKEN_SECRET: preserve(),
       DATABASE_URL: preserve(),
       MAIL_FROM_ADDRESS: preserve(),
       NODE_ENV: preserve(),
@@ -77,6 +104,15 @@ export default defineRailway(() => {
       STRIPE_PRICE_ID_MONTHLY: preserve(),
       STRIPE_SECRET_KEY: preserve(),
       STRIPE_WEBHOOK_SECRET: preserve(),
+      // The collaboration server's `wss://` address, read by `apps/web/src/collabConfig.ts`.
+      // Listed here because omitting a variable from this file deletes it on the next
+      // `railway config apply` -- and deleting this one does not fail loudly. It is a Vite
+      // *build-time* variable inlined into the bundle, and when it is absent `COLLAB_WS_URL` is
+      // `undefined`, which makes `App.tsx` fall back to a local, unconnected `Y.Doc`. Since slice 1
+      // deleted the whole-document `PUT`, that fallback has no save path at all: the editor would
+      // look entirely normal and persist nothing. Any deploy of this service must have this set
+      // before `pnpm build` runs, not after.
+      VITE_COLLAB_WS_URL: preserve(),
     },
   });
   // Collaboration slice 1 (progress/collaboration-slice-1.md): the Hocuspocus WebSocket server
@@ -97,11 +133,24 @@ export default defineRailway(() => {
     healthcheck: '/',
     healthcheckTimeout: 100,
     replicas: { 'us-west2': 1 },
-    deploy: { restartPolicyType: 'ON_FAILURE', restartPolicyMaxRetries: 3 },
+    // `restartPolicyType` is deliberately not declared here. Railway's own default already is
+    // `ON_FAILURE` (its Restart Policy docs: "The default is On Failure with a maximum of 10
+    // restarts"), and Railway does not store a value matching its own default -- so declaring
+    // it produced a change this file proposed on every `railway config plan`, forever, that
+    // applying never resolved. Permanent phantom drift costs more than the explicitness was
+    // worth: a plan that always reports pending changes teaches a reader to skim past plan
+    // output, and that output is the only warning before omitting a variable from this file
+    // silently deletes it in production. `restartPolicyMaxRetries` stays declared because 3
+    // genuinely differs from the default 10, so Railway does store it and it does not drift.
+    deploy: { restartPolicyMaxRetries: 3 },
     env: {
       BETTER_AUTH_SECRET: preserve(),
       BETTER_AUTH_URL: preserve(),
       CLIENT_ORIGIN: preserve(),
+      // The same secret `app` signs connection tokens with -- see that service's own comment on
+      // this variable. Required unconditionally here (this service has no unauthenticated path to
+      // fall back to), and the values must match exactly.
+      COLLAB_TOKEN_SECRET: preserve(),
       DATABASE_URL: preserve(),
       NODE_ENV: preserve(),
       PORT: preserve(),
