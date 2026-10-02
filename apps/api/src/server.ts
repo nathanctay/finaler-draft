@@ -7,6 +7,7 @@ import { createPostgresEntitlementStore } from './entitlementStore.js';
 import { loadRootEnvironment, shouldLoadRootEnvironment } from './environment.js';
 import { selectMailPort, type MailMessage } from '@finaler-draft/auth-server/mail';
 import { createPostgresProjectStore } from './projects.js';
+import { createPostgresRevisionStore } from './revisions.js';
 import { createStripeClient } from './stripeClient.js';
 import {
   createStripeIpAllowlist,
@@ -195,6 +196,13 @@ async function buildPersistentApp(
     // this wrapper gates and what it deliberately leaves untouched.
     projects: createEntitlementEnforcedProjectStore(createPostgresProjectStore(pool), entitlements),
     entitlements,
+    // Collaboration slice 4a. Deliberately the bare Postgres store, not entitlement-wrapped: a
+    // lapsed/restricted account still reads and exports every screenplay (plan.md), and
+    // `revisions.ts`'s own `createRevision` already gates the one write that genuinely needs
+    // edit rights (`kind: 'named'`) through project membership, independent of billing tier --
+    // entitlement's own axis is which *one* screenplay a restricted account may edit at all, a
+    // different question from whether a revision may be captured of one they can already edit.
+    revisions: createPostgresRevisionStore(pool),
     collab: collabTokenConfigured ? { secret: persistence.COLLAB_TOKEN_SECRET! } : undefined,
     stripe: stripeConfigured
       ? {

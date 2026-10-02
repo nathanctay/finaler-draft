@@ -1839,6 +1839,18 @@ select:focus-visible,
   margin: 0;
 }
 
+/* Collaboration slice 4a's historical-preview banner (App.tsx): a `.readonly-banner` variant that
+   must read as unmistakably distinct from both the live editor and the entitlement/sync banners
+   above -- not a colour-only distinction (the bold "Historical revision." lead-in carries the same
+   meaning without colour), but a visible one too, reusing the same blue accent
+   `--border-11`/`--border-12` already mark focus and the active Navigator tab with, rather than
+   inventing a second brand colour plan.md's "one functional accent color" argues against. Keeps
+   `.readonly-banner`'s own `--surface-06` background (which already has a `.dark` redefinition)
+   rather than introducing a second background token that would need one of its own. */
+.readonly-banner-historical {
+  border-left: 3px solid var(--border-12);
+}
+
 .readonly-banner .field-error {
   flex-basis: 100%;
 }
@@ -2126,7 +2138,8 @@ select:focus-visible,
   font-size: 12px;
 }
 
-.dialog-field input[type='number'] {
+.dialog-field input[type='number'],
+.dialog-field input[type='text'] {
   width: 100%;
   border: 1px solid var(--border-04);
   border-radius: 2px;
@@ -2278,6 +2291,33 @@ select:focus-visible,
 
 .deleted-page-section {
   margin-top: 32px;
+}
+
+/* Collaboration slice 4a's revision-history list
+   (routes/projects/$projectId.screenplays.$screenplayId.revisions.tsx): each row is a `Link` into
+   one immutable revision's read-only preview, styled the same way `.project-row-link` styles the
+   identical "whole row is a link into a detail view" pattern on the Projects page -- a title line
+   plus a muted meta line, not a bespoke third treatment. */
+.revision-row-link {
+  color: var(--text-17);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 4px;
+  text-decoration: none;
+}
+
+.revision-row-link:hover {
+  background: var(--surface-05);
+}
+
+.revision-row-title {
+  font-weight: 600;
+}
+
+.revision-row-meta {
+  color: var(--text-08);
+  font-size: 12px;
 }
 
 .deleted-page-section:first-of-type {

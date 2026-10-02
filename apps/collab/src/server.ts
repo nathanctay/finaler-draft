@@ -25,6 +25,7 @@ import {
   quarantineUpdate,
   updateCarriesNewContent,
 } from './quarantine.js';
+import { createIdleSessionRevisionScheduler, maybeCreateIdleSessionRevision } from './revisions.js';
 
 try {
   if (shouldLoadRootEnvironment(process.env)) {
@@ -47,6 +48,25 @@ try {
   // this already-bound function, the same shape `getActorId` had before it.
   const verifyToken = (token: string, now: Date) =>
     verifyConnectionToken(environment.COLLAB_TOKEN_SECRET, token, now);
+
+  // Collaboration slice 4a's "meaningful idle session" revision trigger (plan.md; see
+  // `revisions.ts`'s own comment for the chosen 10-minute threshold and its reasoning). One
+  // scheduler for this whole process, fed by every accepted edit via `onChange` below and torn
+  // down in `onDestroy`.
+  const idleSessionRevisions = createIdleSessionRevisionScheduler(
+    (screenplayId, epoch) => maybeCreateIdleSessionRevision(pool, { screenplayId, epoch }),
+    {
+      onError: (error, screenplayId) => {
+        console.error(
+          JSON.stringify({
+            event: 'idle_session_revision_failed',
+            screenplayId,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      },
+    },
+  );
 
   const server = new Server({
     extensions: [
@@ -172,6 +192,11 @@ try {
         actorId,
       });
       void document; // reconstruction reads the durable log, not this live object -- see updateLog.ts.
+      // Resets this screenplay's idle-session timer -- by construction, `onChange` only ever fires
+      // for a write that was actually applied to the live document (see this hook's own comment
+      // above on quarantine/`readOnly` connections never reaching here), so this is exactly "real
+      // editing activity happened just now," the one signal the idle-session trigger needs.
+      idleSessionRevisions.noteActivity(documentName, DEFAULT_EPOCH);
     },
     // Quarantine (progress/collaboration-offline-durable.md): the detection and retention half of
     // "accept the data, never grant editing access" for a reconnecting client whose connection
@@ -227,6 +252,7 @@ try {
     // `destroy()`, which awaits this hook via `this.hocuspocus.hooks('onDestroy', ...)`, before
     // ever calling `process.exit(0)`), so this always finishes before the process actually exits.
     async onDestroy() {
+      idleSessionRevisions.dispose();
       await pool.end();
     },
     port: environment.PORT,

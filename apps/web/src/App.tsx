@@ -67,6 +67,7 @@ import {
   type TitlePageState,
 } from './titlePageState.js';
 import { DocumentSettingsDialog } from './documentSettingsDialog.js';
+import { NamedRevisionDialog } from './namedRevisionDialog.js';
 import { OverflowMenu } from './components/OverflowMenu.js';
 import { ParticipantIndicator } from './components/ParticipantIndicator.js';
 import { Toast } from './components/Toast.js';
@@ -298,12 +299,49 @@ export interface EntitlementReadOnly {
   cooldownUntil?: string | undefined;
 }
 
+/**
+ * Set by the historical-preview route
+ * (`routes/projects/$projectId.screenplays.$screenplayId.revisions.$revisionId.tsx`) when `initial`
+ * is one immutable `document_revisions` snapshot rather than the live screenplay -- collaboration
+ * slice 4a's read-only historical preview (plan.md's "Collaboration, history, and restoration").
+ * `undefined` for every other caller, exactly like `entitlementReadOnly`, so this changes nothing
+ * about the live editor's existing behaviour.
+ *
+ * Reuses the identical `editingAllowed` gate `entitlementReadOnly` already established (see that
+ * type's own comment on why this is deliberately not a second read-only mechanism) -- both are
+ * additive reasons folded into the one flag that actually disables every editing affordance, and
+ * only one banner is ever shown at a time (this file's own comment on `awaitingFirstSync` explains
+ * the same pattern for the sync gate). What is genuinely different here, not merely re-skinned, is
+ * `collab` below: when this prop is set, `App` never constructs a `HocuspocusProvider` or an
+ * `IndexeddbPersistence`, regardless of `COLLAB_WS_URL` -- there is structurally no path from this
+ * render to the live Yjs document at all, not just a disabled one.
+ */
+export interface HistoricalRevisionInfo {
+  /** Shown verbatim in the read-only banner, e.g. "Historical revision from March 4, 2026, 3:04 PM"
+   * or, for a named milestone, its own label. Computed by the route, which knows the revision's
+   * `kind`/`label`/`createdAt`; `App` itself has no notion of revision metadata beyond this string. */
+  label: string;
+}
+
 export function App({
   entitlementReadOnly,
+  historicalRevision,
   initial = legacyInitial,
+  onOpenRevisionHistory,
 }: {
   entitlementReadOnly?: EntitlementReadOnly | undefined;
+  historicalRevision?: HistoricalRevisionInfo | undefined;
   initial?: PersistedScreenplay;
+  /**
+   * Set by the live screenplay route to open the revision-history list
+   * (`routes/projects/$projectId.screenplays.$screenplayId.revisions.tsx`). A callback, not a
+   * `Link` or a route string, so `App` itself stays free of any dependency on
+   * `@tanstack/react-router` -- the identical reason `entitlementReadOnly.onMakeEditable` is a
+   * callback rather than this component navigating on its own. Omitted by the historical-preview
+   * route (and every test that does not pass it), which is what keeps "History" from appearing
+   * while already viewing history.
+   */
+  onOpenRevisionHistory?: () => void;
 }) {
   const [panels, setPanels] = useState<Record<Panel, boolean>>({
     navigator: true,
@@ -413,9 +451,13 @@ export function App({
   //    classification anticipated). Unlike `'denied'`, this is not asserted to be permanent: a
   //    `synced` arriving after the timeout still wins and moves this straight to `'synced'`, since
   //    the underlying provider is still trying regardless of what this state says.
+  // `historicalRevision` also starts this permanently `'synced'`, for the identical reason
+  // `COLLAB_WS_URL` unset already does: `collab` below never constructs a real provider in that
+  // mode, so there is no handshake for this state to ever report on, and it must not sit at
+  // `'connecting'` forever waiting for one.
   const [syncState, setSyncState] = useState<
     'connecting' | 'synced' | 'offline' | 'denied' | 'timedOut'
-  >(COLLAB_WS_URL ? 'connecting' : 'synced');
+  >(COLLAB_WS_URL && historicalRevision === undefined ? 'connecting' : 'synced');
 
   // An export that fails *after* the projection was valid -- today, only `@finaler-draft/pdf`
   // rejecting on a character PDF's un-embedded standard Courier cannot encode (Cyrillic, Greek,
@@ -482,6 +524,7 @@ export function App({
   const editingAllowed =
     initialContent !== undefined &&
     entitlementReadOnly === undefined &&
+    historicalRevision === undefined &&
     (syncState === 'synced' || syncState === 'offline');
   const editorContent = useMemo(() => {
     if (initialContent === undefined) return initialContent;
@@ -509,6 +552,10 @@ export function App({
     () => initial.screenplay.documentSettings,
   );
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  // Collaboration slice 4a's "named milestones" revision trigger (plan.md). See
+  // `namedRevisionDialog.tsx`'s own comment for why this has a real pending/error state, unlike
+  // `settingsDialogOpen` above.
+  const [namedRevisionDialogOpen, setNamedRevisionDialogOpen] = useState(false);
   const fileMenuRef = useRef<HTMLDivElement>(null);
   const latestProjection = useRef<LocalScreenplayProjection | undefined>(undefined);
   // `main.tsx` applies the specification's fixed defaults once at bootstrap, before any
@@ -607,7 +654,14 @@ export function App({
   //    settings observer effect below follows the identical rule for `TITLE_PAGE_YJS_MAP`/
   //    `DOCUMENT_SETTINGS_YJS_MAP`.
   const collab = useMemo(() => {
-    if (initialContent === undefined || !COLLAB_WS_URL) {
+    // `historicalRevision` forces this branch unconditionally, regardless of `COLLAB_WS_URL` --
+    // structurally, not just behaviourally, the only branch that can ever run for a historical
+    // preview. `initial.id` here is the revision's own id (the route sets it that way), which is
+    // never a real screenplay id `HocuspocusProvider` could connect to even by accident: this
+    // branch simply never constructs one. The seeded `Y.Doc` below is local, in-memory, and never
+    // persisted anywhere (no `IndexeddbPersistence` either) -- it exists only to drive this
+    // read-only render and disappears the moment this component unmounts.
+    if (initialContent === undefined || !COLLAB_WS_URL || historicalRevision !== undefined) {
       return {
         doc: seedScreenplayYDoc(
           editorContent ?? unavailableEditorContent,
@@ -1394,6 +1448,11 @@ export function App({
     fileMenuRef.current?.querySelector<HTMLButtonElement>('.overflow-menu-trigger')?.focus();
   };
 
+  const closeNamedRevisionDialog = () => {
+    setNamedRevisionDialogOpen(false);
+    fileMenuRef.current?.querySelector<HTMLButtonElement>('.overflow-menu-trigger')?.focus();
+  };
+
   const scenes = useMemo(
     () => (projection.valid ? deriveScenes(projection.screenplay.blocks) : []),
     [projection],
@@ -1528,6 +1587,22 @@ export function App({
         error instanceof Error ? error.message : `${label} export failed for an unknown reason.`,
       );
     });
+    // Collaboration slice 4a's "revisions are created at ... exports" trigger (plan.md).
+    // Deliberately fire-and-forget, on its own, never awaited by -- or allowed to affect -- the
+    // download above: a writer's export must never fail, or even pause, because this bookkeeping
+    // call did. `historicalRevision === undefined` guards a genuine case, not a defensive
+    // no-op: in preview mode `initial.id` is a revision id, not a screenplay id, and
+    // `POST /api/screenplays/:id/revisions` has no screenplay to attach a new one to -- there is
+    // nothing this call could correctly record there. (Export-from-revision, and the record of it,
+    // is deliberately not built here -- see this slice's own progress notes for how the schema
+    // keeps it possible later.)
+    if (historicalRevision === undefined) {
+      void api
+        .createExportRevision(initial.id, label.toLowerCase() as 'docx' | 'fdx' | 'pdf')
+        .catch((error: unknown) => {
+          console.error(`${label} export revision failed:`, error);
+        });
+    }
   };
 
   // The sync gate's own banner reason, mutually exclusive with `entitlementReadOnly`'s (a
@@ -1556,7 +1631,11 @@ export function App({
   const applicationClassName = [
     'application',
     dark && 'dark',
-    (entitlementReadOnly || awaitingFirstSync || syncDenied || syncTimedOut) &&
+    (entitlementReadOnly ||
+      historicalRevision ||
+      awaitingFirstSync ||
+      syncDenied ||
+      syncTimedOut) &&
       'has-readonly-banner',
   ]
     .filter(Boolean)
@@ -1614,6 +1693,31 @@ export function App({
                 label: 'Document settings…',
                 onSelect: () => setSettingsDialogOpen(true),
               },
+              {
+                // Gated on `editingAllowed`, the same as "Document settings…" above: naming a
+                // milestone is offered wherever this screenplay is genuinely this writer's to
+                // change right now, not a second, independently-computed availability rule.
+                disabled: !editingAllowed,
+                disabledReason: !editingAllowed
+                  ? awaitingFirstSync
+                    ? 'Read-only: connecting to the collaboration server'
+                    : syncDenied
+                      ? 'Read-only: access to this screenplay could not be confirmed'
+                      : syncTimedOut
+                        ? 'Read-only: still trying to connect to the collaboration server'
+                        : 'Read-only: this screenplay is not your account’s editable one'
+                  : undefined,
+                label: 'Save named revision…',
+                onSelect: () => setNamedRevisionDialogOpen(true),
+              },
+              // Collaboration slice 4a. Present only on the live editor -- `onOpenRevisionHistory`
+              // is never supplied by the historical-preview route -- so "History" cannot open a
+              // second layer of history from inside history. Never disabled: history is always
+              // readable regardless of this screenplay's own entitlement/sync state, matching
+              // `api.listRevisions`' own membership-only (not edit-only) authorization.
+              ...(onOpenRevisionHistory
+                ? [{ label: 'Revision history…', onSelect: onOpenRevisionHistory }]
+                : []),
               {
                 // Disabled, not a no-op, when `projection` is invalid: the FDX exporter takes a
                 // canonical `Screenplay` (see `packages/fdx`'s own doc comment), which an invalid
@@ -1699,6 +1803,14 @@ export function App({
           settings={documentSettings}
         />
       )}
+      {namedRevisionDialogOpen && (
+        <NamedRevisionDialog
+          onClose={closeNamedRevisionDialog}
+          onSave={async (label) => {
+            await api.createNamedRevision(initial.id, label);
+          }}
+        />
+      )}
       {entitlementReadOnly && (
         // Persistent, not dismissible: plan.md's lapse policy means this state does not resolve
         // itself, so nothing here ever offers a way to hide it without actually addressing it.
@@ -1738,6 +1850,24 @@ export function App({
               {makeEditableError}
             </p>
           )}
+        </div>
+      )}
+      {historicalRevision && (
+        // Collaboration slice 4a's historical preview. Reuses `.readonly-banner`'s markup and grid
+        // mechanics (the lapse-chooser slice's own established pattern -- see the comment on
+        // `awaitingFirstSync` below for why this is deliberately not a second read-only mechanism)
+        // but is never mistakable for the live editor: `readonly-banner-historical` (styles.css)
+        // gives it its own accent and the text itself leads with "Historical revision", not a
+        // colour-only distinction. Persistent and non-dismissible, matching the entitlement
+        // banner's own reasoning -- there is nothing to dismiss into; this document stays this
+        // revision for as long as this page is open. No "Make this one editable" affordance
+        // exists here, ever: promoting a past revision to the live document is restore-as-current
+        // (plan.md), a separate, later feature this slice deliberately does not build.
+        <div className="readonly-banner readonly-banner-historical" role="status">
+          <p>
+            <strong>Historical revision.</strong> {historicalRevision.label} — this is a read-only
+            copy, separate from the live document.
+          </p>
         </div>
       )}
       {awaitingFirstSync && (

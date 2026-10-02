@@ -34,13 +34,17 @@ const BUDGETS = {
 //  - the entry chunk is whichever manifest entry has `isEntry: true`, plus the one CSS file it
 //    references;
 //  - the lazy editor chunk is resolved by walking the graph from the one route source file that
-//    lazily imports the editor (`$projectId.screenplays.$screenplayId.tsx`), rather than by
-//    guessing which built chunk "looks like" the editor.
+//    lazily imports the editor (`$projectId.screenplays.$screenplayId/index.tsx` -- collaboration
+//    slice 4a moved this from a flat file into a folder + `index.tsx` so the revision-history and
+//    historical-preview routes could become its siblings instead of its children; see
+//    progress/collaboration-revisions.md), rather than by guessing which built chunk "looks like"
+//    the editor.
 //
 // Any point below where the manifest does not have the exact shape this script expects raises
 // instead of guessing, per the brief: an artifact this script cannot confidently classify must
 // fail the build loudly, not pass silently.
-const EDITOR_ROUTE_SRC_PREFIX = 'src/routes/projects/$projectId.screenplays.$screenplayId.tsx';
+const EDITOR_ROUTE_SRC_PREFIX =
+  'src/routes/projects/$projectId.screenplays.$screenplayId/index.tsx';
 
 const webRoot = fileURLToPath(new URL('../apps/web/', import.meta.url));
 const distRoot = path.join(webRoot, 'dist');

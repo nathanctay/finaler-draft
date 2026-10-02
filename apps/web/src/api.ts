@@ -50,6 +50,23 @@ const deletedResponseSchema = z.object({
   projects: z.array(deletedProjectSchema),
   screenplays: z.array(deletedScreenplaySchema),
 });
+// Mirrors apps/api/src/app.ts's `revisionListItemSchema`/`revisionDetailSchema` field for field --
+// collaboration slice 4a's durable revision history and read-only historical preview.
+// `previewMetadata` stays `z.unknown()` here too, matching the server's own schema: it is a
+// display convenience this app never branches its own correctness on.
+const revisionListItemSchema = z.object({
+  id: z.string().uuid(),
+  kind: z.enum(['named', 'idle_session', 'structural_change', 'export']),
+  label: z.string().nullable(),
+  authoredBy: z.string().nullable(),
+  createdAt: z.string(),
+  previewMetadata: z.unknown(),
+});
+const revisionDetailSchema = revisionListItemSchema.extend({
+  screenplayId: z.string().uuid(),
+  screenplay: screenplaySchema,
+});
+const createRevisionResponseSchema = revisionListItemSchema.extend({ created: z.boolean() });
 // Mirrors apps/api/src/app.ts's `describeEntitlement` response shape field for field (see that
 // function's own comment for why `cooldownEndsAt` is server-derived rather than recomputed here
 // from `slotUpdatedAt` plus a client-side copy of the cooldown interval).
@@ -376,6 +393,32 @@ export const api = {
   // Redirects the browser to the returned url (Stripe-hosted Checkout or Customer Portal) --
   // callers never inspect these beyond `.url`; see externalRedirect.ts, the one place that
   // navigation actually happens.
+  // Collaboration slice 4a. Any project member -- reviewer included, matching plan.md's "a lapsed
+  // account keeps every screenplay readable and exportable" -- may list and read revisions; the
+  // server enforces this, not this client.
+  listRevisions: (screenplayId: string) =>
+    json(`/api/screenplays/${screenplayId}/revisions`, z.array(revisionListItemSchema)),
+  // Historical preview's one read: a single immutable revision's own canonical screenplay, never
+  // the live document. See routes/projects/$projectId.screenplays.$screenplayId.revisions.$revisionId.tsx.
+  revision: (screenplayId: string, revisionId: string) =>
+    json(`/api/screenplays/${screenplayId}/revisions/${revisionId}`, revisionDetailSchema),
+  // `jsonWithServerMessage`, matching `switchEditableScreenplay`/`createScreenplay` above: a
+  // refusal here (403, not owner/editor) carries the server's own explanation, shown inline by the
+  // caller rather than a bare "Request failed (403)".
+  createNamedRevision: (screenplayId: string, label: string) =>
+    jsonWithServerMessage(
+      `/api/screenplays/${screenplayId}/revisions`,
+      createRevisionResponseSchema,
+      { body: JSON.stringify({ kind: 'named', label }), method: 'POST' },
+    ),
+  // Fired best-effort alongside an FDX/DOCX/PDF download (App.tsx's `runExport`) -- never blocks
+  // or fails the download itself; the plain `json` helper is enough since the caller only ever
+  // logs a failure here, it never shows one to the writer.
+  createExportRevision: (screenplayId: string, format: 'docx' | 'fdx' | 'pdf') =>
+    json(`/api/screenplays/${screenplayId}/revisions`, createRevisionResponseSchema, {
+      body: JSON.stringify({ kind: 'export', format }),
+      method: 'POST',
+    }),
   createCheckoutSession: (plan: BillingPlan) =>
     json('/api/billing/checkout-session', billingSessionResponseSchema, {
       body: JSON.stringify({ plan }),
@@ -402,3 +445,5 @@ export type PersistedScreenplay = {
   screenplay: Screenplay;
   title: string;
 };
+export type RevisionListItem = z.infer<typeof revisionListItemSchema>;
+export type RevisionDetail = z.infer<typeof revisionDetailSchema>;

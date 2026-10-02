@@ -4,6 +4,7 @@ import { vi } from 'vitest';
 
 export const projectId = '216ec49a-a6c6-49ff-8e2e-5994d5ca91dd';
 export const screenplayId = '38d8a6db-43f1-4b47-b8fc-c15a96f9ac0e';
+export const revisionId = '5e7b2c1a-9d34-4e6a-8c0a-1b2c3d4e5f6a';
 
 type QueryState = { data: unknown; isError: boolean; isLoading: boolean };
 
@@ -54,11 +55,13 @@ export const routeState: {
    * every test written before this existed.
    */
   queries: Record<string, QueryState>;
+  revisionId: string;
   screenplayId: string;
 } = {
   editorMounts: 0,
   mutationError: false,
   mutationErrorValue: undefined,
+  revisionId,
   navigate: vi.fn(),
   query: { data: undefined, isError: false, isLoading: false },
   queries: {},
@@ -152,7 +155,11 @@ export async function reactRouterMock(
     ),
     Outlet: () => <div>Outlet</div>,
     useNavigate: () => routeState.navigate,
-    useParams: () => ({ projectId, screenplayId: routeState.screenplayId }),
+    useParams: () => ({
+      projectId,
+      revisionId: routeState.revisionId,
+      screenplayId: routeState.screenplayId,
+    }),
     useRouter: () => ({ navigate: routeState.navigate }),
   };
 }
@@ -170,14 +177,18 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
   return {
     App: ({
       entitlementReadOnly,
+      historicalRevision,
       initial,
+      onOpenRevisionHistory,
     }: {
       entitlementReadOnly?: {
         cooldownUntil?: string;
         message: string;
         onMakeEditable?: () => Promise<void>;
       };
+      historicalRevision?: { label: string };
       initial: { title: string };
+      onOpenRevisionHistory?: () => void;
     }) => {
       const [mountId] = react.useState(() => ++routeState.editorMounts);
       return (
@@ -205,6 +216,17 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
               )}
             </div>
           )}
+          {/* Collaboration slice 4a. A route test asserts on this label (historical preview)
+              and on this button firing `onOpenRevisionHistory` (the live editor), without either
+              needing the real, Tiptap-backed `App`. */}
+          {historicalRevision && (
+            <p data-testid="historical-revision">{historicalRevision.label}</p>
+          )}
+          {onOpenRevisionHistory && (
+            <button onClick={onOpenRevisionHistory} type="button">
+              Revision history…
+            </button>
+          )}
         </div>
       );
     },
@@ -218,6 +240,7 @@ export function resetRouteHarness() {
   routeState.navigate.mockReset();
   routeState.query = { data: undefined, isError: false, isLoading: false };
   routeState.queries = {};
+  routeState.revisionId = revisionId;
   routeState.screenplayId = screenplayId;
   invalidateQueries.mockReset();
   clearQueryCache.mockReset();

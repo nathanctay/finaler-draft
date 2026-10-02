@@ -31,6 +31,7 @@ import {
   createScreenplayInput,
   renameInput,
 } from './projects.js';
+import { createRevisionInput, type RevisionStore } from './revisions.js';
 import {
   createCheckoutSession,
   createPortalSession,
@@ -160,6 +161,15 @@ export interface BuildAppOptions {
    * to accommodate it.
    */
   rateLimit?: { max: number; timeWindowMs: number };
+  /**
+   * Backs `GET /api/screenplays/:id/revisions`, `GET /api/screenplays/:id/revisions/:revisionId`,
+   * and `POST /api/screenplays/:id/revisions` -- collaboration slice 4a's durable revision history
+   * and read-only historical preview. See `revisions.ts`'s own module comment for why this is a
+   * separate option from `projects` (it never touches the live Yjs document, and its own
+   * authorization shape -- membership-only for reads and exports, owner/editor for naming a
+   * milestone -- is not identical to `ProjectStore`'s).
+   */
+  revisions?: RevisionStore;
 }
 
 const idParam = z.object({ id: z.string().uuid() });
@@ -284,6 +294,29 @@ const deletedResponseSchema = z.object({
   projects: z.array(deletedProjectSchema),
   screenplays: z.array(deletedScreenplaySchema),
 });
+// Mirrors `RevisionStore`'s own `RevisionListItem`/`RevisionDetail` shapes field for field, the
+// same convention every schema in this file follows. `previewMetadata` is `z.unknown()`
+// deliberately -- it is a display convenience (`documentRevisions.previewMetadata`'s own schema
+// comment), never something a client branches its own correctness on, so this route never grows a
+// reason to pin its exact shape the way every other field here is pinned.
+const revisionListItemSchema = z.object({
+  id: z.string().uuid(),
+  kind: z.enum(['named', 'idle_session', 'structural_change', 'export']),
+  label: z.string().nullable(),
+  authoredBy: z.string().nullable(),
+  createdAt: z.string(),
+  previewMetadata: z.unknown(),
+});
+const revisionDetailSchema = revisionListItemSchema.extend({
+  screenplayId: z.string().uuid(),
+  screenplay: screenplaySchema,
+});
+// `created` distinguishes "this call inserted a new revision" from "the screenplay's canonical
+// hash hadn't changed, so the existing latest revision was returned instead" -- see
+// `revisions.ts`'s own `CreateResult` comment. `POST /api/screenplays/:id/revisions` always
+// answers 200, never 201: whether a new row was actually written is exactly what `created` tells
+// the caller, so the status code does not also have to carry that distinction.
+const createRevisionResponseSchema = revisionListItemSchema.extend({ created: z.boolean() });
 // Mirrors `describeEntitlement`'s return shape below field for field, for the same reason every
 // other response schema in this file mirrors its handler's actual return value: a schema whose
 // fields don't match would silently strip data rather than fail loudly.
@@ -763,7 +796,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
 
   if (
     options.auth &&
-    (options.projects || options.entitlements || options.billing || options.collab)
+    (options.projects ||
+      options.entitlements ||
+      options.billing ||
+      options.collab ||
+      options.revisions)
   ) {
     // Runs as `preValidation`, not `preHandler`. Fastify's request lifecycle runs
     // preValidation -> schema validation -> preHandler -> the route handler, and before this
@@ -1167,6 +1204,70 @@ export async function buildApp(options: BuildAppOptions = {}) {
       '/api/deleted',
       { schema: { response: { 200: deletedResponseSchema } } },
       async (request) => options.projects!.listDeleted(request.actorId!),
+    );
+  }
+
+  if (options.auth && options.revisions) {
+    typedApp.get(
+      '/api/screenplays/:id/revisions',
+      {
+        schema: {
+          params: idParam,
+          response: { 200: z.array(revisionListItemSchema), 404: errorResponseSchema },
+        },
+      },
+      async (request, reply) => {
+        const result = await options.revisions!.listRevisions(request.actorId!, request.params.id);
+        if (result === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
+        return result;
+      },
+    );
+    // Historical preview's one addressable route (`revisionScreenplayId`/`revisionId` in a URL is
+    // safe addressable state; screenplay text is not -- plan.md). The response carries the
+    // revision's own immutable `screenplay`, never anything from the live, mutable
+    // `screenplays.canonical_screenplay` row.
+    typedApp.get(
+      '/api/screenplays/:id/revisions/:revisionId',
+      {
+        schema: {
+          params: idParam.extend({ revisionId: z.string().uuid() }),
+          response: { 200: revisionDetailSchema, 404: errorResponseSchema },
+        },
+      },
+      async (request, reply) => {
+        const result = await options.revisions!.getRevision(
+          request.actorId!,
+          request.params.id,
+          request.params.revisionId,
+        );
+        if (result === 'missing') return reply.code(404).send({ error: 'Revision not found' });
+        return result;
+      },
+    );
+    typedApp.post(
+      '/api/screenplays/:id/revisions',
+      {
+        schema: {
+          params: idParam,
+          body: createRevisionInput,
+          response: {
+            200: createRevisionResponseSchema,
+            403: errorResponseSchema,
+            404: errorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        const result = await options.revisions!.createRevision(
+          request.actorId!,
+          request.params.id,
+          request.body,
+        );
+        if (result === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
+        if (result === 'forbidden')
+          return reply.code(403).send({ error: 'Screenplay editor access required' });
+        return result;
+      },
     );
   }
   if (options.serveClient) {
