@@ -284,6 +284,93 @@ export const documentYjsQuarantinedUpdates = pgTable(
   ],
 );
 
+// Collaboration slice 4a: durable, immutable revisions (plan.md's "Collaboration, history, and
+// restoration" -> "Durable storage" and "Separate concepts"). A revision is a point-in-time copy
+// of the canonical projection, written once and never updated -- the opposite of
+// `document_yjs_updates`/`document_yjs_checkpoints` above, which exist purely to reconstruct the
+// *live* document, and of `screenplays.canonical_screenplay`, which is the live, continuously
+// overwritten projection those tables feed. `apps/collab/src/revisions.ts` and
+// `apps/api/src/revisions.ts` are the only writers.
+//
+// **Naming.** Same reasoning as `documentYjsUpdates` above, and the same conclusion: plan.md's own
+// schema sketch names the foreign key `document_id`; this codebase has no `documents` table, so it
+// stays `screenplay_id`, matching every sibling table.
+//
+// **What this table is not.** plan.md's "Separate concepts" is explicit that revision history,
+// Track Changes, and production revision sets "must never share one implementation or user
+// interface state." This table carries no per-block author attribution (that is Track Changes) and
+// models a revision as a single immutable snapshot, never a set of proposed changes (that is also
+// Track Changes). There is no "accept/reject" state anywhere here.
+export const revisionKind = pgEnum('revision_kind', [
+  'named',
+  'idle_session',
+  'structural_change',
+  'export',
+]);
+
+export const documentRevisions = pgTable(
+  'document_revisions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    screenplayId: uuid('screenplay_id')
+      .notNull()
+      .references(() => screenplays.id, { onDelete: 'cascade' }),
+    // Carried for the same forward-looking reason `documentYjsUpdates.epoch` was introduced ahead
+    // of need: slice 5 (restore-as-current) is an epoch cutover, and a revision written under one
+    // epoch must stay attributable to that epoch even after a restore moves the document on to the
+    // next one. Fixed at `DEFAULT_EPOCH` (0) by every writer today, identically to the two tables
+    // above.
+    sourceEpoch: integer('source_epoch').notNull().default(0),
+    kind: revisionKind('kind').notNull(),
+    // Null for every automatic kind (`idle_session`, `structural_change`, `export`) -- there is no
+    // writer-authored label for those, and inventing one (e.g. a timestamp string) would just be
+    // `createdAt` restated as text. Required, non-empty, application-enforced for `named`.
+    label: text('label'),
+    // Nullable for the identical reason `documentYjsUpdates.authenticatedActorId` is: an automatic
+    // revision has no single human author (an idle-session revision reflects whoever edited during
+    // that session, not one actor performing this specific write), and `onDelete: 'set null'` keeps
+    // a deleted user's past revisions in history with authorship merely un-attributed, rather than
+    // the revision itself disappearing along with the account that (partly) produced it.
+    authoredBy: text('authored_by').references(() => user.id, { onDelete: 'set null' }),
+    // The full canonical projection at the moment this revision was captured -- deliberately a
+    // second, independent copy of the same shape `screenplays.canonical_screenplay` holds, not a
+    // foreign key or a diff against it: `screenplays.canonical_screenplay` is mutable and will have
+    // moved on by the time anything reads this row. A revision is immutable specifically because it
+    // owns its own copy.
+    canonicalScreenplay: jsonb('canonical_screenplay').notNull(),
+    // Deliberately the *canonical* hash (sha256 of the serialized `canonicalScreenplay`, identical
+    // algorithm to `screenplays.canonical_hash`), never a hash of anything pagination produces.
+    // `(MORE)`/`CONT'D` are derived at render time and never written into `canonicalScreenplay` (see
+    // that column's own comment on `screenplays` and plan.md's "the canonical model already forbids
+    // persisting renderer output"), so this hash is stable under repagination by construction, not
+    // by a special case here -- see `revisions.test.ts`'s `hash stability under layout` suite for
+    // the proof. This is also the column every automatic-revision writer dedupes on: a new
+    // automatic revision is never inserted when this would equal the screenplay's latest existing
+    // revision's own hash (`insertRevisionIfChanged`, `revisions.ts`) -- the direct fix for
+    // plan.md's stated trap, "If pagination mutates the document, the hash changes when nobody
+    // edited anything, and revision history fills with automatic commits."
+    canonicalHash: varchar('canonical_hash', { length: 64 }).notNull(),
+    // Plain-text rendering of the same snapshot (`@finaler-draft/screenplay`'s
+    // `screenplayToPlainText`), stored once at write time rather than recomputed on every read --
+    // this is what a future screenplay-aware diff (slice 4b, explicitly out of this slice's scope)
+    // and full-text search over history would read, and what makes a revision's content legible
+    // without re-parsing `canonicalScreenplay` first.
+    renderedText: text('rendered_text').notNull(),
+    // A small, denormalized summary (`{ sceneCount, blockCount }` today) computed once at write
+    // time so a revision list can render without deserializing and re-deriving from the full
+    // `canonicalScreenplay` blob for every row. Nullable because it is a display convenience, not a
+    // correctness-bearing field -- nothing in restoration or export-fidelity ever depends on it.
+    previewMetadata: jsonb('preview_metadata'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    // `createdAt` (not `id`) is the ordering column every reader wants ("history, newest first";
+    // "the revision immediately before this one") -- `id` is a random `uuid`, not a sequence, so it
+    // carries no chronological meaning to index on.
+    index('document_revisions_screenplay_id_index').on(table.screenplayId, table.createdAt),
+  ],
+);
+
 // Stripe's own Subscription.Status enum (esm/resources/Subscriptions.d.ts in the installed
 // `stripe` package, API version 2026-07-29.dahlia), reproduced here rather than imported: this
 // package has no dependency on the Stripe SDK, and a database enum is schema, not a client

@@ -11,6 +11,7 @@ export default defineConfig({
         'src/presence.ts',
         'src/updateLog.ts',
         'src/quarantine.ts',
+        'src/revisions.ts',
       ],
       thresholds: { lines: 80, functions: 80, branches: 80, statements: 80 },
     },

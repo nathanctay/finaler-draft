@@ -7,21 +7,21 @@ import {
   resetRouteHarness,
   routeState,
   screenplayId,
-} from '../../test/routeHarness.js';
-import { MessageApiError } from '../../api.js';
+} from '../../../test/routeHarness.js';
+import { MessageApiError } from '../../../api.js';
 
 vi.mock('@tanstack/react-query', async () =>
-  (await import('../../test/routeHarness.js')).reactQueryMock(),
+  (await import('../../../test/routeHarness.js')).reactQueryMock(),
 );
 vi.mock('@tanstack/react-router', async (importOriginal) =>
-  (await import('../../test/routeHarness.js')).reactRouterMock(importOriginal),
+  (await import('../../../test/routeHarness.js')).reactRouterMock(importOriginal),
 );
-vi.mock('../../App.js', async () =>
-  (await import('../../test/routeHarness.js')).editorModuleMock(),
+vi.mock('../../../App.js', async () =>
+  (await import('../../../test/routeHarness.js')).editorModuleMock(),
 );
 
-const { Route } = await import('./$projectId.screenplays.$screenplayId.js');
-const { api } = await import('../../api.js');
+const { Route } = await import('./index.js');
+const { api } = await import('../../../api.js');
 const ScreenplayPage = Route.options.component!;
 
 /** Sets both concurrent queries this route now makes -- see routeHarness.tsx's own comment on
@@ -137,6 +137,30 @@ describe('screenplay page', () => {
     rerender(<ScreenplayPage />);
 
     expect(await screen.findByTestId('editor-instance')).toHaveTextContent('2:Route B');
+  });
+
+  it('navigates to the revision-history route when the editor requests it', async () => {
+    setQueries({
+      id: screenplayId,
+      projectId,
+      screenplay: {
+        annotations: [],
+        blocks: [],
+        id: screenplayId,
+        schemaVersion: 1,
+        title: 'A Working Draft',
+        titlePages: [],
+      },
+      title: 'A Working Draft',
+      version: 1,
+    });
+    render(<ScreenplayPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Revision history…' }));
+
+    expect(routeState.navigate).toHaveBeenCalledWith({
+      params: { projectId, screenplayId },
+      to: '/projects/$projectId/screenplays/$screenplayId/revisions',
+    });
   });
 
   describe('entitlement-driven editability', () => {

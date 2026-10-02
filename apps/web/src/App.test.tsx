@@ -14,7 +14,7 @@ import {
   type TitlePage,
 } from '@finaler-draft/screenplay';
 import { App } from './App.js';
-import { MessageApiError, type PersistedScreenplay } from './api.js';
+import { api, MessageApiError, type PersistedScreenplay } from './api.js';
 import { pageStackMinHeightIn } from './pagination.js';
 import * as screenplayEditorModule from './screenplayEditor.js';
 import {
@@ -34,6 +34,34 @@ import {
 const firstActionId = 'ba53c2dc-10a6-46d7-a409-9aabbff7cf5d';
 const firstSceneId = '2175a1b6-8d05-4e6e-bac7-e471e8df33a1';
 const transitionId = 'd01faf47-64e7-4f7c-853a-3c6ace1464ad';
+
+/**
+ * Stubs the global `fetch` `runExport` (App.tsx) uses for its own best-effort, fire-and-forget
+ * `api.createExportRevision` call -- collaboration slice 4a's "revisions are created at ...
+ * exports" trigger. Without this, every export-download test below reaches the real global
+ * `fetch` with a relative URL and no server behind it, which Node's own `fetch` rejects
+ * synchronously ("Failed to parse URL") -- caught and logged by `runExport`'s own `.catch`, so it
+ * never fails a test, but it is real, unrelated console noise this stub exists to remove. Returns
+ * the mock so a test that wants to assert the call itself (format, screenplay id) still can.
+ */
+function stubExportRevisionFetch() {
+  const fetchMock = vi.fn().mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        id: '00000000-0000-4000-8000-0000000000f1',
+        kind: 'export',
+        label: null,
+        authoredBy: 'actor-1',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        previewMetadata: null,
+        created: true,
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ),
+  );
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
 
 function getBlock(canvas: HTMLElement, id: string): HTMLElement {
   const block = canvas.querySelector<HTMLElement>(`[data-block-id="${id}"]`);
@@ -1908,11 +1936,12 @@ describe('an invalid projection is never silent', () => {
 });
 
 describe('FDX download', () => {
-  it('downloads the current screenplay as FDX from the File menu', async () => {
+  it('downloads the current screenplay as FDX from the File menu, and records an export revision', async () => {
     const objectUrl = 'blob:mock-fdx-url';
     const createObjectURL = vi.fn().mockReturnValue(objectUrl);
     const revokeObjectURL = vi.fn();
     vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL });
+    const fetchMock = stubExportRevisionFetch();
     const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
     const appendSpy = vi.spyOn(document.body, 'appendChild');
 
@@ -1941,6 +1970,15 @@ describe('FDX download', () => {
     expect((anchorCall?.[0] as HTMLAnchorElement).download).toBe('Downloadable Draft.fdx');
     expect(clickSpy).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith(objectUrl);
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/screenplays/9c7c5f7b-c2f0-47a0-a639-dfd0c5702b87/revisions',
+        expect.objectContaining({
+          body: JSON.stringify({ kind: 'export', format: 'fdx' }),
+          method: 'POST',
+        }),
+      ),
+    );
 
     vi.unstubAllGlobals();
     clickSpy.mockRestore();
@@ -1993,6 +2031,7 @@ describe('DOCX download', () => {
     const createObjectURL = vi.fn().mockReturnValue(objectUrl);
     const revokeObjectURL = vi.fn();
     vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL });
+    stubExportRevisionFetch();
     const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
     const appendSpy = vi.spyOn(document.body, 'appendChild');
 
@@ -2070,6 +2109,7 @@ describe('PDF download', () => {
     const createObjectURL = vi.fn().mockReturnValue(objectUrl);
     const revokeObjectURL = vi.fn();
     vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL });
+    stubExportRevisionFetch();
     const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
     const appendSpy = vi.spyOn(document.body, 'appendChild');
 
@@ -2141,6 +2181,80 @@ describe('PDF download', () => {
 
     consoleError.mockRestore();
     vi.doUnmock('./pdfDownload.js');
+  });
+});
+
+describe('revision history entry point', () => {
+  const script = persistedScreenplay(
+    '3333aaaa-0000-4000-8000-000000000003',
+    'A Working Draft',
+    'INT. APARTMENT - MORNING',
+  );
+
+  it('offers "Revision history…" only when the route supplies onOpenRevisionHistory, and calls it on select', async () => {
+    const user = userEvent.setup();
+    const onOpenRevisionHistory = vi.fn();
+    render(<App initial={script} onOpenRevisionHistory={onOpenRevisionHistory} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    const item = screen.getByRole('menuitem', { name: 'Revision history…' });
+    expect(item).toBeEnabled();
+
+    await user.click(item);
+    expect(onOpenRevisionHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits "Revision history…" entirely when the route supplies no callback', async () => {
+    const user = userEvent.setup();
+    render(<App initial={script} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    expect(screen.queryByRole('menuitem', { name: 'Revision history…' })).not.toBeInTheDocument();
+  });
+});
+
+describe('named revision saving', () => {
+  const script = persistedScreenplay(
+    '4444aaaa-0000-4000-8000-000000000004',
+    'A Working Draft',
+    'INT. APARTMENT - MORNING',
+  );
+
+  it('opens "Save named revision…" from the File menu, calls the API with the screenplay id and trimmed label, and closes on success', async () => {
+    const createSpy = vi.spyOn(api, 'createNamedRevision').mockResolvedValue({
+      id: 'rev-1',
+      kind: 'named',
+      label: 'Draft 2',
+      authoredBy: 'actor-1',
+      createdAt: new Date().toISOString(),
+      previewMetadata: null,
+      created: true,
+    });
+    const user = userEvent.setup();
+    render(<App initial={script} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Save named revision…' }));
+    const dialog = screen.getByRole('dialog', { name: 'Save named revision' });
+    await user.type(within(dialog).getByRole('textbox', { name: 'Revision label' }), 'Draft 2');
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(createSpy).toHaveBeenCalledWith(script.id, 'Draft 2'));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'File menu' })).toHaveFocus();
+    createSpy.mockRestore();
+  });
+
+  it('disables "Save named revision…" for the identical reasons "Document settings…" is disabled', async () => {
+    const user = userEvent.setup();
+    render(<App entitlementReadOnly={{ message: 'Read-only for this test.' }} initial={script} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    expect(screen.getByRole('menuitem', { name: 'Save named revision…' })).toBeDisabled();
   });
 });
 

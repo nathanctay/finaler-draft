@@ -1,11 +1,11 @@
-import { createFileRoute, useParams } from '@tanstack/react-router';
+import { createFileRoute, useNavigate, useParams } from '@tanstack/react-router';
 import { z } from 'zod';
-import { api, type PersistedScreenplay } from '../../api.js';
+import { api, type PersistedScreenplay } from '../../../api.js';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { lazy, Suspense } from 'react';
-import type { EntitlementReadOnly } from '../../App.js';
+import type { EntitlementReadOnly } from '../../../App.js';
 
-export const Route = createFileRoute('/projects/$projectId/screenplays/$screenplayId')({
+export const Route = createFileRoute('/projects/$projectId/screenplays/$screenplayId/')({
   component: ScreenplayPage,
   params: {
     parse: (params) =>
@@ -13,10 +13,13 @@ export const Route = createFileRoute('/projects/$projectId/screenplays/$screenpl
   },
 });
 
-const EditorWorkspace = lazy(async () => ({ default: (await import('../../App.js')).App }));
+const EditorWorkspace = lazy(async () => ({ default: (await import('../../../App.js')).App }));
 
 function ScreenplayPage() {
-  const { screenplayId } = useParams({ from: '/projects/$projectId/screenplays/$screenplayId' });
+  const { projectId, screenplayId } = useParams({
+    from: '/projects/$projectId/screenplays/$screenplayId/',
+  });
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   // This query is intentionally consumed once. The editor owns the immutable route snapshot thereafter.
   const screenplay = useQuery({
@@ -100,6 +103,12 @@ function ScreenplayPage() {
         entitlementReadOnly={entitlementReadOnly}
         initial={screenplay.data as PersistedScreenplay}
         key={screenplayId}
+        onOpenRevisionHistory={() =>
+          void navigate({
+            params: { projectId, screenplayId },
+            to: '/projects/$projectId/screenplays/$screenplayId/revisions',
+          })
+        }
       />
     </Suspense>
   );

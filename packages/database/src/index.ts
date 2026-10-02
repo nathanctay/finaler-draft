@@ -5,6 +5,22 @@ import * as schema from './schema.js';
 export { schema };
 export type Database = NodePgDatabase<typeof schema>;
 
+// Collaboration slice 4a: the shared revision write/read path both `apps/collab` (automatic
+// revisions) and `apps/api` (named/export revisions) depend on -- see `revisions.ts`'s own module
+// comment on why the dedupe invariant specifically must live in exactly one place.
+export {
+  getRevisionById,
+  insertRevisionIfChanged,
+  latestRevision,
+  listRevisionsForScreenplay,
+  type InsertRevisionParams,
+  type InsertRevisionResult,
+  type Queryable as RevisionQueryable,
+  type RevisionKind,
+  type RevisionRow,
+  type RevisionWithScreenplay,
+} from './revisions.js';
+
 export function createDatabase(connectionString: string) {
   const pool = new Pool({
     connectionString,

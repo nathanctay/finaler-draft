@@ -10,7 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:integration": "node ../api/scripts/require-test-database.mjs && vitest run src/collaboration.integration.test.ts src/gracefulShutdown.integration.test.ts"
+    "test:integration": "node ../api/scripts/require-test-database.mjs && vitest run src/collaboration.integration.test.ts src/gracefulShutdown.integration.test.ts src/revisions.integration.test.ts"
   },
   "dependencies": {
     "@finaler-draft/auth-server": "workspace:*",

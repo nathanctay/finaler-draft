@@ -16,6 +16,7 @@ import {
 } from '@finaler-draft/screenplay-editor';
 import * as Y from 'yjs';
 import { createCheckpoint, reconstructDocumentState, writeCheckpoint } from './updateLog.js';
+import { maybeCreateStructuralChangeRevision } from './revisions.js';
 
 /**
  * The collaboration epoch this slice writes and reads exclusively. `document_yjs_updates`/
@@ -277,6 +278,26 @@ export function createStore(pool: Pool) {
           where id = $3`,
         [canonicalJson, canonicalHash(canonicalJson), documentName],
       );
+      // Collaboration slice 4a's "major structural change" revision trigger (plan.md). Runs after
+      // the canonical projection above has already been persisted, on the exact same valid
+      // projection, and is deliberately non-fatal to this debounced save: a bug in revision
+      // creation must never regress the primary write this function exists for. See
+      // `revisions.ts`'s own comment for why this measurement, not a bare hash comparison, decides
+      // whether to *attempt* a write, and why `insertRevisionIfChanged`'s dedupe remains the actual
+      // authority on whether a row is created.
+      await maybeCreateStructuralChangeRevision(pool, {
+        screenplayId: documentName,
+        epoch: DEFAULT_EPOCH,
+        screenplay: projection.screenplay,
+      }).catch((error: unknown) => {
+        console.error(
+          JSON.stringify({
+            event: 'structural_change_revision_failed',
+            documentName,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      });
     }
   };
 }

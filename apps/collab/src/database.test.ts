@@ -31,12 +31,26 @@ vi.mock('./updateLog.js', () => ({
   createCheckpoint: vi.fn(),
 }));
 
+// Collaboration slice 4a's structural-change revision trigger (`revisions.ts`, called from
+// `createStore` below) is proven on its own terms in `revisions.test.ts`, against a real model of
+// `document_revisions` -- mocked here for the identical separation-of-concerns reason `updateLog.js`
+// is mocked above: this file's own `fakePool` only models the `screenplays` table queries
+// `database.ts` issues directly, and has no reason to also grow a fake `document_revisions` table
+// just to keep `createStore`'s own tests passing.
+vi.mock('./revisions.js', () => ({
+  maybeCreateStructuralChangeRevision: vi.fn(),
+}));
+
 import { createFetch, createStore, DEFAULT_EPOCH } from './database.js';
 import { reconstructDocumentState, writeCheckpoint, createCheckpoint } from './updateLog.js';
+import { maybeCreateStructuralChangeRevision } from './revisions.js';
 
 const mockReconstructDocumentState = reconstructDocumentState as ReturnType<typeof vi.fn>;
 const mockWriteCheckpoint = writeCheckpoint as ReturnType<typeof vi.fn>;
 const mockCreateCheckpoint = createCheckpoint as ReturnType<typeof vi.fn>;
+const mockMaybeCreateStructuralChangeRevision = maybeCreateStructuralChangeRevision as ReturnType<
+  typeof vi.fn
+>;
 
 /** A minimal screenplay this editor can actually represent -- `editorContentFromScreenplay`
  * (called inside `createFetch`'s seed path) rejects more than one title page, annotations, dual
@@ -93,6 +107,7 @@ beforeEach(() => {
   mockReconstructDocumentState.mockReset();
   mockWriteCheckpoint.mockReset();
   mockCreateCheckpoint.mockReset();
+  mockMaybeCreateStructuralChangeRevision.mockReset().mockResolvedValue(undefined);
 });
 
 describe('createFetch', () => {
@@ -372,6 +387,36 @@ describe('createStore', () => {
     const persisted = JSON.parse(updateCall!.values![0] as string);
     expect(persisted.titlePages).toEqual([liveTitlePage]);
     expect(persisted.documentSettings).toEqual(liveSettings);
+    // The structural-change revision trigger runs on the exact same valid projection just
+    // persisted above -- see `revisions.test.ts` for what it does with it.
+    expect(mockMaybeCreateStructuralChangeRevision).toHaveBeenCalledWith(pool, {
+      screenplayId: screenplay.id,
+      epoch: DEFAULT_EPOCH,
+      screenplay: persisted,
+    });
+  });
+
+  it('never regresses the canonical write when the structural-change trigger itself throws', async () => {
+    const screenplay = compatibleScreenplay();
+    const { pool } = fakePool({
+      screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
+    });
+    mockCreateCheckpoint.mockResolvedValue({ throughSequence: 1 });
+    mockMaybeCreateStructuralChangeRevision.mockRejectedValue(new Error('boom'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await expect(
+      createStore(pool)({
+        documentName: screenplay.id,
+        document: bareDoc(),
+        state: Buffer.from(Y.encodeStateAsUpdate(bareDoc())),
+      } as never),
+    ).resolves.toBeUndefined();
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('structural_change_revision_failed'),
+    );
+    errorSpy.mockRestore();
   });
 
   it('skips the screenplays update entirely when the projection is invalid, but still compacts', async () => {

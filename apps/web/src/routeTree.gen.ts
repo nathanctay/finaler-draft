@@ -21,7 +21,9 @@ import { Route as BillingSuccessRouteImport } from './routes/billing.success'
 import { Route as BillingSubscriptionRouteImport } from './routes/billing.subscription'
 import { Route as BillingCanceledRouteImport } from './routes/billing.canceled'
 import { Route as ProjectsProjectIdIndexRouteImport } from './routes/projects/$projectId/index'
-import { Route as ProjectsProjectIdScreenplaysScreenplayIdRouteImport } from './routes/projects/$projectId.screenplays.$screenplayId'
+import { Route as ProjectsProjectIdScreenplaysScreenplayIdIndexRouteImport } from './routes/projects/$projectId.screenplays.$screenplayId/index'
+import { Route as ProjectsProjectIdScreenplaysScreenplayIdRevisionsIndexRouteImport } from './routes/projects/$projectId.screenplays.$screenplayId.revisions/index'
+import { Route as ProjectsProjectIdScreenplaysScreenplayIdRevisionsRevisionIdRouteImport } from './routes/projects/$projectId.screenplays.$screenplayId.revisions.$revisionId'
 
 const VerifyEmailRoute = VerifyEmailRouteImport.update({
   id: '/verify-email',
@@ -83,12 +85,26 @@ const ProjectsProjectIdIndexRoute = ProjectsProjectIdIndexRouteImport.update({
   path: '/',
   getParentRoute: () => ProjectsProjectIdRoute,
 } as any)
-const ProjectsProjectIdScreenplaysScreenplayIdRoute =
-  ProjectsProjectIdScreenplaysScreenplayIdRouteImport.update({
-    id: '/screenplays/$screenplayId',
-    path: '/screenplays/$screenplayId',
+const ProjectsProjectIdScreenplaysScreenplayIdIndexRoute =
+  ProjectsProjectIdScreenplaysScreenplayIdIndexRouteImport.update({
+    id: '/screenplays/$screenplayId/',
+    path: '/screenplays/$screenplayId/',
     getParentRoute: () => ProjectsProjectIdRoute,
   } as any)
+const ProjectsProjectIdScreenplaysScreenplayIdRevisionsIndexRoute =
+  ProjectsProjectIdScreenplaysScreenplayIdRevisionsIndexRouteImport.update({
+    id: '/screenplays/$screenplayId/revisions/',
+    path: '/screenplays/$screenplayId/revisions/',
+    getParentRoute: () => ProjectsProjectIdRoute,
+  } as any)
+const ProjectsProjectIdScreenplaysScreenplayIdRevisionsRevisionIdRoute =
+  ProjectsProjectIdScreenplaysScreenplayIdRevisionsRevisionIdRouteImport.update(
+    {
+      id: '/screenplays/$screenplayId/revisions/$revisionId',
+      path: '/screenplays/$screenplayId/revisions/$revisionId',
+      getParentRoute: () => ProjectsProjectIdRoute,
+    } as any,
+  )
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -103,7 +119,9 @@ export interface FileRoutesByFullPath {
   '/projects/$projectId': typeof ProjectsProjectIdRouteWithChildren
   '/projects': typeof ProjectsIndexRoute
   '/projects/$projectId/': typeof ProjectsProjectIdIndexRoute
-  '/projects/$projectId/screenplays/$screenplayId': typeof ProjectsProjectIdScreenplaysScreenplayIdRoute
+  '/projects/$projectId/screenplays/$screenplayId': typeof ProjectsProjectIdScreenplaysScreenplayIdIndexRoute
+  '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId': typeof ProjectsProjectIdScreenplaysScreenplayIdRevisionsRevisionIdRoute
+  '/projects/$projectId/screenplays/$screenplayId/revisions': typeof ProjectsProjectIdScreenplaysScreenplayIdRevisionsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -117,7 +135,9 @@ export interface FileRoutesByTo {
   '/billing/success': typeof BillingSuccessRoute
   '/projects': typeof ProjectsIndexRoute
   '/projects/$projectId': typeof ProjectsProjectIdIndexRoute
-  '/projects/$projectId/screenplays/$screenplayId': typeof ProjectsProjectIdScreenplaysScreenplayIdRoute
+  '/projects/$projectId/screenplays/$screenplayId': typeof ProjectsProjectIdScreenplaysScreenplayIdIndexRoute
+  '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId': typeof ProjectsProjectIdScreenplaysScreenplayIdRevisionsRevisionIdRoute
+  '/projects/$projectId/screenplays/$screenplayId/revisions': typeof ProjectsProjectIdScreenplaysScreenplayIdRevisionsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -133,7 +153,9 @@ export interface FileRoutesById {
   '/projects/$projectId': typeof ProjectsProjectIdRouteWithChildren
   '/projects/': typeof ProjectsIndexRoute
   '/projects/$projectId/': typeof ProjectsProjectIdIndexRoute
-  '/projects/$projectId/screenplays/$screenplayId': typeof ProjectsProjectIdScreenplaysScreenplayIdRoute
+  '/projects/$projectId/screenplays/$screenplayId/': typeof ProjectsProjectIdScreenplaysScreenplayIdIndexRoute
+  '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId': typeof ProjectsProjectIdScreenplaysScreenplayIdRevisionsRevisionIdRoute
+  '/projects/$projectId/screenplays/$screenplayId/revisions/': typeof ProjectsProjectIdScreenplaysScreenplayIdRevisionsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -151,6 +173,8 @@ export interface FileRouteTypes {
     | '/projects'
     | '/projects/$projectId/'
     | '/projects/$projectId/screenplays/$screenplayId'
+    | '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId'
+    | '/projects/$projectId/screenplays/$screenplayId/revisions'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -165,6 +189,8 @@ export interface FileRouteTypes {
     | '/projects'
     | '/projects/$projectId'
     | '/projects/$projectId/screenplays/$screenplayId'
+    | '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId'
+    | '/projects/$projectId/screenplays/$screenplayId/revisions'
   id:
     | '__root__'
     | '/'
@@ -179,7 +205,9 @@ export interface FileRouteTypes {
     | '/projects/$projectId'
     | '/projects/'
     | '/projects/$projectId/'
-    | '/projects/$projectId/screenplays/$screenplayId'
+    | '/projects/$projectId/screenplays/$screenplayId/'
+    | '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId'
+    | '/projects/$projectId/screenplays/$screenplayId/revisions/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -282,11 +310,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProjectsProjectIdIndexRouteImport
       parentRoute: typeof ProjectsProjectIdRoute
     }
-    '/projects/$projectId/screenplays/$screenplayId': {
-      id: '/projects/$projectId/screenplays/$screenplayId'
+    '/projects/$projectId/screenplays/$screenplayId/': {
+      id: '/projects/$projectId/screenplays/$screenplayId/'
       path: '/screenplays/$screenplayId'
       fullPath: '/projects/$projectId/screenplays/$screenplayId'
-      preLoaderRoute: typeof ProjectsProjectIdScreenplaysScreenplayIdRouteImport
+      preLoaderRoute: typeof ProjectsProjectIdScreenplaysScreenplayIdIndexRouteImport
+      parentRoute: typeof ProjectsProjectIdRoute
+    }
+    '/projects/$projectId/screenplays/$screenplayId/revisions/': {
+      id: '/projects/$projectId/screenplays/$screenplayId/revisions/'
+      path: '/screenplays/$screenplayId/revisions'
+      fullPath: '/projects/$projectId/screenplays/$screenplayId/revisions'
+      preLoaderRoute: typeof ProjectsProjectIdScreenplaysScreenplayIdRevisionsIndexRouteImport
+      parentRoute: typeof ProjectsProjectIdRoute
+    }
+    '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId': {
+      id: '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId'
+      path: '/screenplays/$screenplayId/revisions/$revisionId'
+      fullPath: '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId'
+      preLoaderRoute: typeof ProjectsProjectIdScreenplaysScreenplayIdRevisionsRevisionIdRouteImport
       parentRoute: typeof ProjectsProjectIdRoute
     }
   }
@@ -294,13 +336,19 @@ declare module '@tanstack/react-router' {
 
 interface ProjectsProjectIdRouteChildren {
   ProjectsProjectIdIndexRoute: typeof ProjectsProjectIdIndexRoute
-  ProjectsProjectIdScreenplaysScreenplayIdRoute: typeof ProjectsProjectIdScreenplaysScreenplayIdRoute
+  ProjectsProjectIdScreenplaysScreenplayIdIndexRoute: typeof ProjectsProjectIdScreenplaysScreenplayIdIndexRoute
+  ProjectsProjectIdScreenplaysScreenplayIdRevisionsRevisionIdRoute: typeof ProjectsProjectIdScreenplaysScreenplayIdRevisionsRevisionIdRoute
+  ProjectsProjectIdScreenplaysScreenplayIdRevisionsIndexRoute: typeof ProjectsProjectIdScreenplaysScreenplayIdRevisionsIndexRoute
 }
 
 const ProjectsProjectIdRouteChildren: ProjectsProjectIdRouteChildren = {
   ProjectsProjectIdIndexRoute: ProjectsProjectIdIndexRoute,
-  ProjectsProjectIdScreenplaysScreenplayIdRoute:
-    ProjectsProjectIdScreenplaysScreenplayIdRoute,
+  ProjectsProjectIdScreenplaysScreenplayIdIndexRoute:
+    ProjectsProjectIdScreenplaysScreenplayIdIndexRoute,
+  ProjectsProjectIdScreenplaysScreenplayIdRevisionsRevisionIdRoute:
+    ProjectsProjectIdScreenplaysScreenplayIdRevisionsRevisionIdRoute,
+  ProjectsProjectIdScreenplaysScreenplayIdRevisionsIndexRoute:
+    ProjectsProjectIdScreenplaysScreenplayIdRevisionsIndexRoute,
 }
 
 const ProjectsProjectIdRouteWithChildren =

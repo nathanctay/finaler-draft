@@ -1293,3 +1293,8 @@ export function screenplayToPlainText(screenplay: Screenplay): string {
 
   return `${lines.join('\n').trimEnd()}\n`;
 }
+
+// Collaboration slice 4a's structural-change revision trigger and shared revision-preview
+// metadata -- see revisions.ts's own module comment for why this pure domain logic lives here
+// rather than in either app that consumes it.
+export * from './revisions.js';
