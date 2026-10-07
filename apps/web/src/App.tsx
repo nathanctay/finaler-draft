@@ -7,7 +7,6 @@ import {
   useState,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
-  type ReactNode,
 } from 'react';
 import {
   DEFAULT_DOCUMENT_SETTINGS,
@@ -57,6 +56,11 @@ import { SeamCaretExtension } from './seamCaret.js';
 import { SmartTypeGhostExtension } from './smartTypeGhost.js';
 import { SmartTypeList, SmartTypeListExtension } from './smartTypeList.js';
 import { ElementMenu, ElementMenuExtension } from './elementMenu.js';
+import { ApplicationMenubar } from './applicationMenubar.js';
+import { ApplicationShell, ApplicationTitlebar } from './applicationShell.js';
+import { ApplicationToolbar } from './applicationToolbar.js';
+import { InspectorPanel } from './inspectorPanel.js';
+import { NavigatorPanel } from './navigatorPanel.js';
 import { api, MessageApiError, type PersistedScreenplay } from './api.js';
 import { COLLAB_WS_URL } from './collabConfig.js';
 import { applyPageGeometryCssVariables } from './pageGeometryCss.js';
@@ -68,7 +72,6 @@ import {
 } from './titlePageState.js';
 import { DocumentSettingsDialog } from './documentSettingsDialog.js';
 import { NamedRevisionDialog } from './namedRevisionDialog.js';
-import { OverflowMenu } from './components/OverflowMenu.js';
 import { ParticipantIndicator } from './components/ParticipantIndicator.js';
 import { Toast } from './components/Toast.js';
 import {
@@ -81,7 +84,6 @@ import {
   restoreCentredScroll,
   restorePointerAnchoredScroll,
   ZOOM_DEFAULT_PERCENT,
-  ZOOM_PRESET_PERCENTS,
   ZOOM_STEP_PERCENT,
   type PointerZoomCapture,
   type ZoomMode,
@@ -89,34 +91,6 @@ import {
 } from './zoom.js';
 
 type Panel = 'navigator' | 'inspector';
-
-function ToolButton({
-  active,
-  children,
-  disabled,
-  label,
-  onClick,
-}: {
-  active?: boolean;
-  children: ReactNode;
-  disabled?: boolean;
-  label: string;
-  onClick?: () => void;
-}) {
-  return (
-    <button
-      aria-label={label}
-      aria-pressed={active}
-      className={`tool-button${active ? ' active' : ''}`}
-      disabled={disabled}
-      onClick={onClick}
-      title={label}
-      type="button"
-    >
-      {children}
-    </button>
-  );
-}
 
 function wordsInProjection(projection: LocalScreenplayProjection): number {
   if (!projection.valid) {
@@ -1622,687 +1596,541 @@ export function App({
   const syncTimedOut =
     initialContent !== undefined && entitlementReadOnly === undefined && syncState === 'timedOut';
 
-  // A modifier class, not a hardcoded sixth grid row: `.application`'s `grid-template-rows`
-  // (styles.css) is a fixed five-row track list, and `.readonly-banner` is an extra grid child
-  // only present when one of the four banner reasons above is true. Without a class marking that,
-  // the banner would silently consume the toolbar's row and shove every row after it down by one
-  // -- `has-readonly-banner` is what lets styles.css insert an `auto`-sized row for the banner
-  // specifically when one exists, leaving the five original rows' sizes untouched otherwise.
-  const applicationClassName = [
-    'application',
-    dark && 'dark',
-    (entitlementReadOnly ||
-      historicalRevision ||
-      awaitingFirstSync ||
-      syncDenied ||
-      syncTimedOut) &&
-      'has-readonly-banner',
-  ]
-    .filter(Boolean)
-    .join(' ');
-
-  return (
-    <main className={applicationClassName}>
-      <header className="titlebar">
-        {/*
-          A plain anchor, not the router's `Link`: App is deliberately rendered as a
-          router-agnostic, lazily-loaded unit (see the route component's `lazy(...)` import and
-          this file's own standalone test suite, neither of which provide router context), and
-          the only way out of a screenplay before this was the browser's own back button. A full
-          navigation to /projects is a small cost for a control used rarely and deliberately,
-          against the alternative of adding router context to a component that has never needed
-          it. The accessible name leads with the visible "Finaler Draft" text per WCAG 2.5.3.
-        */}
-        <a aria-label="Finaler Draft — back to your projects" className="brand" href="/projects">
-          <span className="brand-mark">F</span>
-          <span>Finaler Draft</span>
-        </a>
-        <div className="document-title">
-          <span
-            className={projection.valid ? 'save-dot' : 'save-dot attention'}
-            aria-label="Local draft"
-          />
-          {initial.title} <span className="title-type">Screenplay</span>
-        </div>
-        <span className="account-button" aria-label="Signed-in writer">
-          FD
-        </span>
-      </header>
-      <nav className="menubar" aria-label="Application menu">
-        {/*
-          Only File is a working menu this increment (plan.md schedules activating the other five
-          alongside the Characters tab, a separate, out-of-scope item). It reuses OverflowMenu --
-          the same accessible popup-menu contract (Enter/Space to open, arrow keys between items,
-          Escape closes and returns focus to the trigger) the header's own account menu already
-          uses -- rather than a bespoke menu implementation for a single item.
-        */}
-        <div className="menu-file" ref={fileMenuRef}>
-          <OverflowMenu
-            items={[
-              {
-                disabled: !editingAllowed,
-                disabledReason: !editingAllowed
-                  ? awaitingFirstSync
-                    ? 'Read-only: connecting to the collaboration server'
-                    : syncDenied
-                      ? 'Read-only: access to this screenplay could not be confirmed'
-                      : syncTimedOut
-                        ? 'Read-only: still trying to connect to the collaboration server'
-                        : 'Read-only: this screenplay is not your account’s editable one'
-                  : undefined,
-                label: 'Document settings…',
-                onSelect: () => setSettingsDialogOpen(true),
-              },
-              {
-                // Gated on `editingAllowed`, the same as "Document settings…" above: naming a
-                // milestone is offered wherever this screenplay is genuinely this writer's to
-                // change right now, not a second, independently-computed availability rule.
-                disabled: !editingAllowed,
-                disabledReason: !editingAllowed
-                  ? awaitingFirstSync
-                    ? 'Read-only: connecting to the collaboration server'
-                    : syncDenied
-                      ? 'Read-only: access to this screenplay could not be confirmed'
-                      : syncTimedOut
-                        ? 'Read-only: still trying to connect to the collaboration server'
-                        : 'Read-only: this screenplay is not your account’s editable one'
-                  : undefined,
-                label: 'Save named revision…',
-                onSelect: () => setNamedRevisionDialogOpen(true),
-              },
-              // Collaboration slice 4a. Present only on the live editor -- `onOpenRevisionHistory`
-              // is never supplied by the historical-preview route -- so "History" cannot open a
-              // second layer of history from inside history. Never disabled: history is always
-              // readable regardless of this screenplay's own entitlement/sync state, matching
-              // `api.listRevisions`' own membership-only (not edit-only) authorization.
-              ...(onOpenRevisionHistory
-                ? [{ label: 'Revision history…', onSelect: onOpenRevisionHistory }]
-                : []),
-              {
-                // Disabled, not a no-op, when `projection` is invalid: the FDX exporter takes a
-                // canonical `Screenplay` (see `packages/fdx`'s own doc comment), which an invalid
-                // local projection is not, and `screenplayToFdx` has no licence to guess at one.
-                // The `if (projection.valid)` guard inside `onSelect` is still required -- it is
-                // what lets TypeScript narrow `projection` to the branch with a `.screenplay` --
-                // but it is no longer the only thing standing between a click and nothing
-                // happening: `disabled` means that click can no longer reach `onSelect` at all.
-                disabled: !projection.valid,
-                disabledReason: exportDisabledReason,
-                label: 'Download FDX…',
-                onSelect: () => {
-                  if (projection.valid) {
-                    const { screenplay } = projection;
-                    runExport('FDX', async () => {
-                      const { triggerFdxDownload } = await import('./fdxDownload.js');
-                      triggerFdxDownload(screenplay);
-                    });
-                  }
-                },
-              },
-              {
-                // Same reasoning as "Download FDX…" above: `screenplayToDocx` takes a canonical
-                // `Screenplay` (see `packages/docx`'s own doc comment), and an invalid local
-                // projection is not one.
-                disabled: !projection.valid,
-                disabledReason: exportDisabledReason,
-                label: 'Download DOCX…',
-                onSelect: () => {
-                  if (projection.valid) {
-                    const { screenplay } = projection;
-                    runExport('DOCX', async () => {
-                      const { triggerDocxDownload } = await import('./docxDownload.js');
-                      triggerDocxDownload(screenplay);
-                    });
-                  }
-                },
-              },
-              {
-                // Same disabled-not-a-no-op reasoning as "Download FDX…" above -- this is in fact
-                // the owner's exact reported symptom: "Download PDF did nothing when clicked" was
-                // this same `if (projection.valid)` guard with no disabled state and no reason,
-                // on a document a paste had made invalid (progress/paste-sanitization.md).
-                // `triggerPdfDownload` is `async` (`screenplayToPdf` is -- see
-                // `@finaler-draft/pdf`'s `index.ts`), so a rejection (most likely
-                // `@finaler-draft/pdf`'s WinAnsiEncoding limitation -- a character PDF's
-                // un-embedded standard Courier cannot render) must still be caught here or it
-                // becomes an unhandled promise rejection; that failure mode is unrelated to and
-                // unfixed by `disabled`, which only ever concerns an invalid local projection.
-                // `runExport` surfaces it in the toast below, same as FDX and DOCX.
-                disabled: !projection.valid,
-                disabledReason: exportDisabledReason,
-                label: 'Download PDF…',
-                onSelect: () => {
-                  if (projection.valid) {
-                    const { screenplay } = projection;
-                    runExport('PDF', async () => {
-                      const { triggerPdfDownload } = await import('./pdfDownload.js');
-                      await triggerPdfDownload(screenplay);
-                    });
-                  }
-                },
-              },
-            ]}
-            label="File menu"
-            triggerContent="File"
-          />
-        </div>
-        <span>Edit</span>
-        <span>View</span>
-        <span>Format</span>
-        <span>Tools</span>
-        <span>Help</span>
-        <span className="menubar-spacer" />
-        <button type="button" onClick={() => setDark((value) => !value)}>
-          {dark ? 'Light canvas' : 'Dark canvas'}
-        </button>
-      </nav>
-      {settingsDialogOpen && (
-        <DocumentSettingsDialog
-          onChange={updateDocumentSettings}
-          onClose={closeSettingsDialog}
-          settings={documentSettings}
-        />
-      )}
-      {namedRevisionDialogOpen && (
-        <NamedRevisionDialog
-          onClose={closeNamedRevisionDialog}
-          onSave={async (label) => {
-            await api.createNamedRevision(initial.id, label);
-          }}
-        />
-      )}
-      {entitlementReadOnly && (
-        // Persistent, not dismissible: plan.md's lapse policy means this state does not resolve
-        // itself, so nothing here ever offers a way to hide it without actually addressing it.
-        // Rendered above the toolbar so it is visible regardless of which panels are open or
-        // closed -- the one thing on this screen every read-only visit must see.
-        <div className="readonly-banner" role="status">
-          <p>{entitlementReadOnly.message}</p>
-          {entitlementReadOnly.onMakeEditable && (
-            <button
-              className="primary-button"
-              disabled={
-                makeEditableState === 'pending' || entitlementReadOnly.cooldownUntil !== undefined
-              }
-              onClick={makeEditable}
-              type="button"
-            >
-              Make this one editable
-            </button>
-          )}
-          {entitlementReadOnly.cooldownUntil !== undefined && (
-            // Known up front, from the same `cooldownEndsAt` GET /api/entitlement already
-            // returns -- the button says so before a click, rather than inviting one that the
-            // server has already told this app it will refuse. See the route's own comment for
-            // why this is not a client-recomputed cooldown: it is exactly the server's own value,
-            // read for display, never for enforcement.
-            <p className="readonly-banner-cooldown">
-              You can switch to a different screenplay again at {entitlementReadOnly.cooldownUntil}.
-            </p>
-          )}
-          {/* Suppressed once `cooldownUntil` arrives: the failed click's own `onMakeEditable`
-              (the route) invalidates entitlement on failure too, so a stale-data race (the button
-              was clickable because this app's last fetch predated the cooldown) resolves into the
-              same up-front explanation above on the very next render, rather than leaving both a
-              raw server error and a redundant cooldown notice on screen at once. */}
-          {makeEditableState === 'error' && entitlementReadOnly.cooldownUntil === undefined && (
-            <p className="field-error" role="alert">
-              {makeEditableError}
-            </p>
-          )}
-        </div>
-      )}
-      {historicalRevision && (
-        // Collaboration slice 4a's historical preview. Reuses `.readonly-banner`'s markup and grid
-        // mechanics (the lapse-chooser slice's own established pattern -- see the comment on
-        // `awaitingFirstSync` below for why this is deliberately not a second read-only mechanism)
-        // but is never mistakable for the live editor: `readonly-banner-historical` (styles.css)
-        // gives it its own accent and the text itself leads with "Historical revision", not a
-        // colour-only distinction. Persistent and non-dismissible, matching the entitlement
-        // banner's own reasoning -- there is nothing to dismiss into; this document stays this
-        // revision for as long as this page is open. No "Make this one editable" affordance
-        // exists here, ever: promoting a past revision to the live document is restore-as-current
-        // (plan.md), a separate, later feature this slice deliberately does not build.
-        <div className="readonly-banner readonly-banner-historical" role="status">
-          <p>
-            <strong>Historical revision.</strong> {historicalRevision.label} — this is a read-only
-            copy, separate from the live document.
-          </p>
-        </div>
-      )}
-      {awaitingFirstSync && (
-        // The sync gate's own banner (`editingAllowed`'s comment above): reuses the exact
-        // `entitlementReadOnly` banner's markup and class -- the lapse-chooser slice's own
-        // pattern for a legibly read-only editor, not a second one invented for this -- but never
-        // renders alongside it (`awaitingFirstSync` is already `false` whenever
-        // `entitlementReadOnly` is set). No action button: unlike a lapsed entitlement, there is
-        // nothing for the writer to do here but wait, and this resolves on its own the moment
-        // this tab's first sync completes -- `editingAllowed` flips back to `true` and this banner
-        // stops rendering, no dismissal needed. Transient by nature, so it is not given the same
-        // "persistent, not dismissible" framing as the entitlement banner's own comment: it is
-        // gone within moments on any normal connection, and reappears only if a screenplay is
-        // opened for the very first time on a slow one.
-        <div className="readonly-banner" role="status">
-          <p>
-            Connecting to the collaboration server — this screenplay will be editable once it syncs.
-          </p>
-        </div>
-      )}
-      {syncDenied && (
-        // The sync gate's *terminal* banner (`syncState`'s own comment on `'denied'`): a resolved,
-        // deliberate decision that this actor may not see this document -- wrong Origin, no
-        // session, or a role lookup that genuinely found none (`apps/collab`'s
-        // `authenticateConnection`). Never retried, so unlike `awaitingFirstSync` this does not
-        // resolve on its own; a reload is the only way out, since that is the only thing that
-        // re-checks the session/account from scratch.
-        <div className="readonly-banner" role="status">
-          <p>
-            This screenplay’s access could not be confirmed for your account. Reload the page to try
-            again.
-          </p>
-        </div>
-      )}
-      {syncTimedOut && (
-        // The backstop banner (`syncState`'s own comment on `'timedOut'`): this tab has been
-        // waiting for its first sync for longer than `SYNC_TIMEOUT_MS` with no `synced` and no
-        // `authenticationFailed` at all -- covers whatever the transient-retry loop does not
-        // itself resolve, or a failure mode neither that loop nor `authenticate.ts`'s
-        // classification anticipated. Not asserted permanent like `syncDenied`'s banner: this one
-        // still disappears on its own if a `synced` arrives late, since the underlying provider
-        // never stopped trying.
-        <div className="readonly-banner" role="status">
-          <p>
-            Still trying to connect to the collaboration server. If this continues, reload the page.
-          </p>
-        </div>
-      )}
-      <section className="toolbar" aria-label="Screenplay tools">
-        <ToolButton
-          disabled={!editingAllowed || !editor?.can().undo()}
-          label="Undo local change"
-          onClick={() => editor?.commands.undo()}
-        >
-          ↶
-        </ToolButton>
-        <ToolButton
-          disabled={!editingAllowed || !editor?.can().redo()}
-          label="Redo local change"
-          onClick={() => editor?.commands.redo()}
-        >
-          ↷
-        </ToolButton>
-        <span className="rule" />
-        <label className="element-selector">
-          <span className="visually-hidden">Active screenplay element</span>
-          <select
-            aria-label="Active screenplay element"
-            disabled={!editingAllowed}
-            onChange={(event) => changeElement(event.target.value as ScreenplayElementType)}
-            value={activeElement}
-          >
-            {screenplayElementTypes.map((element) => (
-              <option key={element} value={element}>
-                {displayElement(element)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <span className="toolbar-spacer" />
-        <div className="zoom-controls">
-          <button
-            aria-label="Zoom out"
-            onClick={() => updateZoom(-ZOOM_STEP_PERCENT)}
-            title="Zoom out"
-            type="button"
-          >
-            −
-          </button>
-          {/* One control, not two (the owner's explicit request, superseding the previous
-              side-by-side stepper box and preset box): the current percentage stays the visible,
-              announced content in the middle -- the `<output>` below, aria-label and text content
-              both unchanged from before this slice -- while clicking anywhere on that number opens
-              the same preset `<select>` plan.md's "Zoom controls" asks for ("a preset dropdown ...
-              a set of fixed percentages plus 'Fit page' and 'Fit width'. Use a real select, or a
-              listbox that behaves like one"). The select is a real, fully keyboard- and
-              screen-reader-operable native control, stacked exactly on top of the `<output>` via
-              `.zoom-level`'s CSS (styles.css) and made visually transparent rather than removed --
-              `opacity: 0`, not `display: none` or `visibility: hidden`, so it stays focusable and
-              clickable. Its own value only ever matches one of its own options when `zoomMode` is a
-              fit mode or an exact preset percentage -- a percentage reached via the stepper buttons
-              or a keyboard shortcut that lands off-preset (e.g. 85%) leaves the select showing no
-              option selected, which is honest: it is a jump-to control, not a second display of the
-              live percentage (the `<output>` is that, and stays visible underneath regardless of
-              which option the select currently considers selected). Because `opacity: 0` also hides
-              a focused element's own native focus ring, `.zoom-level:focus-within` (styles.css)
-              draws the focus indicator on the visible wrapper instead, so a keyboard user tabbing to
-              this control still sees exactly where focus is. */}
-          <div className="zoom-level">
-            <output aria-label="Zoom level">{Math.round(zoomPercent)}%</output>
-            <select
-              aria-label="Zoom preset"
-              onChange={(event) => chooseZoomPreset(event.target.value)}
-              value={zoomMode.kind === 'fixed' ? String(zoomMode.percent) : zoomMode.kind}
-            >
-              <optgroup label="Fit">
-                <option value="fit-width">Fit width</option>
-                <option value="fit-page">Fit page</option>
-              </optgroup>
-              <optgroup label="Percent">
-                {ZOOM_PRESET_PERCENTS.map((percent) => (
-                  <option key={percent} value={percent}>
-                    {percent}%
-                  </option>
-                ))}
-              </optgroup>
-            </select>
-          </div>
-          <button
-            aria-label="Zoom in"
-            onClick={() => updateZoom(ZOOM_STEP_PERCENT)}
-            title="Zoom in"
-            type="button"
-          >
-            +
-          </button>
-        </div>
-        <span className="rule" />
-        <ToolButton
-          active={showLabels}
-          label="Toggle element labels"
-          onClick={() => setShowLabels((value) => !value)}
-        >
-          ⌸
-        </ToolButton>
-        <ToolButton
-          active={continuousScroll}
-          label="Toggle continuous scroll"
-          onClick={() => setContinuousScroll((value) => !value)}
-        >
-          ⬍
-        </ToolButton>
-        <ToolButton
-          active={panels.navigator}
-          label="Toggle navigator"
-          onClick={() => togglePanel('navigator')}
-        >
-          ☷
-        </ToolButton>
-        <ToolButton
-          active={panels.inspector}
-          label="Toggle inspector"
-          onClick={() => togglePanel('inspector')}
-        >
-          ☰
-        </ToolButton>
-      </section>
-      <div className="workspace">
-        {panels.navigator && (
-          <aside className="panel navigator" aria-label="Navigator">
-            <div className="panel-heading">
-              <span>Navigator</span>
+  // The banner row -- `ApplicationShell`'s `banner` slot (applicationShell.tsx). One expression,
+  // not two: this used to be a `has-readonly-banner` modifier class computed here from these five
+  // reasons *and*, separately, five conditional children rendered a hundred lines below it. That
+  // shape can disagree with itself, and `.application`'s own comment in styles.css records what
+  // happened in production when it did. The shell now derives the class from the presence of this
+  // slot, so the only thing left to get right here is which banner, if any, there is. Exactly one
+  // is ever true: they key off disjoint `syncState` values or its absence (see `editingAllowed`).
+  const banner =
+    entitlementReadOnly || historicalRevision || awaitingFirstSync || syncDenied || syncTimedOut ? (
+      <>
+        {entitlementReadOnly && (
+          // Persistent, not dismissible: plan.md's lapse policy means this state does not resolve
+          // itself, so nothing here ever offers a way to hide it without actually addressing it.
+          // Rendered above the toolbar so it is visible regardless of which panels are open or
+          // closed -- the one thing on this screen every read-only visit must see.
+          <div className="readonly-banner" role="status">
+            <p>{entitlementReadOnly.message}</p>
+            {entitlementReadOnly.onMakeEditable && (
               <button
-                aria-label="Close navigator"
-                onClick={() => togglePanel('navigator')}
-                title="Close navigator"
+                className="primary-button"
+                disabled={
+                  makeEditableState === 'pending' || entitlementReadOnly.cooldownUntil !== undefined
+                }
+                onClick={makeEditable}
                 type="button"
               >
-                ×
+                Make this one editable
               </button>
-            </div>
-            <div aria-label="Navigator sections" className="panel-tabs" role="tablist">
-              {NAVIGATOR_TABS.map((tab) => (
-                <button
-                  aria-controls={`navigator-panel-${tab.id}`}
-                  aria-selected={navigatorTab === tab.id}
-                  className={navigatorTab === tab.id ? 'selected' : ''}
-                  id={`navigator-tab-${tab.id}`}
-                  key={tab.id}
-                  onClick={() => setNavigatorTab(tab.id)}
-                  onKeyDown={(event) => {
-                    // Left/Right rather than Up/Down: `.panel-tabs` lays tabs out horizontally
-                    // (see styles.css), and the WAI-ARIA tabs pattern keys arrow direction to the
-                    // tablist's own orientation. Moves focus and switches the active tab together
-                    // ("automatic activation"), the same immediate-effect convention
-                    // `OverflowMenu.tsx`'s Up/Down already uses for its own list.
-                    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
-                      return;
-                    }
-                    event.preventDefault();
-                    const currentIndex = NAVIGATOR_TABS.findIndex(
-                      (candidate) => candidate.id === navigatorTab,
-                    );
-                    const delta = event.key === 'ArrowRight' ? 1 : -1;
-                    const nextTab =
-                      NAVIGATOR_TABS[
-                        (currentIndex + delta + NAVIGATOR_TABS.length) % NAVIGATOR_TABS.length
-                      ];
-                    if (!nextTab) {
-                      return;
-                    }
-                    setNavigatorTab(nextTab.id);
-                    document.getElementById(`navigator-tab-${nextTab.id}`)?.focus();
-                  }}
-                  role="tab"
-                  // Roving tabindex: only the selected tab is a Tab stop, matching the WAI-ARIA
-                  // tabs pattern -- Tab moves focus in and out of the tablist as a single stop,
-                  // and the arrow-key handler above moves focus (and selection) within it.
-                  tabIndex={navigatorTab === tab.id ? 0 : -1}
-                  type="button"
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-            {navigatorTab === 'scenes' ? (
-              <ol
-                aria-labelledby="navigator-tab-scenes"
-                className="scene-list"
-                id="navigator-panel-scenes"
-                role="tabpanel"
-                tabIndex={0}
-              >
-                {scenes.map((scene, index) => (
-                  <li key={scene.id}>
-                    <button
-                      className={selectedScene?.id === scene.id ? 'selected' : ''}
-                      type="button"
-                      onClick={() => selectScene(scene)}
-                    >
-                      <span>{`${index + 1}. ${scene.heading.text}`}</span>
-                      <small>{scene.body.length} blocks</small>
-                    </button>
-                  </li>
-                ))}
-              </ol>
-            ) : (
-              <ol
-                aria-labelledby="navigator-tab-characters"
-                className="scene-list"
-                id="navigator-panel-characters"
-                role="tabpanel"
-                tabIndex={0}
-              >
-                {characters.map((character) => (
-                  <li key={character.name}>
-                    <button
-                      className={selectedCharacter?.name === character.name ? 'selected' : ''}
-                      type="button"
-                      onClick={() => selectCharacter(character)}
-                    >
-                      <span>{character.name}</span>
-                      {/*
+            )}
+            {entitlementReadOnly.cooldownUntil !== undefined && (
+              // Known up front, from the same `cooldownEndsAt` GET /api/entitlement already
+              // returns -- the button says so before a click, rather than inviting one that the
+              // server has already told this app it will refuse. See the route's own comment for
+              // why this is not a client-recomputed cooldown: it is exactly the server's own value,
+              // read for display, never for enforcement.
+              <p className="readonly-banner-cooldown">
+                You can switch to a different screenplay again at{' '}
+                {entitlementReadOnly.cooldownUntil}.
+              </p>
+            )}
+            {/* Suppressed once `cooldownUntil` arrives: the failed click's own `onMakeEditable`
+                (the route) invalidates entitlement on failure too, so a stale-data race (the button
+                was clickable because this app's last fetch predated the cooldown) resolves into the
+                same up-front explanation above on the very next render, rather than leaving both a
+                raw server error and a redundant cooldown notice on screen at once. */}
+            {makeEditableState === 'error' && entitlementReadOnly.cooldownUntil === undefined && (
+              <p className="field-error" role="alert">
+                {makeEditableError}
+              </p>
+            )}
+          </div>
+        )}
+        {historicalRevision && (
+          // Collaboration slice 4a's historical preview. Reuses `.readonly-banner`'s markup and grid
+          // mechanics (the lapse-chooser slice's own established pattern -- see the comment on
+          // `awaitingFirstSync` below for why this is deliberately not a second read-only mechanism)
+          // but is never mistakable for the live editor: `readonly-banner-historical` (styles.css)
+          // gives it its own accent and the text itself leads with "Historical revision", not a
+          // colour-only distinction. Persistent and non-dismissible, matching the entitlement
+          // banner's own reasoning -- there is nothing to dismiss into; this document stays this
+          // revision for as long as this page is open. No "Make this one editable" affordance
+          // exists here, ever: promoting a past revision to the live document is restore-as-current
+          // (plan.md), a separate, later feature this slice deliberately does not build.
+          <div className="readonly-banner readonly-banner-historical" role="status">
+            <p>
+              <strong>Historical revision.</strong> {historicalRevision.label} — this is a read-only
+              copy, separate from the live document.
+            </p>
+          </div>
+        )}
+        {awaitingFirstSync && (
+          // The sync gate's own banner (`editingAllowed`'s comment above): reuses the exact
+          // `entitlementReadOnly` banner's markup and class -- the lapse-chooser slice's own
+          // pattern for a legibly read-only editor, not a second one invented for this -- but never
+          // renders alongside it (`awaitingFirstSync` is already `false` whenever
+          // `entitlementReadOnly` is set). No action button: unlike a lapsed entitlement, there is
+          // nothing for the writer to do here but wait, and this resolves on its own the moment
+          // this tab's first sync completes -- `editingAllowed` flips back to `true` and this banner
+          // stops rendering, no dismissal needed. Transient by nature, so it is not given the same
+          // "persistent, not dismissible" framing as the entitlement banner's own comment: it is
+          // gone within moments on any normal connection, and reappears only if a screenplay is
+          // opened for the very first time on a slow one.
+          <div className="readonly-banner" role="status">
+            <p>
+              Connecting to the collaboration server — this screenplay will be editable once it
+              syncs.
+            </p>
+          </div>
+        )}
+        {syncDenied && (
+          // The sync gate's *terminal* banner (`syncState`'s own comment on `'denied'`): a resolved,
+          // deliberate decision that this actor may not see this document -- wrong Origin, no
+          // session, or a role lookup that genuinely found none (`apps/collab`'s
+          // `authenticateConnection`). Never retried, so unlike `awaitingFirstSync` this does not
+          // resolve on its own; a reload is the only way out, since that is the only thing that
+          // re-checks the session/account from scratch.
+          <div className="readonly-banner" role="status">
+            <p>
+              This screenplay’s access could not be confirmed for your account. Reload the page to
+              try again.
+            </p>
+          </div>
+        )}
+        {syncTimedOut && (
+          // The backstop banner (`syncState`'s own comment on `'timedOut'`): this tab has been
+          // waiting for its first sync for longer than `SYNC_TIMEOUT_MS` with no `synced` and no
+          // `authenticationFailed` at all -- covers whatever the transient-retry loop does not
+          // itself resolve, or a failure mode neither that loop nor `authenticate.ts`'s
+          // classification anticipated. Not asserted permanent like `syncDenied`'s banner: this one
+          // still disappears on its own if a `synced` arrives late, since the underlying provider
+          // never stopped trying.
+          <div className="readonly-banner" role="status">
+            <p>
+              Still trying to connect to the collaboration server. If this continues, reload the
+              page.
+            </p>
+          </div>
+        )}
+      </>
+    ) : undefined;
+
+  return (
+    <ApplicationShell
+      banner={banner}
+      dark={dark}
+      menubar={
+        /*
+          The menubar, the toolbar and the workspace's two panels are now `applicationMenubar.tsx`,
+          `applicationToolbar.tsx`, `navigatorPanel.tsx` and `inspectorPanel.tsx` -- presentational
+          components taking data and callbacks, rendered by this editor and by the read-only revision
+          comparison both. The comparison used to have no menubar and no toolbar at all, which the
+          owner judged to be what made it read as a free-floating page rather than part of this
+          product. See `applicationToolbar.tsx`'s own comment for that decision and for the one-way
+          dependency rule (this file imports those modules; none of them imports anything of this
+          file's) that keeps Tiptap, y-prosemirror, the Hocuspocus provider and the pagination plugin
+          out of the comparison's chunk.
+
+          Only File is a working menu this increment (plan.md schedules activating the other five
+          alongside the Characters tab, a separate, out-of-scope item); `ApplicationMenubar` renders
+          those five as the inert labels they still are.
+        */
+        <ApplicationMenubar
+          canvasToggle={{ dark, onToggle: () => setDark((value) => !value) }}
+          fileMenuItems={[
+            {
+              disabled: !editingAllowed,
+              disabledReason: !editingAllowed
+                ? awaitingFirstSync
+                  ? 'Read-only: connecting to the collaboration server'
+                  : syncDenied
+                    ? 'Read-only: access to this screenplay could not be confirmed'
+                    : syncTimedOut
+                      ? 'Read-only: still trying to connect to the collaboration server'
+                      : 'Read-only: this screenplay is not your account’s editable one'
+                : undefined,
+              label: 'Document settings…',
+              onSelect: () => setSettingsDialogOpen(true),
+            },
+            {
+              // Gated on `editingAllowed`, the same as "Document settings…" above: naming a
+              // milestone is offered wherever this screenplay is genuinely this writer's to
+              // change right now, not a second, independently-computed availability rule.
+              disabled: !editingAllowed,
+              disabledReason: !editingAllowed
+                ? awaitingFirstSync
+                  ? 'Read-only: connecting to the collaboration server'
+                  : syncDenied
+                    ? 'Read-only: access to this screenplay could not be confirmed'
+                    : syncTimedOut
+                      ? 'Read-only: still trying to connect to the collaboration server'
+                      : 'Read-only: this screenplay is not your account’s editable one'
+                : undefined,
+              label: 'Save named revision…',
+              onSelect: () => setNamedRevisionDialogOpen(true),
+            },
+            // Collaboration slice 4a. Present only on the live editor -- `onOpenRevisionHistory`
+            // is never supplied by the historical-preview route -- so "History" cannot open a
+            // second layer of history from inside history. Never disabled: history is always
+            // readable regardless of this screenplay's own entitlement/sync state, matching
+            // `api.listRevisions`' own membership-only (not edit-only) authorization.
+            ...(onOpenRevisionHistory
+              ? [{ label: 'Revision history…', onSelect: onOpenRevisionHistory }]
+              : []),
+            {
+              // Disabled, not a no-op, when `projection` is invalid: the FDX exporter takes a
+              // canonical `Screenplay` (see `packages/fdx`'s own doc comment), which an invalid
+              // local projection is not, and `screenplayToFdx` has no licence to guess at one.
+              // The `if (projection.valid)` guard inside `onSelect` is still required -- it is
+              // what lets TypeScript narrow `projection` to the branch with a `.screenplay` --
+              // but it is no longer the only thing standing between a click and nothing
+              // happening: `disabled` means that click can no longer reach `onSelect` at all.
+              disabled: !projection.valid,
+              disabledReason: exportDisabledReason,
+              label: 'Download FDX…',
+              onSelect: () => {
+                if (projection.valid) {
+                  const { screenplay } = projection;
+                  runExport('FDX', async () => {
+                    const { triggerFdxDownload } = await import('./fdxDownload.js');
+                    triggerFdxDownload(screenplay);
+                  });
+                }
+              },
+            },
+            {
+              // Same reasoning as "Download FDX…" above: `screenplayToDocx` takes a canonical
+              // `Screenplay` (see `packages/docx`'s own doc comment), and an invalid local
+              // projection is not one.
+              disabled: !projection.valid,
+              disabledReason: exportDisabledReason,
+              label: 'Download DOCX…',
+              onSelect: () => {
+                if (projection.valid) {
+                  const { screenplay } = projection;
+                  runExport('DOCX', async () => {
+                    const { triggerDocxDownload } = await import('./docxDownload.js');
+                    triggerDocxDownload(screenplay);
+                  });
+                }
+              },
+            },
+            {
+              // Same disabled-not-a-no-op reasoning as "Download FDX…" above -- this is in fact
+              // the owner's exact reported symptom: "Download PDF did nothing when clicked" was
+              // this same `if (projection.valid)` guard with no disabled state and no reason,
+              // on a document a paste had made invalid (progress/paste-sanitization.md).
+              // `triggerPdfDownload` is `async` (`screenplayToPdf` is -- see
+              // `@finaler-draft/pdf`'s `index.ts`), so a rejection (most likely
+              // `@finaler-draft/pdf`'s WinAnsiEncoding limitation -- a character PDF's
+              // un-embedded standard Courier cannot render) must still be caught here or it
+              // becomes an unhandled promise rejection; that failure mode is unrelated to and
+              // unfixed by `disabled`, which only ever concerns an invalid local projection.
+              // `runExport` surfaces it in the toast below, same as FDX and DOCX.
+              disabled: !projection.valid,
+              disabledReason: exportDisabledReason,
+              label: 'Download PDF…',
+              onSelect: () => {
+                if (projection.valid) {
+                  const { screenplay } = projection;
+                  runExport('PDF', async () => {
+                    const { triggerPdfDownload } = await import('./pdfDownload.js');
+                    await triggerPdfDownload(screenplay);
+                  });
+                }
+              },
+            },
+          ]}
+          fileMenuRef={fileMenuRef}
+        />
+      }
+      outOfFlow={
+        <>
+          {settingsDialogOpen && (
+            <DocumentSettingsDialog
+              onChange={updateDocumentSettings}
+              onClose={closeSettingsDialog}
+              settings={documentSettings}
+            />
+          )}
+          {namedRevisionDialogOpen && (
+            <NamedRevisionDialog
+              onClose={closeNamedRevisionDialog}
+              onSave={async (label) => {
+                await api.createNamedRevision(initial.id, label);
+              }}
+            />
+          )}
+          {exportError !== undefined && (
+            // A toast rather than a line in the status bar: this message names the block and element
+            // the writer has to go and fix, which the bar has no room for -- it already carries the
+            // save state, the word count and the page count, and collapses to 30px below 600px. It is
+            // also the wrong home for it in kind: the bar describes the document's ongoing state,
+            // while this describes one completed attempt that failed.
+            <Toast
+              message={exportError}
+              onDismiss={() => setExportError(undefined)}
+              title="Export failed"
+            />
+          )}
+          {/* SmartType's candidate list (smartTypeList.tsx). Mounted here, at the application root and
+              outside `.page`, for the reason the toast above is: it is fixed-position chrome placed in
+              viewport coordinates. Rendering it inside the manuscript would put a floating panel in
+              the box tree of a page whose every line position is normative. */}
+          <SmartTypeList editor={editor} />
+          {/* The element menu (elementMenu.tsx). At the application root and outside `.page` for the
+              same reason as the list above: it is fixed-position chrome placed in viewport
+              coordinates, and a floating panel inside a page whose every line position is normative
+              would be a way to move one. */}
+          <ElementMenu editor={editor} />
+        </>
+      }
+      statusbar={
+        <footer className="statusbar">
+          <span aria-label="Active scene">
+            {selectedScene ? selectedScene.heading.text : 'No active scene'}
+          </span>
+          <span className="status-center" aria-live="polite">
+            {initialContent === undefined
+              ? 'Text editing is unavailable for this screenplay'
+              : entitlementReadOnly
+                ? 'Read-only · make this screenplay editable to save changes here'
+                : syncState === 'connecting'
+                  ? 'Connecting…'
+                  : syncState === 'denied'
+                    ? 'Access could not be confirmed · reload to try again'
+                    : syncState === 'timedOut'
+                      ? 'Still trying to connect · reload if this continues'
+                      : syncState === 'offline'
+                        ? // Yjs keeps every local edit queued and merges it in the instant the
+                          // connection recovers -- this is a connectivity report, never a warning
+                          // that work could be lost, which is exactly what distinguishes it from
+                          // the whole-document-`PUT` save-conflict state this replaces
+                          // (progress/collaboration-slice-1.md).
+                          'Offline · reconnecting… your edits are safe and will sync automatically'
+                        : projection.valid
+                          ? `Synced · ${wordCount} words · no print pagination`
+                          : `Draft needs attention · ${projection.issues[0] ?? 'Invalid screenplay data.'}`}
+          </span>
+          {initialContent !== undefined && !projection.valid && (
+            // Deliberately not inside `.status-center`, which the narrow-viewport media query
+            // hides entirely (styles.css) -- exactly the gap requirement 2 in
+            // progress/paste-sanitization.md exists to close: below that width the only place an
+            // invalid projection was ever announced (the text this duplicates, a few lines up)
+            // disappeared along with everything else in `.status-center`. Gated on
+            // `initialContent !== undefined`: the other reason `projection` can be invalid is the
+            // unrelated "this screenplay has features this editor can't open" case, which already
+            // has its own unambiguous message above and disables editing entirely.
+            <span className="status-attention" role="alert">
+              {projection.issues[0] ?? 'Invalid screenplay data.'}
+            </span>
+          )}
+          <ParticipantIndicator awareness={collab.provider?.awareness ?? undefined} />
+        </footer>
+      }
+      titlebar={
+        <ApplicationTitlebar
+          documentTitle={initial.title}
+          documentType="Screenplay"
+          indicator={
+            <span
+              aria-label="Local draft"
+              className={projection.valid ? 'save-dot' : 'save-dot attention'}
+            />
+          }
+        />
+      }
+      toolbar={
+        /* The editor's own toolbar, now `applicationToolbar.tsx` -- the same component the read-only
+           comparison renders, with live state and real handlers here and diff-derived data and real
+           `disabled` attributes there. Every control, class name and accessible name is unchanged from
+           when this JSX lived inline; see that module's comment. */
+        <ApplicationToolbar
+          continuousScroll={{
+            active: continuousScroll,
+            disabled: false,
+            onClick: () => setContinuousScroll((value) => !value),
+          }}
+          elementLabels={{
+            active: showLabels,
+            disabled: false,
+            onClick: () => setShowLabels((value) => !value),
+          }}
+          elementSelector={{
+            activeElement,
+            disabled: !editingAllowed,
+            onChange: (value) => changeElement(value as ScreenplayElementType),
+            options: screenplayElementTypes.map((element) => ({
+              label: displayElement(element),
+              value: element,
+            })),
+          }}
+          inspector={{
+            active: panels.inspector,
+            disabled: false,
+            onClick: () => togglePanel('inspector'),
+          }}
+          navigator={{
+            active: panels.navigator,
+            disabled: false,
+            onClick: () => togglePanel('navigator'),
+          }}
+          redo={{
+            disabled: !editingAllowed || !editor?.can().redo(),
+            onClick: () => editor?.commands.redo(),
+          }}
+          undo={{
+            disabled: !editingAllowed || !editor?.can().undo(),
+            onClick: () => editor?.commands.undo(),
+          }}
+          zoom={{
+            fitModesDisabled: false,
+            onChoosePreset: chooseZoomPreset,
+            onZoomIn: () => updateZoom(ZOOM_STEP_PERCENT),
+            onZoomOut: () => updateZoom(-ZOOM_STEP_PERCENT),
+            percent: zoomPercent,
+            presetValue: zoomMode.kind === 'fixed' ? String(zoomMode.percent) : zoomMode.kind,
+          }}
+        />
+      }
+      workspace={
+        <div className="workspace">
+          {panels.navigator && (
+            /* The Navigator, now `navigatorPanel.tsx` -- the same panel the read-only comparison
+               renders, which lists the diff's own changed scenes there and this document's scenes
+               here. The tabs, their ids, the WAI-ARIA keyboard behaviour and every class name moved
+               across unchanged. */
+            <NavigatorPanel
+              activeTabId={navigatorTab}
+              entries={
+                navigatorTab === 'scenes'
+                  ? scenes.map((scene, index) => ({
+                      key: scene.id,
+                      onSelect: () => selectScene(scene),
+                      primary: `${index + 1}. ${scene.heading.text}`,
+                      secondary: `${scene.body.length} blocks`,
+                      selected: selectedScene?.id === scene.id,
+                    }))
+                  : characters.map((character) => ({
+                      key: character.name,
+                      onSelect: () => selectCharacter(character),
+                      primary: character.name,
+                      /*
                         The bare count is how many times this character speaks -- `cueBlockIds`,
                         the cues alone, not `blockIds`, which is the whole speech attribution and
                         would count parentheticals and every dialogue paragraph besides. It carries
                         no label because neither noun is true: "lines" is wrong for a count of cues,
                         and a count of blocks is not what a writer wants to know about a character.
-                      */}
-                      <small>
-                        {character.extensions.length > 0
+                      */
+                      secondary:
+                        character.extensions.length > 0
                           ? `${character.cueBlockIds.length} · ${character.extensions.join(', ')}`
-                          : `${character.cueBlockIds.length}`}
-                      </small>
-                    </button>
-                  </li>
-                ))}
-              </ol>
-            )}
-            <div className="navigator-footer">
-              {navigatorTab === 'scenes'
-                ? `${scenes.length} scenes · local draft`
-                : `${characters.length} characters · local draft`}
-            </div>
-          </aside>
-        )}
-        <section className="editor-region" aria-label="Screenplay editor" ref={editorRegionRef}>
-          <div className="ruler" aria-hidden="true">
-            <span>1</span>
-            <span>2</span>
-            <span>3</span>
-            <span>4</span>
-            <span>5</span>
-            <span>6</span>
-          </div>
-          <div
-            className="pages"
-            ref={pagesRef}
-            style={{ zoom: zoomPercent / 100 } as CSSProperties}
-          >
-            {/* CSS `zoom` on `.pages`, not `transform: scale()` on `.page`/`TitlePageView`
-                individually (this slice's departure from plan.md:683, which names
-                `transform-origin: top center` as evidence "scale was the original intent" -- see
-                progress/zoom-modes.md for the measurements that justified overriding it).
-                `transform` does not affect layout: it repaints a scaled box in place without ever
-                telling layout the box got bigger or smaller, so `.pages > * + *`'s `margin-top`
-                (styles.css, the title-page-to-content-page gap) stayed a fixed number of unscaled
-                pixels regardless of zoom -- shrinking, relative to a zoomed-in page, until the
-                title page's scaled rendering overlapped the first content page. CSS `zoom`, applied
-                once here to the shared parent rather than to each page individually, scales layout
-                itself: every descendant's box -- including the title page's own height and the
-                `margin-top` gap between it and `.page` -- grows or shrinks by the same factor
-                `.pages`'s `scrollHeight` already reports, so the gap keeps its proportion at every
-                zoom level with no separate compensation. Measured directly (a bare zoomed div, not
-                argued from spec): at zoom 0.5/1.0/1.5 a fixed 48px `margin-top` rendered as
-                24/48/72px and `scrollHeight` scaled exactly in step. */}
-            {titlePageState && (
-              <TitlePageView
-                awareness={collab.provider?.awareness ?? undefined}
-                onChange={updateTitlePageState}
-                readOnly={!editingAllowed}
-                state={titlePageState}
-                zoomPercent={zoomPercent}
-              />
-            )}
-            <article
-              className={continuousScroll ? 'page continuous' : 'page'}
-              style={
-                {
-                  '--fd-page-gap': `${PAGE_GAP_IN}in`,
-                  '--fd-page-stack-min-height': `${pageStackMinHeightIn(pageCount)}in`,
-                } as CSSProperties
+                          : `${character.cueBlockIds.length}`,
+                      selected: selectedCharacter?.name === character.name,
+                    }))
               }
-              aria-label={`${initial.title} screenplay canvas`}
-              onMouseDown={handlePageMouseDown}
-            >
-              <div className="page-number">DRAFT</div>
-              <div className={showLabels ? 'script-body show-element-labels' : 'script-body'}>
-                <EditorContent editor={editor} />
-              </div>
-            </article>
-          </div>
-        </section>
-        {panels.inspector && (
-          <aside className="panel inspector" aria-label="Inspector">
-            <div className="panel-heading">
-              <span>Inspector</span>
-              <button
-                aria-label="Close inspector"
-                onClick={() => togglePanel('inspector')}
-                title="Close inspector"
-                type="button"
-              >
-                ×
-              </button>
+              footer={
+                navigatorTab === 'scenes'
+                  ? `${scenes.length} scenes · local draft`
+                  : `${characters.length} characters · local draft`
+              }
+              onChangeTab={setNavigatorTab}
+              onClose={() => togglePanel('navigator')}
+              tabs={NAVIGATOR_TABS}
+            />
+          )}
+          <section className="editor-region" aria-label="Screenplay editor" ref={editorRegionRef}>
+            <div className="ruler" aria-hidden="true">
+              <span>1</span>
+              <span>2</span>
+              <span>3</span>
+              <span>4</span>
+              <span>5</span>
+              <span>6</span>
             </div>
-            <section className="inspector-section">
-              <h2>Active element</h2>
-              <p className="inspector-value">{displayElement(activeElement)}</p>
-              <p className="muted">Element changes keep the local block identity.</p>
-            </section>
-            <section className="inspector-section">
-              <h2>Scope</h2>
-              <p className="muted">
-                {initialContent
-                  ? 'This editor supports screenplay text blocks and a single title page. Notes, dual dialogue, page breaks, more than one title page, imports, exports, and print pagination are not editable here.'
-                  : 'This screenplay contains more than one title page, notes, dual dialogue, or page breaks. It is read-only until a compatible editor is available.'}
-              </p>
-            </section>
-          </aside>
-        )}
-      </div>
-      <footer className="statusbar">
-        <span aria-label="Active scene">
-          {selectedScene ? selectedScene.heading.text : 'No active scene'}
-        </span>
-        <span className="status-center" aria-live="polite">
-          {initialContent === undefined
-            ? 'Text editing is unavailable for this screenplay'
-            : entitlementReadOnly
-              ? 'Read-only · make this screenplay editable to save changes here'
-              : syncState === 'connecting'
-                ? 'Connecting…'
-                : syncState === 'denied'
-                  ? 'Access could not be confirmed · reload to try again'
-                  : syncState === 'timedOut'
-                    ? 'Still trying to connect · reload if this continues'
-                    : syncState === 'offline'
-                      ? // Yjs keeps every local edit queued and merges it in the instant the
-                        // connection recovers -- this is a connectivity report, never a warning
-                        // that work could be lost, which is exactly what distinguishes it from
-                        // the whole-document-`PUT` save-conflict state this replaces
-                        // (progress/collaboration-slice-1.md).
-                        'Offline · reconnecting… your edits are safe and will sync automatically'
-                      : projection.valid
-                        ? `Synced · ${wordCount} words · no print pagination`
-                        : `Draft needs attention · ${projection.issues[0] ?? 'Invalid screenplay data.'}`}
-        </span>
-        {initialContent !== undefined && !projection.valid && (
-          // Deliberately not inside `.status-center`, which the narrow-viewport media query
-          // hides entirely (styles.css) -- exactly the gap requirement 2 in
-          // progress/paste-sanitization.md exists to close: below that width the only place an
-          // invalid projection was ever announced (the text this duplicates, a few lines up)
-          // disappeared along with everything else in `.status-center`. Gated on
-          // `initialContent !== undefined`: the other reason `projection` can be invalid is the
-          // unrelated "this screenplay has features this editor can't open" case, which already
-          // has its own unambiguous message above and disables editing entirely.
-          <span className="status-attention" role="alert">
-            {projection.issues[0] ?? 'Invalid screenplay data.'}
-          </span>
-        )}
-        <ParticipantIndicator awareness={collab.provider?.awareness ?? undefined} />
-      </footer>
-      {exportError !== undefined && (
-        // A toast rather than a line in the status bar: this message names the block and element
-        // the writer has to go and fix, which the bar has no room for -- it already carries the
-        // save state, the word count and the page count, and collapses to 30px below 600px. It is
-        // also the wrong home for it in kind: the bar describes the document's ongoing state,
-        // while this describes one completed attempt that failed.
-        <Toast
-          message={exportError}
-          onDismiss={() => setExportError(undefined)}
-          title="Export failed"
-        />
-      )}
-      {/* SmartType's candidate list (smartTypeList.tsx). Mounted here, at the application root and
-          outside `.page`, for the reason the toast above is: it is fixed-position chrome placed in
-          viewport coordinates. Rendering it inside the manuscript would put a floating panel in
-          the box tree of a page whose every line position is normative. */}
-      <SmartTypeList editor={editor} />
-      {/* The element menu (elementMenu.tsx). At the application root and outside `.page` for the
-          same reason as the list above: it is fixed-position chrome placed in viewport
-          coordinates, and a floating panel inside a page whose every line position is normative
-          would be a way to move one. */}
-      <ElementMenu editor={editor} />
-    </main>
+            <div
+              className="pages"
+              ref={pagesRef}
+              style={{ zoom: zoomPercent / 100 } as CSSProperties}
+            >
+              {/* CSS `zoom` on `.pages`, not `transform: scale()` on `.page`/`TitlePageView`
+                  individually (this slice's departure from plan.md:683, which names
+                  `transform-origin: top center` as evidence "scale was the original intent" -- see
+                  progress/zoom-modes.md for the measurements that justified overriding it).
+                  `transform` does not affect layout: it repaints a scaled box in place without ever
+                  telling layout the box got bigger or smaller, so `.pages > * + *`'s `margin-top`
+                  (styles.css, the title-page-to-content-page gap) stayed a fixed number of unscaled
+                  pixels regardless of zoom -- shrinking, relative to a zoomed-in page, until the
+                  title page's scaled rendering overlapped the first content page. CSS `zoom`, applied
+                  once here to the shared parent rather than to each page individually, scales layout
+                  itself: every descendant's box -- including the title page's own height and the
+                  `margin-top` gap between it and `.page` -- grows or shrinks by the same factor
+                  `.pages`'s `scrollHeight` already reports, so the gap keeps its proportion at every
+                  zoom level with no separate compensation. Measured directly (a bare zoomed div, not
+                  argued from spec): at zoom 0.5/1.0/1.5 a fixed 48px `margin-top` rendered as
+                  24/48/72px and `scrollHeight` scaled exactly in step. */}
+              {titlePageState && (
+                <TitlePageView
+                  awareness={collab.provider?.awareness ?? undefined}
+                  onChange={updateTitlePageState}
+                  readOnly={!editingAllowed}
+                  state={titlePageState}
+                  zoomPercent={zoomPercent}
+                />
+              )}
+              <article
+                className={continuousScroll ? 'page continuous' : 'page'}
+                style={
+                  {
+                    '--fd-page-gap': `${PAGE_GAP_IN}in`,
+                    '--fd-page-stack-min-height': `${pageStackMinHeightIn(pageCount)}in`,
+                  } as CSSProperties
+                }
+                aria-label={`${initial.title} screenplay canvas`}
+                onMouseDown={handlePageMouseDown}
+              >
+                <div className="page-number">DRAFT</div>
+                <div className={showLabels ? 'script-body show-element-labels' : 'script-body'}>
+                  <EditorContent editor={editor} />
+                </div>
+              </article>
+            </div>
+          </section>
+          {panels.inspector && (
+            /* The Inspector, now `inspectorPanel.tsx` -- the same panel frame the read-only comparison
+               renders, with this document's active element and scope here and the comparison's own
+               sides, counts and legend there. */
+            <InspectorPanel
+              onClose={() => togglePanel('inspector')}
+              sections={[
+                {
+                  content: (
+                    <>
+                      <p className="inspector-value">{displayElement(activeElement)}</p>
+                      <p className="muted">Element changes keep the local block identity.</p>
+                    </>
+                  ),
+                  heading: 'Active element',
+                  key: 'active-element',
+                },
+                {
+                  content: (
+                    <p className="muted">
+                      {initialContent
+                        ? 'This editor supports screenplay text blocks and a single title page. Notes, dual dialogue, page breaks, more than one title page, imports, exports, and print pagination are not editable here.'
+                        : 'This screenplay contains more than one title page, notes, dual dialogue, or page breaks. It is read-only until a compatible editor is available.'}
+                    </p>
+                  ),
+                  heading: 'Scope',
+                  key: 'scope',
+                },
+              ]}
+            />
+          )}
+        </div>
+      }
+    />
   );
 }

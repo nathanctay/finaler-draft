@@ -13,7 +13,16 @@ export interface OverflowMenuItem {
   disabled?: boolean;
   disabledReason?: string | undefined;
   label: string;
-  onSelect: () => void;
+  /**
+   * Omitted only by an item that is permanently disabled on the screen rendering it -- the read-only
+   * revision comparison's File menu, where "Save named revision…" and the three exports have no
+   * meaning at all and so have nothing to call. Required in spirit everywhere else: an *enabled*
+   * item with no `onSelect` would be exactly the click-that-does-nothing this component's `disabled`
+   * handling exists to make unnecessary. It is optional rather than required-with-a-no-op because a
+   * no-op handler on an unreachable code path is worse than no handler: it reads as a forgotten
+   * implementation, and nothing would ever call it to prove otherwise.
+   */
+  onSelect?: (() => void) | undefined;
 }
 
 /**
@@ -55,13 +64,31 @@ export function OverflowMenu({
   // comment for why a synthesized initial `false` must not be reported as a transition.
   const isFirstRender = useRef(true);
 
+  /**
+   * Every item a keyboard can actually land on. `:not(:disabled)` is load-bearing rather than tidy: a
+   * disabled `<button>` cannot take focus at all, so a menu whose *first* item is disabled used to
+   * swallow both the opening focus move and every arrow key -- `focus()` was a no-op, which left focus
+   * on the trigger, which left `indexOf(document.activeElement)` at `-1`, which sent ArrowDown back to
+   * the same unfocusable item. The whole menu was then keyboard-inert while looking open.
+   *
+   * Nothing had exercised that before: every caller's first item was enabled. The read-only revision
+   * comparison's File menu is the first whose first item never is (`Document settings…` has no meaning
+   * on a stored snapshot), and the editor's own File menu has had the same latent fault all along for a
+   * read-only screenplay, where `editingAllowed` disables that same first item.
+   */
+  function focusableItems(): HTMLElement[] {
+    return Array.from(
+      menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [],
+    );
+  }
+
   // Opening moves focus into the menu, which is what lets Tab and the arrow-key handling below
   // reach every item without a mouse. Closing (by any route -- Escape, selecting an item, or
   // losing focus) never moves focus on its own; only Escape's own handler returns it to the
   // trigger, matching the specific requirement in plan.md and the scope.
   useEffect(() => {
     if (!open) return;
-    menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+    focusableItems()[0]?.focus();
   }, [open]);
 
   // Reports transitions, not the initial render. `onOpenChange` was previously called from
@@ -95,9 +122,7 @@ export function OverflowMenu({
   }
 
   function moveFocus(delta: 1 | -1) {
-    const menuItems = Array.from(
-      menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [],
-    );
+    const menuItems = focusableItems();
     if (menuItems.length === 0) return;
     const currentIndex = menuItems.indexOf(document.activeElement as HTMLElement);
     const nextIndex = (currentIndex + delta + menuItems.length) % menuItems.length;
@@ -121,6 +146,15 @@ export function OverflowMenu({
           if (event.key === 'ArrowDown' && !open) {
             event.preventDefault();
             setOpen(true);
+            return;
+          }
+          // Escape from the trigger as well as from the list. Focus is normally inside the menu by the
+          // time a writer presses Escape, and the list's own handler catches it there -- but a menu with
+          // no enabled item at all has nowhere inside it to put focus, which would otherwise leave such
+          // a menu open with no keyboard way to dismiss it.
+          if (event.key === 'Escape' && open) {
+            event.preventDefault();
+            setOpen(false);
           }
         }}
         ref={triggerRef}
@@ -153,7 +187,7 @@ export function OverflowMenu({
               key={item.label}
               onClick={() => {
                 setOpen(false);
-                item.onSelect();
+                item.onSelect?.();
               }}
               role="menuitem"
               title={item.disabled ? item.disabledReason : undefined}

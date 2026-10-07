@@ -194,6 +194,80 @@ describe('OverflowMenu', () => {
     expect(onSelect).toHaveBeenCalledOnce();
   });
 
+  /**
+   * A menu whose first item is disabled must still be keyboard-operable. A disabled `<button>` cannot
+   * take focus, so the opening focus move has to land on the first *enabled* item instead -- otherwise
+   * focus stays on the trigger, the arrow keys compute their next index from an element that is not in
+   * the list, and the whole menu is inert while looking open.
+   *
+   * The read-only revision comparison's File menu is the first caller whose first item is never
+   * enabled; the editor's own File menu has had the same shape all along whenever a screenplay is
+   * read-only.
+   */
+  it('moves opening focus past a disabled first item, to the first one that can take it', async () => {
+    const user = userEvent.setup();
+    render(
+      <OverflowMenu
+        items={[
+          { disabled: true, disabledReason: 'Not here.', label: 'Unavailable…' },
+          { label: 'Available…', onSelect: vi.fn() },
+        ]}
+        label="Actions"
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Actions' }));
+    expect(screen.getByRole('menuitem', { name: 'Available…' })).toHaveFocus();
+  });
+
+  it('skips disabled items when the arrow keys move between them', async () => {
+    const user = userEvent.setup();
+    render(
+      <OverflowMenu
+        items={[
+          { label: 'First…', onSelect: vi.fn() },
+          { disabled: true, disabledReason: 'Not here.', label: 'Unavailable…' },
+          { label: 'Last…', onSelect: vi.fn() },
+        ]}
+        label="Actions"
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Actions' }));
+    expect(screen.getByRole('menuitem', { name: 'First…' })).toHaveFocus();
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getByRole('menuitem', { name: 'Last…' })).toHaveFocus();
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getByRole('menuitem', { name: 'First…' })).toHaveFocus();
+    await user.keyboard('{ArrowUp}');
+    expect(screen.getByRole('menuitem', { name: 'Last…' })).toHaveFocus();
+  });
+
+  /** With nothing inside it able to take focus, focus stays on the trigger -- so Escape has to be
+   * handled there too, or such a menu cannot be dismissed from the keyboard at all. */
+  it('closes on Escape even when every item is disabled and focus never left the trigger', async () => {
+    const user = userEvent.setup();
+    render(
+      <OverflowMenu
+        items={[
+          { disabled: true, disabledReason: 'Not here.', label: 'One…' },
+          { disabled: true, disabledReason: 'Not here either.', label: 'Two…' },
+        ]}
+        label="Actions"
+      />,
+    );
+
+    const trigger = screen.getByRole('button', { name: 'Actions' });
+    await user.click(trigger);
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(trigger).toHaveFocus();
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  });
+
   it('notifies onOpenChange on every open/close transition', async () => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();
