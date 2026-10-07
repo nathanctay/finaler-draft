@@ -11,6 +11,23 @@
   --surface-10: #d9e9ef;
   --surface-11: #d8dde0;
   --surface-12: #c9d0d4;
+  /* The inline added-mark background on the comparison's sheet. Derived here, on `:root`, precisely so
+     that `.dark`'s redefinition of `--surface-10` does not follow it onto a page that stays white --
+     see `.dark .diff-manuscript ins`. */
+  --fd-diff-added-surface: var(--surface-10);
+  /* The inline removed-mark background. A literal rose rather than a reuse of `--surface-12`, which the
+     toolbar's `.rule` separator also owns, and deliberately *red* rather than the grey it replaced:
+     measured, `--surface-12` sat only dE 8.9 from the added mark's pale blue -- both are desaturated
+     blue-greys, so at a glance, and especially when the two marks are not adjacent, they read as the
+     same highlight. This rose sits dE 18.4 from the added blue, better than twice the separation,
+     while staying dE 17.9 from the white page -- almost exactly the grey's own 17.2, so removals
+     became legible as removals without becoming louder on the sheet. Not derived from a `--surface-*`
+     token: the sheet stays white in both themes, so unlike `--fd-diff-added-surface` this needs no
+     dark-mode escape, and a literal keeps it that way. Red paired with blue, rather than the
+     conventional red/green, is also the better pair for the red-green colour blindness that
+     convention is worst for -- and colour is never the only cue here regardless (strikethrough vs
+     underline, the gutter glyph, and a visually-hidden word all say it too). */
+  --fd-diff-removed-surface: #f3d2d4;
   --surface-13: #75bc88;
   --surface-14: #276252;
   --surface-15: #34566d;
@@ -1911,8 +1928,25 @@ select:focus-visible,
    inventing a second brand colour plan.md's "one functional accent color" argues against. Keeps
    `.readonly-banner`'s own `--surface-06` background (which already has a `.dark` redefinition)
    rather than introducing a second background token that would need one of its own. */
-.readonly-banner-historical {
+.readonly-banner-historical,
+/* The comparison banner (the diff route) shares the preview's accent rather than inventing a
+   second one, because it is the same state reached another way: you are reading a stored snapshot,
+   not the live document. They never appear together, and which one it is is carried by the words
+   ("Historical revision." / "Comparison."), not by the colour -- the same non-colour-only rule the
+   diff marks themselves follow. plan.md's "one functional accent color" is the reason this is one
+   rule and not two tokens. */
+.readonly-banner-comparison {
   border-left: 3px solid var(--border-12);
+}
+
+/* A banner's right-hand action group, for a banner with more than one action: `.readonly-banner` is
+   already `justify-content: space-between`, so this single child lands at the far end exactly as
+   the entitlement banner's lone button does -- this only keeps two controls from being spread apart
+   from each other by the same rule. */
+.readonly-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .readonly-banner .field-error {
@@ -2384,6 +2418,425 @@ select:focus-visible,
   font-size: 12px;
 }
 
+/* Collaboration slice 4b: each revision row now carries a second link -- into the screenplay-aware
+   diff view, compared against the screenplay's current live content -- alongside its existing link
+   into the read-only preview. A plain flex row, not a second `.project-row-link`-style full-row
+   treatment: the diff link is explicitly a secondary action on the row, not an equally weighted
+   alternative to opening the preview itself. */
+.revision-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.revision-row-link {
+  flex: 1;
+}
+
+.revision-row-diff-link {
+  color: var(--text-08);
+  font-size: 12px;
+  text-decoration: underline;
+  white-space: nowrap;
+}
+
+.revision-row-diff-link:hover {
+  color: var(--text-17);
+}
+
+/*
+ * Collaboration slice 4b's inline screenplay diff view
+ * (routes/projects/$projectId.screenplays.$screenplayId.revisions.$revisionId.diff.tsx).
+ *
+ * Two type systems, deliberately, per plan.md's "Manuscript and interface are separate type systems":
+ * everything above the sheet (`.diff-page-body` and its children) is ordinary interface chrome in
+ * pixels and IBM Plex Sans, while the sheet itself reuses the editor's own `.page` / `.script-body` /
+ * `[data-screenplay-element]` rules verbatim so the manuscript's indents, measures and line grid come
+ * from the single authority (`pageGeometryCss.ts`'s projection of
+ * `@finaler-draft/screenplay/pageFormat`) rather than a second set of numbers written down here.
+ * Nothing in this section restates a page-format figure.
+ *
+ * **Every mark added to the manuscript contributes zero layout.** The gutter is `position: absolute`
+ * out in the page's own left margin (the technique `.scene-number`, `.smarttype-ghost` and
+ * `.remote-cursor` already use for the same reason), and the inline marks are a text decoration plus a
+ * background on `<del>`/`<ins>` -- neither affects a glyph's advance width or the line box. The
+ * character grid is normative, and this view may not perturb it;
+ * `screenplay-diff-persistence.spec.ts` measures every rendered character against its own cell at two
+ * zoom levels rather than trusting these rules to keep behaving.
+ */
+/* What is left above the sheet: the pagination caveat, and nothing else. The legend and the
+   document-level change list moved into the Inspector (`inspectorPanel.tsx`; the route's own
+   comment says why), the comparison's identity and its way out are in the shell's banner row, and
+   its change counts are in the shell's status bar and the Inspector. It sits inside the scrolling
+   `.diff-manuscript-region` and is centred on the sheet's own axis by auto margins, matching
+   `.pages` below it.
+
+   `100%`, not `calc(100vw - 40px)`: the workspace row now holds the Navigator and Inspector panels
+   beside this region, so the viewport is no longer the width this is allowed to take -- the
+   region's own content box is. The old figure would have overflowed the region by exactly the two
+   panels' width. */
+.diff-page-body {
+  margin: 28px auto 20px;
+  width: min(860px, 100%);
+}
+
+/* The two sides being compared, inside the banner's own sentence (the diff route). Weighted so the
+   two revisions can be picked out of it at a glance; everything else about it is the banner's. */
+.diff-sides {
+  font-weight: 600;
+}
+
+/* The change counts, in the status bar (the diff route's `statusbar` slot -- see its comment for
+   why the counts, and only the counts, are there). `font-weight: 600` matching `.status-attention`
+   and `.status-conflict-feedback-error`: this is the bar's only content rather than one item among
+   several, so it is the line a reader is meant to read. */
+.diff-summary {
+  font-weight: 600;
+}
+
+/*
+ * The one thing a reader must not have to discover for themselves: this is a comparison, not a
+ * script. Showing removed lines in place necessarily puts more content on the sheet than the document
+ * holds, so page boundaries computed here would be boundaries no real document has -- which is why
+ * `.page.diff-manuscript` paints none and why this note says so in words rather than leaving the
+ * absence to be noticed.
+ */
+.diff-caveat {
+  margin: 0 0 14px;
+  border-left: 3px solid var(--border-09);
+  background: var(--surface-06);
+  padding: 10px 12px;
+  color: var(--text-12);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* The accessibility contract, made visible: each mark is a glyph and a word, so nothing in this view
+   is distinguishable only by colour. */
+.diff-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  font-size: 12px;
+}
+
+.diff-legend li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-11);
+}
+
+.diff-legend-glyph {
+  min-width: 1.4em;
+  border: 1px solid var(--border-04);
+  text-align: center;
+  font-family: var(--fd-typeface);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.diff-legend-sample-removed {
+  background: var(--fd-diff-removed-surface);
+  text-decoration: line-through;
+}
+
+.diff-legend-sample-added {
+  background: var(--surface-10);
+  text-decoration: underline;
+}
+
+/* Document-level differences (title, document settings, title pages) have no line in the body to be
+   marked on, so they are named in the Inspector's "Document" section instead -- see the route's own
+   `DocumentLevelChanges` comment. The section supplies the heading, so there is no `h2` rule here;
+   the margin is the section's too. */
+.diff-document-changes ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.diff-document-changes li {
+  padding: 2px 0;
+}
+
+.diff-document-changes del {
+  background: var(--surface-12);
+  text-decoration: line-through;
+}
+
+.diff-document-changes ins {
+  background: var(--surface-10);
+  text-decoration: underline;
+}
+
+/*
+ * The Navigator and Inspector, on the comparison only.
+ *
+ * Every rule here is scoped under `.diff-screen` (the route's own shell variant) rather than keyed off
+ * the per-row status attribute alone, for one layout reason: the change marker sits in a gutter at the
+ * left of each row, and a gutter that only existed on rows that happen to carry a status would leave
+ * the unchanged scenes in the same list starting at a different indent. Scoping by screen indents
+ * every row in this panel equally, and -- the reason that matters more -- makes it structurally
+ * impossible for any of this to reach the editor's own Navigator, whose rendered output this pass is
+ * required to leave exactly as it was.
+ */
+.diff-screen .scene-list button {
+  position: relative;
+  padding-left: 28px;
+}
+
+/*
+ * The marker: `+`, `-` and `~` are the manuscript gutter's own three glyphs and the legend's, so a
+ * reader learns one set of symbols for this view rather than two. `position: absolute` keeps the
+ * marker out of the row's flex flow entirely, which is what lets the row keep exactly the two in-flow
+ * children -- the heading and the trailing figure -- that `.scene-list button`'s own
+ * `justify-content: space-between` is written for. The status is also a word, in the row's
+ * visually-hidden label (`navigatorPanel.tsx`) and in the visible trailing figure: nothing in this
+ * panel is signalled by colour alone, or by a glyph alone.
+ */
+.diff-screen .navigator-status-glyph {
+  position: absolute;
+  top: 8px;
+  left: 9px;
+  width: 14px;
+  color: var(--text-08);
+  font-family: var(--fd-typeface);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+/* The fourth marker has no counterpart among the manuscript's three ASCII glyphs -- the manuscript
+   spells a move out as the word `MOVED` in its margin, which does not fit a 14px column -- so the
+   Navigator uses `⇄`. The sans face is not cosmetic: the manuscript typeface is Courier Prime, which
+   is not guaranteed to carry U+21C4, while 'IBM Plex Sans' (already loaded for every other pixel of
+   chrome on this screen) does. `--border-11` is the same functional accent `.diff-scene-move` paints a
+   relocation with in the manuscript itself. */
+.diff-screen [data-navigator-status='moved'] .navigator-status-glyph {
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 11px;
+  color: var(--border-11);
+}
+
+/* The same two functional accents the manuscript's own gutter uses for the same two facts. */
+.diff-screen [data-navigator-status='removed'] .navigator-status-glyph {
+  color: var(--feedback-error);
+}
+
+/* A tab with nothing to list says so, rather than rendering as a blank panel a reader cannot tell
+   from a failure. Only the comparison supplies this text; the editor's own Navigator renders an empty
+   list exactly as it always has (`navigatorPanel.tsx`'s `emptyMessage`). */
+.navigator-empty {
+  padding: 8px 12px;
+  color: var(--text-07);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+/* The change counts, itemised in the Inspector rather than comma-joined as in the status bar. */
+.inspector-counts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  color: var(--text-11);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* The legend, in the Inspector section it moved into this pass. One per line: the panel is 235px wide,
+   and a wrapped two-column legend reads as a grid of unrelated fragments. */
+.inspector-section .diff-legend {
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+}
+
+/*
+ * The comparison's counterpart to `.editor-region`: the single flex child of the shell's
+ * `workspace` row (`.workspace`, applicationShell.tsx), and so the one region on this screen that
+ * scrolls -- `.application`'s `minmax(0, 1fr)` workspace track is what constrains it, exactly as it
+ * constrains the editor's. `flex: 1` is what makes it take that whole row.
+ *
+ * `flex-direction: column` so the reading apparatus (`.diff-page-body`) scrolls with the sheet
+ * rather than sitting above it in a band of its own: there is one thing to read here, top to
+ * bottom, and a legend pinned out of reach of the lines it explains would be the wrong half of the
+ * trade.
+ *
+ * `margin-inline: auto` on the children does the horizontal centring, never `justify-content` or
+ * `align-items: center` -- see `.editor-region`'s own comment for the scroll-origin pitfall that
+ * choice avoids, which applies identically here because this is also a scrollable flex container
+ * holding a child that can grow wider than it (the sheet, under zoom). Auto cross-axis margins also
+ * suppress the column's default `stretch`, so `.pages` stays content-sized and the sheet keeps its
+ * real page width.
+ */
+.diff-manuscript-region {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  overflow: auto;
+  padding: 0 24px 56px;
+  background: var(--surface-11);
+}
+
+/*
+ * The sheet. `background-image: none` removes `.page`'s repeating page-boundary gradient, and
+ * `min-height: 0` removes its multi-page stack height: both describe where physical pages begin and
+ * end, which this view cannot truthfully say. What is left is one continuous content-sized sheet at
+ * the real page width and the real margins, which is exactly what a reading view should be.
+ */
+.page.diff-manuscript {
+  min-height: 0;
+  padding-bottom: var(--fd-page-margin-top);
+  background-image: none;
+}
+
+/* `.script-body [data-screenplay-block]:empty::after` is the editor's "Type screenplay text"
+   placeholder. An authored blank line is an ordinary, unchanged block here and must stay blank -- this
+   view has nothing to prompt anyone to type. */
+.diff-manuscript .script-body [data-screenplay-block]:empty::after {
+  content: none;
+}
+
+/*
+ * The inline marks. `<del>`/`<ins>` are the HTML elements that mean removed and added content, so
+ * assistive technology reads them without this view inventing an ARIA vocabulary. Every property that
+ * could change a glyph's position is explicitly neutralised: no padding, no margin, no border, no font
+ * change. Only `background` and `text-decoration` remain, and neither participates in layout -- which
+ * is what makes a mark safe to draw into a fixed character grid at all.
+ */
+.diff-manuscript del,
+.diff-manuscript ins {
+  margin: 0;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  text-decoration-thickness: from-font;
+}
+
+.diff-manuscript del {
+  background: var(--fd-diff-removed-surface);
+  color: var(--text-13);
+  text-decoration-line: line-through;
+}
+
+.diff-manuscript ins {
+  background: var(--surface-10);
+  color: var(--text-16);
+  text-decoration-line: underline;
+}
+
+/*
+ * The gutter: the non-colour cue that does not depend on reading the text at all. `position: absolute`
+ * with `right: calc(100% + ...)` places it in the page's own left margin, measured from its own
+ * block's left edge -- so it lands left of the text whatever that element's indent is, with no rule
+ * per element and no number from the page format restated here. Out of flow, so it contributes no
+ * width to any line and cannot move a character; `pointer-events`/`user-select: none` match what it
+ * is, which is not content.
+ */
+.diff-manuscript .diff-gutter {
+  position: absolute;
+  top: 0;
+  right: calc(100% + 0.18in);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  width: 1in;
+  color: var(--text-08);
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.25;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+
+.diff-manuscript .diff-gutter-glyph {
+  font-family: var(--fd-typeface);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.diff-manuscript [data-diff-mark='removed'] .diff-gutter-glyph {
+  color: var(--feedback-error);
+}
+
+.diff-manuscript [data-diff-moved] .diff-gutter-note {
+  color: var(--border-11);
+}
+
+/*
+ * Structural rows: a forced page break, and the two ends of a relocated scene. Interface chrome inside
+ * the sheet, deliberately -- sans-serif and in pixels, so a reader can never mistake one for a line of
+ * the screenplay. They occupy vertical space, which is the one thing this view already concedes it
+ * cannot keep faithful (see `.diff-caveat`); they never affect any block's horizontal geometry.
+ */
+.diff-manuscript .diff-structural-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 12px 0;
+  border-top: 1px dashed var(--border-05);
+  padding-top: 6px;
+  color: var(--text-09);
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.diff-manuscript .diff-structural-glyph {
+  flex: none;
+  color: var(--text-08);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+/* `--border-11` is the same functional accent this codebase already uses for "moved" -- the one fact
+   the whole feature exists to make legible on its own (plan.md's stable-id reordering requirement). */
+.diff-manuscript .diff-scene-move {
+  border-top-color: var(--border-11);
+  color: var(--border-11);
+}
+
+.diff-manuscript .diff-scene-move .diff-structural-glyph {
+  color: var(--border-11);
+}
+
+/*
+ * Screen only, enforced rather than asked for. plan.md requires that revision history, Track Changes
+ * and production revision sets never share one implementation or interface state; a printed copy of
+ * this view is precisely the artifact that would be mistaken for the third of those (the asterisk
+ * revision marks computed against a lock). Printing this route therefore yields the refusal and
+ * nothing else -- not the sheet, not the marks, not the chrome.
+ */
+.diff-print-refusal {
+  display: none;
+}
+
+@media print {
+  .diff-screen > *:not(.diff-print-refusal) {
+    display: none;
+  }
+
+  .diff-print-refusal {
+    display: block;
+    padding: 24px;
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 12pt;
+    line-height: 1.5;
+  }
+}
+
 .deleted-page-section:first-of-type {
   margin-top: 0;
 }
@@ -2547,6 +3000,21 @@ select:focus-visible,
 
 .dark .page {
   color: var(--dark-text-09);
+}
+
+/*
+ * The dark canvas reaches the comparison too -- it has a canvas, so the toggle is live there rather
+ * than disabled. `.dark` redefines `--surface-10` (see its own block at the top of this file) to a
+ * dark teal for the chrome's benefit, and the added-mark background is the one use of that token that
+ * is painted *on the sheet*, which stays white under a dark canvas. Inheriting the chrome's value
+ * there would put dark teal behind the page's own dark text. Restated from `:root`'s own value via a
+ * token resolved on `:root`, so there is still exactly one place the added-mark colour is written
+ * down: a custom property's `var()` reference is substituted on the element that declares it, so
+ * `--fd-diff-added-surface` resolves against `:root`'s `--surface-10` and inherits that resolved value
+ * past `.dark`'s redefinition.
+ */
+.dark .diff-manuscript ins {
+  background: var(--fd-diff-added-surface);
 }
 
 /*

@@ -1,4 +1,9 @@
-import { screenplaySchema, type Screenplay } from '@finaler-draft/screenplay';
+import {
+  screenplaySchema,
+  screenplayBlockSchema,
+  titlePageSchema,
+  type Screenplay,
+} from '@finaler-draft/screenplay';
 import { PASSWORD_REQUIREMENTS_MESSAGE } from '@finaler-draft/config';
 import { z } from 'zod';
 import { authClient } from './authClient.js';
@@ -67,6 +72,88 @@ const revisionDetailSchema = revisionListItemSchema.extend({
   screenplay: screenplaySchema,
 });
 const createRevisionResponseSchema = revisionListItemSchema.extend({ created: z.boolean() });
+
+// Collaboration slice 4b's screenplay-aware diff. Mirrors apps/api/src/app.ts's own
+// `revisionDiffResponseSchema` and its constituent schemas field for field, down to reusing the
+// same `screenplayBlockSchema`/`titlePageSchema` for `before`/`after` payloads -- the identical
+// "one real definition of this shape" reasoning the server-side schema comment gives.
+const identifiedDiffStatusSchema = z.enum(['added', 'removed', 'matched']);
+const screenplayBlockDiffEntrySchema = z.object({
+  id: z.string().uuid(),
+  status: identifiedDiffStatusSchema,
+  moved: z.boolean(),
+  changed: z.boolean(),
+  elementTypeChanged: z.boolean(),
+  textChanged: z.boolean(),
+  beforeIndex: z.number().optional(),
+  afterIndex: z.number().optional(),
+  before: screenplayBlockSchema.optional(),
+  after: screenplayBlockSchema.optional(),
+});
+const screenplaySceneDiffEntrySchema = z.object({
+  id: z.string(),
+  area: z.enum(['scene', 'preamble']),
+  status: identifiedDiffStatusSchema,
+  moved: z.boolean(),
+  beforeIndex: z.number().optional(),
+  afterIndex: z.number().optional(),
+  beforeHeadingText: z.string().optional(),
+  afterHeadingText: z.string().optional(),
+  beforeSceneNumber: z.string().optional(),
+  afterSceneNumber: z.string().optional(),
+  headingTextChanged: z.boolean(),
+  blocks: z.array(screenplayBlockDiffEntrySchema),
+});
+const titlePageDiffEntrySchema = z.object({
+  id: z.string().uuid(),
+  status: identifiedDiffStatusSchema,
+  moved: z.boolean(),
+  changed: z.boolean(),
+  beforeIndex: z.number().optional(),
+  afterIndex: z.number().optional(),
+  before: titlePageSchema.optional(),
+  after: titlePageSchema.optional(),
+});
+const documentSettingsDiffEntrySchema = z.object({
+  field: z.enum([
+    'characterIndentIn',
+    'parentheticalIndentIn',
+    'parentheticalWidthIn',
+    'pageNumberStyle',
+    'sceneNumbersEnabled',
+    'autoMoreContinued',
+  ]),
+  before: z.union([z.number(), z.string(), z.boolean()]),
+  after: z.union([z.number(), z.string(), z.boolean()]),
+});
+const screenplayDiffSchema = z.object({
+  titleChanged: z.boolean(),
+  titleBefore: z.string(),
+  titleAfter: z.string(),
+  documentSettingsChanges: z.array(documentSettingsDiffEntrySchema),
+  titlePages: z.array(titlePageDiffEntrySchema),
+  blocks: z.array(screenplayBlockDiffEntrySchema),
+  scenes: z.array(screenplaySceneDiffEntrySchema),
+  isEmpty: z.boolean(),
+});
+const revisionDiffSideSchema = z.object({
+  id: z.string(),
+  kind: z.enum(['named', 'idle_session', 'structural_change', 'export']).nullable(),
+  label: z.string().nullable(),
+  createdAt: z.string().nullable(),
+});
+// `olderScreenplay`/`newerScreenplay`: the two whole canonical projections the diff was computed
+// from, which the inline diff view renders the document itself out of -- see `RevisionDiffResult`'s
+// own comment in `apps/api/src/revisions.ts` for why the diff alone is not enough and why these
+// travel with it rather than being fetched separately.
+const revisionDiffResponseSchema = z.object({
+  screenplayId: z.string().uuid(),
+  older: revisionDiffSideSchema,
+  newer: revisionDiffSideSchema,
+  diff: screenplayDiffSchema,
+  olderScreenplay: screenplaySchema,
+  newerScreenplay: screenplaySchema,
+});
 // Mirrors apps/api/src/app.ts's `describeEntitlement` response shape field for field (see that
 // function's own comment for why `cooldownEndsAt` is server-derived rather than recomputed here
 // from `slotUpdatedAt` plus a client-side copy of the cooldown interval).
@@ -402,6 +489,17 @@ export const api = {
   // the live document. See routes/projects/$projectId.screenplays.$screenplayId.revisions.$revisionId.tsx.
   revision: (screenplayId: string, revisionId: string) =>
     json(`/api/screenplays/${screenplayId}/revisions/${revisionId}`, revisionDetailSchema),
+  // Collaboration slice 4b's screenplay-aware diff. With `against` omitted, compares against the
+  // screenplay's current live content -- the default the diff view itself uses, and the exact
+  // comparison a future restore-preview (plan.md's restore flow, step 1) will need. With `against`
+  // supplied, compares two stored revisions directly.
+  revisionDiff: (screenplayId: string, revisionId: string, against?: string) =>
+    json(
+      `/api/screenplays/${screenplayId}/revisions/${revisionId}/diff${
+        against ? `?against=${against}` : ''
+      }`,
+      revisionDiffResponseSchema,
+    ),
   // `jsonWithServerMessage`, matching `switchEditableScreenplay`/`createScreenplay` above: a
   // refusal here (403, not owner/editor) carries the server's own explanation, shown inline by the
   // caller rather than a bare "Request failed (403)".
@@ -447,3 +545,8 @@ export type PersistedScreenplay = {
 };
 export type RevisionListItem = z.infer<typeof revisionListItemSchema>;
 export type RevisionDetail = z.infer<typeof revisionDetailSchema>;
+export type ScreenplayDiff = z.infer<typeof screenplayDiffSchema>;
+export type ScreenplayBlockDiffEntry = z.infer<typeof screenplayBlockDiffEntrySchema>;
+export type ScreenplaySceneDiffEntry = z.infer<typeof screenplaySceneDiffEntrySchema>;
+export type RevisionDiffSide = z.infer<typeof revisionDiffSideSchema>;
+export type RevisionDiffResult = z.infer<typeof revisionDiffResponseSchema>;

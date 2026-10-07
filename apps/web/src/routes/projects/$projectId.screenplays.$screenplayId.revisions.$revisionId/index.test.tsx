@@ -1,25 +1,25 @@
 import { render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { SessionUser } from '../../api.js';
+import type { SessionUser } from '../../../api.js';
 import {
   projectId,
   resetRouteHarness,
   revisionId,
   routeState,
   screenplayId,
-} from '../../test/routeHarness.js';
+} from '../../../test/routeHarness.js';
 
 vi.mock('@tanstack/react-query', async () =>
-  (await import('../../test/routeHarness.js')).reactQueryMock(),
+  (await import('../../../test/routeHarness.js')).reactQueryMock(),
 );
 vi.mock('@tanstack/react-router', async (importOriginal) =>
-  (await import('../../test/routeHarness.js')).reactRouterMock(importOriginal),
+  (await import('../../../test/routeHarness.js')).reactRouterMock(importOriginal),
 );
-vi.mock('../../App.js', async () =>
-  (await import('../../test/routeHarness.js')).editorModuleMock(),
+vi.mock('../../../App.js', async () =>
+  (await import('../../../test/routeHarness.js')).editorModuleMock(),
 );
 
-const { Route } = await import('./$projectId.screenplays.$screenplayId.revisions.$revisionId.js');
+const { Route } = await import('./index.js');
 const RevisionPreviewPage = Route.options.component!;
 
 const revisionDetail = {
@@ -104,7 +104,7 @@ describe('revision preview page', () => {
     };
     render(<RevisionPreviewPage />);
     expect(await screen.findByTestId('historical-revision')).toHaveTextContent(
-      'Automatic — idle session',
+      'Autosave — idle session',
     );
   });
 });

@@ -11,6 +11,7 @@ export default defineConfig({
     '**/titlepage-cursors-persistence.spec.ts',
     '**/offline-persistence.spec.ts',
     '**/revision-history-persistence.spec.ts',
+    '**/screenplay-diff-persistence.spec.ts',
   ],
   timeout: 30_000,
   reporter: 'list',

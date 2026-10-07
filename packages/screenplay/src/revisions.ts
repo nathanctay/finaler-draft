@@ -61,8 +61,13 @@ export interface StructuralChangeMeasure {
  * dual-dialogue exchange is counted the same way as the same lines would be if they were not
  * paired -- one block per line of dialogue, not one opaque unit regardless of how much of it
  * changed. `page_break` has no nested content and passes through unchanged.
+ *
+ * Exported for `diff.ts` (collaboration slice 4b's screenplay-aware diff): block-level move
+ * detection and per-block change classification both need the identical flattened sequence this
+ * module already established for `measureStructuralChange`, not a second, independently-flattened
+ * copy that could drift from this one.
  */
-function flattenScreenplayBlocks(blocks: readonly ScreenplayBlock[]): ScreenplayBlock[] {
+export function flattenScreenplayBlocks(blocks: readonly ScreenplayBlock[]): ScreenplayBlock[] {
   const flat: ScreenplayBlock[] = [];
   for (const block of blocks) {
     if (block.type === 'dual_dialogue') {
@@ -75,22 +80,53 @@ function flattenScreenplayBlocks(blocks: readonly ScreenplayBlock[]): Screenplay
 }
 
 /**
- * A content fingerprint for one (already-flattened) block -- two blocks with the same `id` compare
- * equal here exactly when nothing about them that a reader would notice has changed. Exhaustive
- * over every post-flatten block kind; `dual_dialogue` cannot reach this function (flattened away by
- * `flattenScreenplayBlocks` before this is ever called), so its branch exists only so this function
+ * The comparable textual payload of one (already-flattened) block -- everything about it a reader
+ * would notice, apart from its element type. `page_break` carries no text of its own, so it
+ * compares equal to any other `page_break`. `dual_dialogue` cannot reach this function (flattened
+ * away by `flattenScreenplayBlocks` before this is ever called); its branch exists only so this
  * stays total over `ScreenplayBlock`, not partial.
+ *
+ * Split out of `blockSignature` (previously inlined there) because `diff.ts`'s per-block
+ * classification needs to tell "the type changed" apart from "the text changed" -- two
+ * independent facts a single opaque signature string cannot answer on its own.
+ * `blockSignature`'s own output is unchanged by this refactor; `revisions.test.ts`'s existing
+ * assertions (exercised indirectly through `measureStructuralChange`) are what confirm that.
  */
-function blockSignature(block: ScreenplayBlock): string {
+function blockComparableText(block: ScreenplayBlock): string {
+  switch (block.type) {
+    case 'page_break':
+      return '';
+    case 'scene_heading':
+      return `${block.sceneNumber ?? ''}:${block.text}`;
+    case 'dual_dialogue':
+      return '';
+    default:
+      return block.text;
+  }
+}
+
+/**
+ * A content fingerprint for one (already-flattened) block -- two blocks with the same `id` compare
+ * equal here exactly when nothing about them that a reader would notice has changed, including its
+ * element type (so an `action` block converted to `dialogue` with identical text never compares
+ * equal to its former self). Exhaustive over every post-flatten block kind; `dual_dialogue` cannot
+ * reach this function (flattened away by `flattenScreenplayBlocks` before this is ever called), so
+ * its branch exists only so this function stays total over `ScreenplayBlock`, not partial.
+ *
+ * Exported for `diff.ts`: a block's signature changing is the same "did anything a reader would
+ * notice change" question `measureStructuralChange` already answers, and the diff's own per-block
+ * `changed` flag reuses it rather than re-deriving an equivalent comparison a second way.
+ */
+export function blockSignature(block: ScreenplayBlock): string {
   switch (block.type) {
     case 'page_break':
       return 'page_break';
     case 'scene_heading':
-      return `scene_heading:${block.sceneNumber ?? ''}:${block.text}`;
+      return `scene_heading:${blockComparableText(block)}`;
     case 'dual_dialogue':
       return `dual_dialogue:${block.id}`;
     default:
-      return `${block.type}:${block.text}`;
+      return `${block.type}:${blockComparableText(block)}`;
   }
 }
 

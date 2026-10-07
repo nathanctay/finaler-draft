@@ -141,6 +141,119 @@ describe.skipIf(!databaseUrl)('named/export revision creation (PostgreSQL)', () 
     if (all === 'missing') throw new Error('Unexpected result.');
     expect(all).toHaveLength(1);
   });
+
+  // Collaboration slice 4b: the screenplay-aware diff, proven end to end against two *real*,
+  // Postgres-backed revisions -- not just the pure `diffScreenplays` unit suite
+  // (`packages/screenplay/src/diff.test.ts`), which never touches `getRevisionById`, membership
+  // resolution, or the chronological-ordering logic this store layers on top.
+  it('diffs two real, stored revisions: a relocated scene is reported as moved, not deleted and re-added', async () => {
+    const owner = await createUser();
+    const { screenplayId } = await createProjectAndScreenplay(owner);
+
+    const first = await store!.createRevision(owner, screenplayId, {
+      kind: 'named',
+      label: 'Draft A',
+    });
+    if (first === 'missing' || first === 'forbidden') throw new Error('Unexpected result.');
+
+    // Relocate "EXT. UNION STATION - CONTINUOUS" (and everything in it) ahead of
+    // "INT. UNION STATION - NIGHT" -- a real scene reorder on the fixture's real content, not a
+    // synthetic id shuffle.
+    const sceneTwoStartIndex = screenplayFixture.blocks.findIndex(
+      (block) => block.type === 'scene_heading' && block.text === 'EXT. UNION STATION - CONTINUOUS',
+    );
+    const reordered = {
+      ...screenplayFixture,
+      blocks: [
+        ...screenplayFixture.blocks.slice(sceneTwoStartIndex),
+        ...screenplayFixture.blocks.slice(0, sceneTwoStartIndex),
+      ],
+    };
+    await pool!.query(
+      'update screenplays set canonical_screenplay = $1::jsonb, canonical_hash = $2 where id = $3',
+      [JSON.stringify(reordered), 'reordered-hash', screenplayId],
+    );
+
+    const second = await store!.createRevision(owner, screenplayId, {
+      kind: 'named',
+      label: 'Draft B (reordered)',
+    });
+    if (second === 'missing' || second === 'forbidden') throw new Error('Unexpected result.');
+
+    const diffResult = await store!.getRevisionDiff(owner, screenplayId, first.id, second.id);
+    if (diffResult === 'missing') throw new Error('Unexpected result.');
+    expect(diffResult.older.id).toBe(first.id);
+    expect(diffResult.newer.id).toBe(second.id);
+
+    // With exactly two scenes swapped, the move-detector's own minimal-backbone definition
+    // (packages/screenplay/src/diff.ts's `computeMovedIds`) reports only *one* of the two scenes
+    // as moved -- the other serves as the fixed reference point the move is measured against,
+    // since a two-element swap has no distinguishable "which one really moved" (only one fact --
+    // "this one relocated" -- is needed to fully explain the new order). The scene that did not
+    // move contributes nothing to `scenes` at all (nothing about it, in isolation, changed), so
+    // this asserts the one real end-to-end guarantee this test exists for: exactly one of the two
+    // known scenes is reported as moved, and it is reported as a move, never a delete-and-re-add.
+    expect(diffResult.diff.scenes).toHaveLength(1);
+    const movedScene = diffResult.diff.scenes[0]!;
+    expect(movedScene.status).toBe('matched');
+    expect(movedScene.moved).toBe(true);
+    expect([movedScene.beforeHeadingText, movedScene.afterHeadingText]).toEqual([
+      expect.stringMatching(/UNION STATION/),
+      expect.stringMatching(/UNION STATION/),
+    ]);
+    // The writer-facing proof this test exists for: nothing was deleted and nothing was
+    // re-inserted, end to end through the real store and a real database.
+    expect(
+      diffResult.diff.blocks.filter(
+        (entry) => entry.status === 'added' || entry.status === 'removed',
+      ),
+    ).toEqual([]);
+  });
+
+  it("with no `against`, diffs a named revision against the screenplay's current live content", async () => {
+    const owner = await createUser();
+    const { screenplayId } = await createProjectAndScreenplay(owner);
+
+    const first = await store!.createRevision(owner, screenplayId, {
+      kind: 'named',
+      label: 'Draft A',
+    });
+    if (first === 'missing' || first === 'forbidden') throw new Error('Unexpected result.');
+
+    // A further live edit after the revision was captured -- standing in for `apps/collab`'s own
+    // debounced projection write, the same convention the immutability test above uses.
+    const retitled = { ...screenplayFixture, title: 'Retitled Live Draft' };
+    await pool!.query(
+      'update screenplays set canonical_screenplay = $1::jsonb, canonical_hash = $2 where id = $3',
+      [JSON.stringify(retitled), 'live-hash-2', screenplayId],
+    );
+
+    const diffResult = await store!.getRevisionDiff(owner, screenplayId, first.id);
+    if (diffResult === 'missing') throw new Error('Unexpected result.');
+    expect(diffResult.older.id).toBe(first.id);
+    expect(diffResult.newer).toEqual({ id: 'current', kind: null, label: null, createdAt: null });
+    expect(diffResult.diff.titleChanged).toBe(true);
+    expect(diffResult.diff.titleBefore).toBe(screenplayFixture.title);
+    expect(diffResult.diff.titleAfter).toBe('Retitled Live Draft');
+  });
+
+  it('returns "missing" for an actor with no membership, and for an unresolvable revision id on either side', async () => {
+    const owner = await createUser();
+    const { screenplayId } = await createProjectAndScreenplay(owner);
+    const stranger = await createUser();
+
+    const first = await store!.createRevision(owner, screenplayId, {
+      kind: 'named',
+      label: 'Draft A',
+    });
+    if (first === 'missing' || first === 'forbidden') throw new Error('Unexpected result.');
+
+    expect(await store!.getRevisionDiff(stranger, screenplayId, first.id)).toBe('missing');
+    expect(await store!.getRevisionDiff(owner, screenplayId, randomUUID())).toBe('missing');
+    expect(await store!.getRevisionDiff(owner, screenplayId, first.id, randomUUID())).toBe(
+      'missing',
+    );
+  });
 });
 
 async function createUser(): Promise<string> {
