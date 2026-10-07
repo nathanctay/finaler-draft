@@ -40,7 +40,7 @@ function RevisionRow({
 }) {
   const summary = revisionPreviewSummary(revision.previewMetadata);
   return (
-    <li>
+    <li className="revision-row">
       <Link
         className="revision-row-link"
         params={{ projectId, revisionId: revision.id, screenplayId }}
@@ -51,6 +51,17 @@ function RevisionRow({
           {formatRevisionCreatedAt(revision.createdAt)}
           {summary ? ` · ${summary}` : ''}
         </span>
+      </Link>
+      {/* Collaboration slice 4b's screenplay-aware diff: the writer-facing entry point into the
+          diff view, compared against the screenplay's current live content by default -- the same
+          comparison plan.md's restore flow will need. A sibling of the row's own link, not nested
+          inside it, since the two navigate to genuinely different places. */}
+      <Link
+        className="revision-row-diff-link"
+        params={{ projectId, revisionId: revision.id, screenplayId }}
+        to="/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId/diff"
+      >
+        Compare to current
       </Link>
     </li>
   );

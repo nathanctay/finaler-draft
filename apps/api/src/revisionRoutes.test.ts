@@ -22,39 +22,75 @@ const revisionListItem = {
   previewMetadata: { sceneCount: 3, blockCount: 40 },
 };
 
+const fixtureScreenplay = {
+  schemaVersion: 1 as const,
+  id: screenplayId,
+  title: 'Fixture',
+  documentSettings: {
+    characterIndentIn: 3.7,
+    parentheticalIndentIn: 3.1,
+    parentheticalWidthIn: 2,
+    pageNumberStyle: 'arabic' as const,
+    sceneNumbersEnabled: false,
+    autoMoreContinued: true,
+  },
+  titlePages: [],
+  annotations: [],
+  blocks: [],
+};
+
 const defaultGetResult: Awaited<ReturnType<RevisionStore['getRevision']>> = {
   ...revisionListItem,
   screenplayId,
-  screenplay: {
-    schemaVersion: 1,
-    id: screenplayId,
-    title: 'Fixture',
-    documentSettings: {
-      characterIndentIn: 3.7,
-      parentheticalIndentIn: 3.1,
-      parentheticalWidthIn: 2,
-      pageNumberStyle: 'arabic',
-      sceneNumbersEnabled: false,
-      autoMoreContinued: true,
-    },
-    titlePages: [],
-    annotations: [],
-    blocks: [],
-  },
+  screenplay: fixtureScreenplay,
 };
 const defaultCreateResult: Awaited<ReturnType<RevisionStore['createRevision']>> = {
   ...revisionListItem,
   created: true,
 };
+const defaultDiffResult: Awaited<ReturnType<RevisionStore['getRevisionDiff']>> = {
+  screenplayId,
+  older: {
+    id: revisionId,
+    kind: 'named',
+    label: 'Draft 2',
+    createdAt: '2026-08-06T00:00:00.000Z',
+  },
+  newer: { id: 'current', kind: null, label: null, createdAt: null },
+  diff: {
+    titleChanged: false,
+    titleBefore: 'Fixture',
+    titleAfter: 'Fixture',
+    documentSettingsChanges: [],
+    titlePages: [],
+    blocks: [],
+    scenes: [],
+    isEmpty: true,
+  },
+  // The two whole canonical projections the diff was computed from. The inline diff view renders the
+  // document itself out of them -- see `RevisionDiffResult`'s own comment in `revisions.ts` -- so the
+  // route's response schema carries them and a response without them is a 500, which is what makes
+  // this fixture's presence here load-bearing rather than decorative.
+  olderScreenplay: fixtureScreenplay,
+  newerScreenplay: fixtureScreenplay,
+};
 
 let listResult: Awaited<ReturnType<RevisionStore['listRevisions']>> = [revisionListItem];
 let getResult: Awaited<ReturnType<RevisionStore['getRevision']>> = defaultGetResult;
 let createResult: Awaited<ReturnType<RevisionStore['createRevision']>> = defaultCreateResult;
+let diffResult: Awaited<ReturnType<RevisionStore['getRevisionDiff']>> = defaultDiffResult;
+let lastDiffArgs:
+  | { screenplayId: string; revisionId: string; against: string | undefined }
+  | undefined;
 
 const store: RevisionStore = {
   listRevisions: async () => listResult,
   getRevision: async () => getResult,
   createRevision: async () => createResult,
+  getRevisionDiff: async (_actorId, screenplayIdArg, revisionIdArg, against) => {
+    lastDiffArgs = { screenplayId: screenplayIdArg, revisionId: revisionIdArg, against };
+    return diffResult;
+  },
 };
 
 describe('revision routes', () => {
@@ -62,6 +98,8 @@ describe('revision routes', () => {
     listResult = [revisionListItem];
     getResult = defaultGetResult;
     createResult = defaultCreateResult;
+    diffResult = defaultDiffResult;
+    lastDiffArgs = undefined;
   });
 
   it('rejects every revision route for an unauthenticated request', async () => {
@@ -89,6 +127,14 @@ describe('revision routes', () => {
             // (403), not this one, per that hook's own documented ordering.
             headers: { origin: 'https://app.example.test' },
             payload: { kind: 'named', label: 'Draft 2' },
+          })
+        ).statusCode,
+      ).toBe(401);
+      expect(
+        (
+          await app.inject({
+            method: 'GET',
+            url: `/api/screenplays/${screenplayId}/revisions/${revisionId}/diff`,
           })
         ).statusCode,
       ).toBe(401);
@@ -238,6 +284,78 @@ describe('revision routes', () => {
     }
   });
 
+  it('returns a diff against the current document by default, with no `against` query param forwarded to the store', async () => {
+    const app = await buildApp({ auth, revisions: store });
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/screenplays/${screenplayId}/revisions/${revisionId}/diff`,
+        headers: { cookie: 'session=test', origin: 'https://app.example.test' },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual(defaultDiffResult);
+      expect(lastDiffArgs).toEqual({ screenplayId, revisionId, against: undefined });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('forwards an `against` revision id to the store, for revision-to-revision comparison', async () => {
+    const otherRevisionId = '22222222-2222-4222-8222-222222222222';
+    diffResult = {
+      ...defaultDiffResult,
+      newer: {
+        id: otherRevisionId,
+        kind: 'named',
+        label: 'Draft 3',
+        createdAt: '2026-08-07T00:00:00.000Z',
+      },
+    };
+    const app = await buildApp({ auth, revisions: store });
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/screenplays/${screenplayId}/revisions/${revisionId}/diff?against=${otherRevisionId}`,
+        headers: { cookie: 'session=test', origin: 'https://app.example.test' },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().newer.id).toBe(otherRevisionId);
+      expect(lastDiffArgs).toEqual({ screenplayId, revisionId, against: otherRevisionId });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects a malformed `against` query value with 400, before ever calling the store', async () => {
+    const app = await buildApp({ auth, revisions: store });
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/screenplays/${screenplayId}/revisions/${revisionId}/diff?against=not-a-uuid`,
+        headers: { cookie: 'session=test', origin: 'https://app.example.test' },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(lastDiffArgs).toBeUndefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns 404 for a diff the store cannot resolve (either side missing)', async () => {
+    diffResult = 'missing';
+    const app = await buildApp({ auth, revisions: store });
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/screenplays/${screenplayId}/revisions/${revisionId}/diff`,
+        headers: { cookie: 'session=test', origin: 'https://app.example.test' },
+      });
+      expect(response.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('registers no revision routes at all when the revisions port is not supplied', async () => {
     const app = await buildApp({ auth });
     try {
@@ -247,6 +365,12 @@ describe('revision routes', () => {
         headers: { cookie: 'session=test', origin: 'https://app.example.test' },
       });
       expect(response.statusCode).toBe(404);
+      const diffResponse = await app.inject({
+        method: 'GET',
+        url: `/api/screenplays/${screenplayId}/revisions/${revisionId}/diff`,
+        headers: { cookie: 'session=test', origin: 'https://app.example.test' },
+      });
+      expect(diffResponse.statusCode).toBe(404);
     } finally {
       await app.close();
     }

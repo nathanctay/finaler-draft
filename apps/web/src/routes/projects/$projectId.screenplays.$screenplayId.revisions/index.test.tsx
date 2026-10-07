@@ -94,8 +94,33 @@ describe('revision history page', () => {
       'href',
       '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId',
     );
-    expect(screen.getByRole('link', { name: /Automatic — idle session/ })).toHaveTextContent(
+    expect(screen.getByRole('link', { name: /Autosave — idle session/ })).toHaveTextContent(
       '2 scenes, 30 blocks',
+    );
+  });
+
+  it('links each row into its own diff-against-current view, distinct from its preview link', () => {
+    routeState.query = {
+      data: [
+        {
+          id: 'aaaaaaaa-0000-4000-8000-000000000001',
+          kind: 'named',
+          label: 'Draft 2',
+          authoredBy: 'actor-1',
+          createdAt: '2026-08-06T00:00:00.000Z',
+          previewMetadata: { sceneCount: 3, blockCount: 40 },
+        },
+      ],
+      isError: false,
+      isLoading: false,
+    };
+    render(<RevisionHistoryPage />);
+
+    const diffLinks = screen.getAllByRole('link', { name: 'Compare to current' });
+    expect(diffLinks).toHaveLength(1);
+    expect(diffLinks[0]).toHaveAttribute(
+      'href',
+      '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId/diff',
     );
   });
 

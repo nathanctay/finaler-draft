@@ -15,6 +15,7 @@ export default defineConfig({
     '**/titlepage-cursors-persistence.spec.ts',
     '**/offline-persistence.spec.ts',
     '**/revision-history-persistence.spec.ts',
+    '**/screenplay-diff-persistence.spec.ts',
   ],
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),

@@ -2,9 +2,11 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import {
   computeRevisionPreviewMetadata,
+  diffScreenplays,
   screenplaySchema,
   screenplayToPlainText,
   type Screenplay,
+  type ScreenplayDiff,
 } from '@finaler-draft/screenplay';
 import {
   getRevisionById,
@@ -53,8 +55,56 @@ export interface RevisionDetail extends RevisionListItem {
   screenplay: Screenplay;
 }
 
+/**
+ * Collaboration slice 4b: one side of a screenplay-aware diff. `id: 'current'` is the one
+ * non-revision value this field ever takes -- the live, mutable `screenplays.canonical_screenplay`
+ * row, which has no revision id, kind, label, or fixed `createdAt` of its own (it is whatever the
+ * document looks like right now). Every other value is a real `document_revisions.id`.
+ */
+export interface RevisionDiffSide {
+  id: string;
+  kind: RevisionKind | null;
+  label: string | null;
+  createdAt: string | null;
+}
+
+export interface RevisionDiffResult {
+  screenplayId: string;
+  /** The chronologically earlier side -- see `getRevisionDiff`'s own comment on why ordering is
+   * decided by timestamp, not by which id the caller happened to pass as the primary revision. */
+  older: RevisionDiffSide;
+  newer: RevisionDiffSide;
+  diff: ScreenplayDiff;
+  /**
+   * Both sides' full canonical projections, alongside the diff computed from them.
+   *
+   * The diff alone cannot be rendered as a document. `ScreenplayDiff` deliberately reports only
+   * what is *interesting* (`diff.ts`'s own `isEntryInteresting` -- "what keeps a feature-length
+   * script's diff proportional to the actual amount of change"), so an untouched block appears in it
+   * nowhere at all. That is exactly right for a change report and exactly wrong for the inline view
+   * the web app now renders, which shows the screenplay itself in document order with changes marked
+   * in place: the unchanged lines between the changes are most of what the reader reads.
+   *
+   * Returned here rather than fetched by the client in two further requests for one reason that is
+   * not convenience: **consistency**. When `against` is omitted the newer side is the screenplay's
+   * *live* projection, which collaborators may be editing continuously. A client that fetched it
+   * again separately could render a document that the diff beside it was never computed from, and the
+   * resulting view would be quietly, unreproducibly wrong. These two values are the exact inputs
+   * `diffScreenplays` was given, read in the same request, so the rendered document and the marks on
+   * it can never disagree.
+   *
+   * The cost, stated plainly: this response now carries two whole screenplays. That is inherent to
+   * serving a document view rather than a summary -- there is no smaller payload from which the
+   * unchanged majority of a script could be reconstructed -- and it is the same order of payload
+   * `GET /api/screenplays/:id/revisions/:revisionId` (historical preview) already returns for one.
+   */
+  olderScreenplay: Screenplay;
+  newerScreenplay: Screenplay;
+}
+
 type ListResult = RevisionListItem[] | 'missing';
 type GetResult = RevisionDetail | 'missing';
+type DiffResult = RevisionDiffResult | 'missing';
 /** `created: true` when this call actually inserted a new row; `false` when
  * `insertRevisionIfChanged`'s dedupe reused the screenplay's already-existing latest revision
  * because nothing had changed -- see that function's own comment on why reusing, rather than
@@ -84,6 +134,24 @@ export interface RevisionStore {
     screenplayId: string,
     input: CreateRevisionInput,
   ): Promise<CreateResult>;
+  /**
+   * Collaboration slice 4b's screenplay-aware diff (`@finaler-draft/screenplay`'s
+   * `diffScreenplays`): compares `revisionId`'s own immutable canonical projection against either
+   * another revision (`against`, a second `document_revisions.id`) or, when `against` is omitted,
+   * the screenplay's *current* live projection -- `plan.md`'s restore flow, step 1, needs exactly
+   * that comparison ("An authorized owner/editor previews a screenplay-aware diff and confirms the
+   * target revision"), and this is what makes it available without building restore itself.
+   *
+   * Membership-only, the same bar `getRevision`/`listRevisions` already set: a diff is a read-only
+   * comparison of two immutable (or, for "current," merely read-only-to-this-endpoint) snapshots,
+   * never a write, so there is no reason to require edit rights to view one.
+   */
+  getRevisionDiff(
+    actorId: string,
+    screenplayId: string,
+    revisionId: string,
+    against?: string,
+  ): Promise<DiffResult>;
 }
 
 function canEdit(role: unknown): boolean {
@@ -110,6 +178,29 @@ async function resolveMembership(
   );
   if (result.rowCount !== 1) return 'missing';
   return result.rows[0] as { role: string };
+}
+
+/** The screenplay's current, live canonical projection and hash -- `apps/collab`'s own debounced
+ * projection, the same column `GET /api/screenplays/:id` reads. Shared by `createRevision` (an
+ * export/named-milestone write always captures "what this screenplay looks like right now") and
+ * `getRevisionDiff` (comparing a historical revision against "right now" is the default, no-
+ * `against` case) rather than each duplicating the identical query. */
+async function fetchCurrentScreenplay(
+  pool: Pool,
+  screenplayId: string,
+): Promise<{ screenplay: Screenplay; canonicalHash: string } | undefined> {
+  const current = await pool.query<{ canonicalScreenplay: unknown; canonicalHash: string }>(
+    `select canonical_screenplay as "canonicalScreenplay", canonical_hash as "canonicalHash"
+       from screenplays
+      where id = $1 and deleted_at is null`,
+    [screenplayId],
+  );
+  const row = current.rows[0];
+  if (!row) return undefined;
+  return {
+    screenplay: screenplaySchema.parse(row.canonicalScreenplay),
+    canonicalHash: row.canonicalHash,
+  };
 }
 
 function toListItem(row: RevisionRow): RevisionListItem {
@@ -152,18 +243,11 @@ export function createPostgresRevisionStore(pool: Pool): RevisionStore {
       if (membership === 'missing') return 'missing';
       if (input.kind === 'named' && !canEdit(membership.role)) return 'forbidden';
 
-      const current = await pool.query<{ canonicalScreenplay: unknown; canonicalHash: string }>(
-        `select canonical_screenplay as "canonicalScreenplay", canonical_hash as "canonicalHash"
-           from screenplays
-          where id = $1 and deleted_at is null`,
-        [screenplayId],
-      );
-      const row = current.rows[0];
+      const current = await fetchCurrentScreenplay(pool, screenplayId);
       // Deleted between the membership check above and this read -- a genuine, if narrow, race;
       // treated the same as "missing" everywhere else in this codebase treats a vanished row.
-      if (!row) return 'missing';
-
-      const screenplay = screenplaySchema.parse(row.canonicalScreenplay);
+      if (!current) return 'missing';
+      const { screenplay, canonicalHash } = current;
       const canonicalScreenplayJson = JSON.stringify(screenplay);
 
       const result = await insertRevisionIfChanged(pool, {
@@ -180,11 +264,77 @@ export function createPostgresRevisionStore(pool: Pool): RevisionStore {
         // with no single human author to attribute.
         authoredBy: actorId,
         canonicalScreenplayJson,
-        canonicalHash: row.canonicalHash,
+        canonicalHash,
         renderedText: screenplayToPlainText(screenplay),
         previewMetadata: computeRevisionPreviewMetadata(screenplay),
       });
       return { ...toListItem(result), created: result.created };
+    },
+
+    async getRevisionDiff(actorId, screenplayId, revisionId, against) {
+      const membership = await resolveMembership(pool, screenplayId, actorId);
+      if (membership === 'missing') return 'missing';
+
+      const baseRow = await getRevisionById(pool, screenplayId, revisionId);
+      if (!baseRow) return 'missing';
+      const baseParsed = screenplaySchema.safeParse(baseRow.canonicalScreenplay);
+      // See `getRevision`'s own comment on why a row this table wrote failing to parse is treated
+      // as "missing" rather than a 500.
+      if (!baseParsed.success) return 'missing';
+      const baseSide: RevisionDiffSide = {
+        id: baseRow.id,
+        kind: baseRow.kind,
+        label: baseRow.label,
+        createdAt: baseRow.createdAt.toISOString(),
+      };
+
+      let otherScreenplay: Screenplay;
+      let otherSide: RevisionDiffSide;
+      // `Number.POSITIVE_INFINITY` for "current": the live document is, by construction, never
+      // older than any stored revision -- it is whatever the screenplay looks like right now, and
+      // every revision is a snapshot of some earlier (or, at the very least, not-later) moment.
+      let otherCreatedAtMs: number;
+      if (against === undefined) {
+        const current = await fetchCurrentScreenplay(pool, screenplayId);
+        if (!current) return 'missing';
+        otherScreenplay = current.screenplay;
+        otherSide = { id: 'current', kind: null, label: null, createdAt: null };
+        otherCreatedAtMs = Number.POSITIVE_INFINITY;
+      } else {
+        const otherRow = await getRevisionById(pool, screenplayId, against);
+        if (!otherRow) return 'missing';
+        const otherParsed = screenplaySchema.safeParse(otherRow.canonicalScreenplay);
+        if (!otherParsed.success) return 'missing';
+        otherScreenplay = otherParsed.data;
+        otherSide = {
+          id: otherRow.id,
+          kind: otherRow.kind,
+          label: otherRow.label,
+          createdAt: otherRow.createdAt.toISOString(),
+        };
+        otherCreatedAtMs = otherRow.createdAt.getTime();
+      }
+
+      // Ordered by timestamp, not by which id the caller passed as `revisionId` vs. `against` --
+      // "moved from position 3 to 7" and "added"/"removed" only read correctly in forward
+      // chronological order. A tie (two rows with the identical millisecond `createdAt`, which
+      // `insertRevisionIfChanged`'s advisory lock makes exceedingly unlikely but not provably
+      // impossible) keeps `revisionId` as the older side -- an arbitrary but deterministic
+      // tie-break, not a correctness-bearing choice.
+      const baseIsOlder = baseRow.createdAt.getTime() <= otherCreatedAtMs;
+      const older = baseIsOlder ? baseSide : otherSide;
+      const newer = baseIsOlder ? otherSide : baseSide;
+      const olderScreenplay = baseIsOlder ? baseParsed.data : otherScreenplay;
+      const newerScreenplay = baseIsOlder ? otherScreenplay : baseParsed.data;
+
+      return {
+        screenplayId,
+        older,
+        newer,
+        diff: diffScreenplays(olderScreenplay, newerScreenplay),
+        olderScreenplay,
+        newerScreenplay,
+      };
     },
   };
 }

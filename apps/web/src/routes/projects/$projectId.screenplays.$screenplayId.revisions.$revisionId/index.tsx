@@ -1,13 +1,13 @@
 import { lazy, Suspense } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { createFileRoute, redirect, useParams } from '@tanstack/react-router';
+import { createFileRoute, redirect, useNavigate, useParams } from '@tanstack/react-router';
 import { z } from 'zod';
-import { api, type PersistedScreenplay, type RevisionDetail } from '../../api.js';
-import { formatRevisionCreatedAt, humanizeRevisionKind } from '../../revisionDisplay.js';
-import { guardSessionUser } from '../../session.js';
+import { api, type PersistedScreenplay, type RevisionDetail } from '../../../api.js';
+import { formatRevisionCreatedAt, humanizeRevisionKind } from '../../../revisionDisplay.js';
+import { guardSessionUser } from '../../../session.js';
 
 export const Route = createFileRoute(
-  '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId',
+  '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId/',
 )({
   beforeLoad: async ({ context }) => {
     const user = await guardSessionUser(context.queryClient);
@@ -26,7 +26,7 @@ export const Route = createFileRoute(
   component: RevisionPreviewPage,
 });
 
-const EditorWorkspace = lazy(async () => ({ default: (await import('../../App.js')).App }));
+const EditorWorkspace = lazy(async () => ({ default: (await import('../../../App.js')).App }));
 
 /**
  * Collaboration slice 4a's read-only historical preview -- the one addressable route for it.
@@ -41,8 +41,9 @@ const EditorWorkspace = lazy(async () => ({ default: (await import('../../App.js
  */
 function RevisionPreviewPage() {
   const { projectId, revisionId, screenplayId } = useParams({
-    from: '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId',
+    from: '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId/',
   });
+  const navigate = useNavigate();
   const revision = useQuery({
     queryKey: ['revision', screenplayId, revisionId],
     queryFn: () => api.revision(screenplayId, revisionId),
@@ -66,10 +67,24 @@ function RevisionPreviewPage() {
     title: data.screenplay.title,
   };
   const label = `${humanizeRevisionKind(data)} — ${formatRevisionCreatedAt(data.createdAt)}`;
+  // The banner's own way out, supplied here rather than performed inside `App` -- see
+  // `HistoricalRevisionInfo.onBackToLiveDocument`. The live editor route, not this route's parent:
+  // a writer leaving a historical revision wants the document, not the revision list they may not
+  // have come through.
+  const backToLiveDocument = () => {
+    void navigate({
+      params: { projectId, screenplayId },
+      to: '/projects/$projectId/screenplays/$screenplayId',
+    });
+  };
 
   return (
     <Suspense fallback={<main className="loading-screen">Loading editor…</main>}>
-      <EditorWorkspace historicalRevision={{ label }} initial={initial} key={revisionId} />
+      <EditorWorkspace
+        historicalRevision={{ label, onBackToLiveDocument: backToLiveDocument }}
+        initial={initial}
+        key={revisionId}
+      />
     </Suspense>
   );
 }

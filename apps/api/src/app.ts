@@ -1,6 +1,10 @@
 import fastifyRateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
-import { screenplaySchema } from '@finaler-draft/screenplay';
+import {
+  screenplaySchema,
+  screenplayBlockSchema,
+  titlePageSchema,
+} from '@finaler-draft/screenplay';
 import {
   DEFAULT_API_RATE_LIMIT_MAX,
   DEFAULT_API_RATE_LIMIT_WINDOW_MS,
@@ -163,11 +167,12 @@ export interface BuildAppOptions {
   rateLimit?: { max: number; timeWindowMs: number };
   /**
    * Backs `GET /api/screenplays/:id/revisions`, `GET /api/screenplays/:id/revisions/:revisionId`,
-   * and `POST /api/screenplays/:id/revisions` -- collaboration slice 4a's durable revision history
-   * and read-only historical preview. See `revisions.ts`'s own module comment for why this is a
-   * separate option from `projects` (it never touches the live Yjs document, and its own
-   * authorization shape -- membership-only for reads and exports, owner/editor for naming a
-   * milestone -- is not identical to `ProjectStore`'s).
+   * `GET /api/screenplays/:id/revisions/:revisionId/diff`, and
+   * `POST /api/screenplays/:id/revisions` -- collaboration slice 4a's durable revision history and
+   * read-only historical preview, plus slice 4b's screenplay-aware diff. See `revisions.ts`'s own
+   * module comment for why this is a separate option from `projects` (it never touches the live
+   * Yjs document, and its own authorization shape -- membership-only for reads, diffs, and
+   * exports, owner/editor for naming a milestone -- is not identical to `ProjectStore`'s).
    */
   revisions?: RevisionStore;
 }
@@ -317,6 +322,96 @@ const revisionDetailSchema = revisionListItemSchema.extend({
 // answers 200, never 201: whether a new row was actually written is exactly what `created` tells
 // the caller, so the status code does not also have to carry that distinction.
 const createRevisionResponseSchema = revisionListItemSchema.extend({ created: z.boolean() });
+
+// Collaboration slice 4b's screenplay-aware diff. Mirrors `@finaler-draft/screenplay`'s
+// `diffScreenplays` return type (`ScreenplayDiff`) field for field, the same convention every
+// other schema in this file follows for its own domain type -- reusing the package's own
+// `screenplayBlockSchema`/`titlePageSchema` for the `before`/`after` payloads rather than a second,
+// hand-mirrored shape for either, since both are already the real validation boundary for that
+// exact data.
+const identifiedDiffStatusSchema = z.enum(['added', 'removed', 'matched']);
+const screenplayBlockDiffEntrySchema = z.object({
+  id: z.string().uuid(),
+  status: identifiedDiffStatusSchema,
+  moved: z.boolean(),
+  changed: z.boolean(),
+  elementTypeChanged: z.boolean(),
+  textChanged: z.boolean(),
+  beforeIndex: z.number().optional(),
+  afterIndex: z.number().optional(),
+  before: screenplayBlockSchema.optional(),
+  after: screenplayBlockSchema.optional(),
+});
+const screenplaySceneDiffEntrySchema = z.object({
+  id: z.string(),
+  area: z.enum(['scene', 'preamble']),
+  status: identifiedDiffStatusSchema,
+  moved: z.boolean(),
+  beforeIndex: z.number().optional(),
+  afterIndex: z.number().optional(),
+  beforeHeadingText: z.string().optional(),
+  afterHeadingText: z.string().optional(),
+  beforeSceneNumber: z.string().optional(),
+  afterSceneNumber: z.string().optional(),
+  headingTextChanged: z.boolean(),
+  blocks: z.array(screenplayBlockDiffEntrySchema),
+});
+const titlePageDiffEntrySchema = z.object({
+  id: z.string().uuid(),
+  status: identifiedDiffStatusSchema,
+  moved: z.boolean(),
+  changed: z.boolean(),
+  beforeIndex: z.number().optional(),
+  afterIndex: z.number().optional(),
+  before: titlePageSchema.optional(),
+  after: titlePageSchema.optional(),
+});
+// `before`/`after` hold one `DocumentSettings` field's value each, which is a number, a boolean,
+// or (`pageNumberStyle`) one of two literal strings -- a plain union, not `z.unknown()`, since the
+// set of possible values is small and known.
+const documentSettingsDiffEntrySchema = z.object({
+  field: z.enum([
+    'characterIndentIn',
+    'parentheticalIndentIn',
+    'parentheticalWidthIn',
+    'pageNumberStyle',
+    'sceneNumbersEnabled',
+    'autoMoreContinued',
+  ]),
+  before: z.union([z.number(), z.string(), z.boolean()]),
+  after: z.union([z.number(), z.string(), z.boolean()]),
+});
+const screenplayDiffSchema = z.object({
+  titleChanged: z.boolean(),
+  titleBefore: z.string(),
+  titleAfter: z.string(),
+  documentSettingsChanges: z.array(documentSettingsDiffEntrySchema),
+  titlePages: z.array(titlePageDiffEntrySchema),
+  blocks: z.array(screenplayBlockDiffEntrySchema),
+  scenes: z.array(screenplaySceneDiffEntrySchema),
+  isEmpty: z.boolean(),
+});
+// `id` is a plain string, not `.uuid()`: the one non-revision value it ever takes is the literal
+// `'current'` (`RevisionDiffSide`'s own comment) when a diff was taken against the live document
+// rather than a second stored revision.
+const revisionDiffSideSchema = z.object({
+  id: z.string(),
+  kind: z.enum(['named', 'idle_session', 'structural_change', 'export']).nullable(),
+  label: z.string().nullable(),
+  createdAt: z.string().nullable(),
+});
+// `olderScreenplay`/`newerScreenplay` are the two canonical projections the diff was computed from,
+// reusing `screenplaySchema` itself rather than a mirrored shape -- see `RevisionDiffResult`'s own
+// comment in `revisions.ts` for why the inline diff view needs whole documents and why fetching them
+// separately would be a consistency bug rather than a saving.
+const revisionDiffResponseSchema = z.object({
+  screenplayId: z.string().uuid(),
+  older: revisionDiffSideSchema,
+  newer: revisionDiffSideSchema,
+  diff: screenplayDiffSchema,
+  olderScreenplay: screenplaySchema,
+  newerScreenplay: screenplaySchema,
+});
 // Mirrors `describeEntitlement`'s return shape below field for field, for the same reason every
 // other response schema in this file mirrors its handler's actual return value: a schema whose
 // fields don't match would silently strip data rather than fail loudly.
@@ -1239,6 +1334,32 @@ export async function buildApp(options: BuildAppOptions = {}) {
           request.actorId!,
           request.params.id,
           request.params.revisionId,
+        );
+        if (result === 'missing') return reply.code(404).send({ error: 'Revision not found' });
+        return result;
+      },
+    );
+    // Collaboration slice 4b's screenplay-aware diff. Compares `:revisionId`'s own immutable
+    // canonical projection against either another stored revision (`?against=<uuid>`) or, with no
+    // query param at all, the screenplay's *current* live projection -- the comparison
+    // `plan.md`'s restore flow needs ("An authorized owner/editor previews a screenplay-aware diff
+    // and confirms the target revision") without this route building restore itself. Membership-
+    // only, the same bar the two routes above already set: a diff is read-only.
+    typedApp.get(
+      '/api/screenplays/:id/revisions/:revisionId/diff',
+      {
+        schema: {
+          params: idParam.extend({ revisionId: z.string().uuid() }),
+          querystring: z.object({ against: z.string().uuid().optional() }).strict(),
+          response: { 200: revisionDiffResponseSchema, 404: errorResponseSchema },
+        },
+      },
+      async (request, reply) => {
+        const result = await options.revisions!.getRevisionDiff(
+          request.actorId!,
+          request.params.id,
+          request.params.revisionId,
+          request.query.against,
         );
         if (result === 'missing') return reply.code(404).send({ error: 'Revision not found' });
         return result;

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
+import { screenplayFixture, minimalScreenplayFixture } from '@finaler-draft/screenplay/fixtures';
 
 // Isolates this file's own orchestration (membership resolution, `named` vs `export`
 // authorization, which fields flow into the insert) from `@finaler-draft/database`'s write/read
@@ -250,5 +250,147 @@ describe('createRevision', () => {
     });
 
     expect((result as { created: boolean }).created).toBe(false);
+  });
+});
+
+describe('getRevisionDiff', () => {
+  it('returns "missing" when the actor has no membership', async () => {
+    const pool = fakePool([rows([])]);
+    const store = createPostgresRevisionStore(pool);
+    await expect(store.getRevisionDiff(actorId, screenplayId, 'revision-1')).resolves.toBe(
+      'missing',
+    );
+    expect(mockGetById).not.toHaveBeenCalled();
+  });
+
+  it('returns "missing" when the base revision does not exist for this screenplay', async () => {
+    const pool = fakePool([rows([{ role: 'reviewer' }])]);
+    mockGetById.mockResolvedValue(undefined);
+    const store = createPostgresRevisionStore(pool);
+    await expect(store.getRevisionDiff(actorId, screenplayId, 'nope')).resolves.toBe('missing');
+  });
+
+  it('returns "missing" rather than throwing when the base revision fails to parse as a screenplay', async () => {
+    const pool = fakePool([rows([{ role: 'reviewer' }])]);
+    mockGetById.mockResolvedValue({ ...revisionRow(), canonicalScreenplay: { not: 'valid' } });
+    const store = createPostgresRevisionStore(pool);
+    await expect(store.getRevisionDiff(actorId, screenplayId, 'revision-1')).resolves.toBe(
+      'missing',
+    );
+  });
+
+  it("with no `against`, diffs the revision against the screenplay's current live projection, reporting the revision as the older side", async () => {
+    const pool = fakePool([
+      rows([{ role: 'reviewer' }]),
+      rows([{ canonicalScreenplay: screenplayFixture, canonicalHash: 'live-hash' }]),
+    ]);
+    mockGetById.mockResolvedValue({
+      ...revisionRow(),
+      canonicalScreenplay: minimalScreenplayFixture,
+      createdAt: new Date('2026-08-01T00:00:00Z'),
+    });
+    const store = createPostgresRevisionStore(pool);
+
+    const result = await store.getRevisionDiff(actorId, screenplayId, 'revision-1');
+
+    expect(result).not.toBe('missing');
+    const diffResult = result as Exclude<typeof result, 'missing'>;
+    expect(diffResult.screenplayId).toBe(screenplayId);
+    expect(diffResult.older).toMatchObject({ id: 'revision-1', kind: 'named' });
+    expect(diffResult.newer).toEqual({ id: 'current', kind: null, label: null, createdAt: null });
+    // The minimal fixture has no blocks and the real fixture has several -- a genuine, non-empty
+    // diff proves `diffScreenplays` was actually called with the two real screenplays, not stubs.
+    expect(diffResult.diff.isEmpty).toBe(false);
+  });
+
+  it('returns "missing" when the live screenplay is gone (deleted since the membership check)', async () => {
+    const pool = fakePool([rows([{ role: 'owner' }]), rows([])]);
+    mockGetById.mockResolvedValue({ ...revisionRow(), canonicalScreenplay: screenplayFixture });
+    const store = createPostgresRevisionStore(pool);
+    await expect(store.getRevisionDiff(actorId, screenplayId, 'revision-1')).resolves.toBe(
+      'missing',
+    );
+  });
+
+  it('with `against`, diffs two stored revisions against each other without reading the live screenplay at all', async () => {
+    const pool = fakePool([rows([{ role: 'editor' }])]);
+    mockGetById
+      .mockResolvedValueOnce({
+        ...revisionRow(),
+        id: 'revision-1',
+        canonicalScreenplay: minimalScreenplayFixture,
+        createdAt: new Date('2026-08-01T00:00:00Z'),
+      })
+      .mockResolvedValueOnce({
+        ...revisionRow(),
+        id: 'revision-2',
+        kind: 'export',
+        label: null,
+        canonicalScreenplay: screenplayFixture,
+        createdAt: new Date('2026-08-05T00:00:00Z'),
+      });
+    const store = createPostgresRevisionStore(pool);
+
+    const result = await store.getRevisionDiff(actorId, screenplayId, 'revision-1', 'revision-2');
+
+    expect(result).not.toBe('missing');
+    const diffResult = result as Exclude<typeof result, 'missing'>;
+    expect(diffResult.older.id).toBe('revision-1');
+    expect(diffResult.newer).toMatchObject({ id: 'revision-2', kind: 'export' });
+    expect(diffResult.diff.isEmpty).toBe(false);
+    // Only the one query the membership check itself makes -- the live screenplay row is never
+    // read when both sides are stored revisions.
+    expect((pool as unknown as { query: ReturnType<typeof vi.fn> }).query).toHaveBeenCalledTimes(1);
+  });
+
+  it('reorders chronologically: the revision passed as `revisionId` becomes the newer side when it is in fact the later one', async () => {
+    const pool = fakePool([rows([{ role: 'editor' }])]);
+    mockGetById
+      .mockResolvedValueOnce({
+        ...revisionRow(),
+        id: 'revision-2',
+        canonicalScreenplay: screenplayFixture,
+        createdAt: new Date('2026-08-05T00:00:00Z'),
+      })
+      .mockResolvedValueOnce({
+        ...revisionRow(),
+        id: 'revision-1',
+        canonicalScreenplay: minimalScreenplayFixture,
+        createdAt: new Date('2026-08-01T00:00:00Z'),
+      });
+    const store = createPostgresRevisionStore(pool);
+
+    const result = await store.getRevisionDiff(actorId, screenplayId, 'revision-2', 'revision-1');
+
+    expect(result).not.toBe('missing');
+    const diffResult = result as Exclude<typeof result, 'missing'>;
+    expect(diffResult.older.id).toBe('revision-1');
+    expect(diffResult.newer.id).toBe('revision-2');
+  });
+
+  it('returns "missing" when the `against` revision does not exist for this screenplay', async () => {
+    const pool = fakePool([rows([{ role: 'editor' }])]);
+    mockGetById
+      .mockResolvedValueOnce({ ...revisionRow(), canonicalScreenplay: screenplayFixture })
+      .mockResolvedValueOnce(undefined);
+    const store = createPostgresRevisionStore(pool);
+    await expect(store.getRevisionDiff(actorId, screenplayId, 'revision-1', 'nope')).resolves.toBe(
+      'missing',
+    );
+  });
+
+  it('returns "missing" rather than throwing when the `against` revision fails to parse as a screenplay', async () => {
+    const pool = fakePool([rows([{ role: 'editor' }])]);
+    mockGetById
+      .mockResolvedValueOnce({ ...revisionRow(), canonicalScreenplay: screenplayFixture })
+      .mockResolvedValueOnce({
+        ...revisionRow(),
+        id: 'revision-2',
+        canonicalScreenplay: { not: 'valid' },
+      });
+    const store = createPostgresRevisionStore(pool);
+    await expect(
+      store.getRevisionDiff(actorId, screenplayId, 'revision-1', 'revision-2'),
+    ).resolves.toBe('missing');
   });
 });

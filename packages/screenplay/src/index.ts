@@ -34,7 +34,11 @@ const stableIdSchema = z.string().uuid();
 const screenplayTextSchema = z.string().max(MAX_AUTHORED_TEXT_LENGTH);
 const titleSchema = z.string().min(1).max(MAX_SCREENPLAY_TITLE_LENGTH);
 
-const titlePageSchema = z
+// Exported (like `screenplayBlockSchema` below) so collaboration slice 4b's screenplay-aware diff
+// response schema (`apps/api/src/app.ts`'s `revisionDiffResponseSchema`) can validate a diff's
+// `titlePages[].before`/`.after` against the one real definition of a title page, rather than a
+// second, hand-mirrored zod shape that could drift from this one.
+export const titlePageSchema = z
   .object({
     id: stableIdSchema,
     title: titleSchema.optional(),
@@ -1298,3 +1302,10 @@ export function screenplayToPlainText(screenplay: Screenplay): string {
 // metadata -- see revisions.ts's own module comment for why this pure domain logic lives here
 // rather than in either app that consumes it.
 export * from './revisions.js';
+// Collaboration slice 4b's screenplay-aware diff -- see diff.ts's own module comment for why it
+// builds directly on revisions.ts's flattening/signature logic rather than a second copy of it.
+export * from './diff.js';
+// The word-level intra-block text diff the inline diff view marks changed words with -- see
+// textDiff.ts's own module comment for why it is a separate, schema-free module rather than part of
+// diff.ts, and why it is word-level rather than character-level.
+export * from './textDiff.js';

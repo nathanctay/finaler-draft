@@ -93,6 +93,41 @@ describe('historical revision preview', () => {
     ).toBeVisible();
   });
 
+  it('offers a way back to the live document, and calls the route rather than navigating itself', async () => {
+    const onBackToLiveDocument = vi.fn();
+    render(
+      <App
+        historicalRevision={{
+          label: 'Historical revision from March 4, 2026, 3:04 PM',
+          onBackToLiveDocument,
+        }}
+        initial={historicalPersistedScreenplay()}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    // Before this existed, a writer who opened a revision could only reach the live document
+    // through the browser's back button or by editing the URL.
+    const back = screen.getByRole('button', { name: 'Back to live document' });
+    expect(back).toBeVisible();
+    await userEvent.click(back);
+    // `App` never navigates on its own -- the route owns the destination, the same contract
+    // `onOpenRevisionHistory` already follows.
+    expect(onBackToLiveDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits the button entirely when the caller supplies nowhere to go back to', async () => {
+    render(
+      <App
+        historicalRevision={{ label: 'Historical revision from March 4, 2026, 3:04 PM' }}
+        initial={historicalPersistedScreenplay()}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    expect(screen.queryByRole('button', { name: 'Back to live document' })).toBeNull();
+  });
+
   it('shows a banner unmistakably distinct from the live editor, carrying the revision label and no promote-to-editable action', async () => {
     render(
       <App
@@ -105,9 +140,10 @@ describe('historical revision preview', () => {
     expect(screen.getByText(/Historical revision\./)).toBeVisible();
     expect(screen.getByText(/Historical revision from March 4, 2026, 3:04 PM/)).toBeVisible();
     expect(screen.getByRole('main')).toHaveClass('has-readonly-banner');
-    // Restoring a past revision to be the live document (plan.md's "Restore as current") is a
-    // separate, later feature this slice deliberately does not build -- there is no path from
-    // this banner back into the live document at all.
+    // Restoring a past revision to *be* the live document (plan.md's "Restore as current") is a
+    // separate, later feature this slice deliberately does not build. Navigating back to the live
+    // document is a different thing entirely and does exist -- see the test below -- but it is
+    // leaving this view, not promoting this revision over the live one.
     expect(
       screen.queryByRole('button', { name: 'Make this one editable' }),
     ).not.toBeInTheDocument();

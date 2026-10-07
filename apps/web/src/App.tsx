@@ -295,6 +295,13 @@ export interface HistoricalRevisionInfo {
    * or, for a named milestone, its own label. Computed by the route, which knows the revision's
    * `kind`/`label`/`createdAt`; `App` itself has no notion of revision metadata beyond this string. */
   label: string;
+  /**
+   * Navigates back to the live document. Supplied by the route, not performed here, for the same
+   * reason `onOpenRevisionHistory` is a callback: this component never navigates on its own.
+   * Optional so a test (or any caller with nowhere to go back to) can render the banner without
+   * inventing a destination; the button simply does not appear.
+   */
+  onBackToLiveDocument?: (() => void) | undefined;
 }
 
 export function App({
@@ -1664,6 +1671,21 @@ export function App({
               <strong>Historical revision.</strong> {historicalRevision.label} — this is a read-only
               copy, separate from the live document.
             </p>
+            {/* Right-aligned with no extra CSS: `.readonly-banner` is already
+                `display: flex; justify-content: space-between`, so a second child lands at the far
+                end -- the same mechanic the entitlement banner's own action button above relies on.
+                This exists because the preview previously had no way out at all: a writer who
+                opened a revision could reach the live document only through the browser's back
+                button or by editing the URL. */}
+            {historicalRevision.onBackToLiveDocument && (
+              <button
+                className="primary-button"
+                onClick={historicalRevision.onBackToLiveDocument}
+                type="button"
+              >
+                Back to live document
+              </button>
+            )}
           </div>
         )}
         {awaitingFirstSync && (
