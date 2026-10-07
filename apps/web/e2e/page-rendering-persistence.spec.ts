@@ -1920,6 +1920,71 @@ test.describe('page rendering: real editor, real DOM', () => {
 });
 
 /**
+ * The application shell's own geometry, measured off the real editor: what each of
+ * `.application`'s six declared grid rows resolves to, where each chrome element actually sits, and
+ * -- the structural half -- which of `.application`'s children are in flow at all.
+ *
+ * This exists because the chrome was extracted out of `App.tsx` into `applicationShell.tsx` so the
+ * read-only revision comparison could wear it too, and the risk that extraction creates is
+ * precisely a layout one: `.application` is a fixed six-track list, and `styles.css`'s own comment
+ * records what an unbudgeted extra child did to it in production -- the banner took the toolbar's
+ * 47px row, the toolbar took the workspace's `minmax(0, 1fr)`, the workspace took the status bar's
+ * 30px, and the status bar landed in an implicit, unstyled row past the end of the list. A shell
+ * component that renders one child more than it should reproduces exactly that, and nothing in
+ * jsdom can see it (no layout, no stylesheet). Measured here instead, against the real editor with
+ * the real stylesheet, following this file's own precedent for geometry that only a browser can
+ * check.
+ *
+ * `inFlowChildren` is the part that catches a stray child whatever its height: everything the shell
+ * renders after the status bar is out of flow by construction (`position: fixed` floats -- the
+ * dialogs, the toast, SmartType's list and the element menu, plus the two always-mounted
+ * `.visually-hidden` live regions those last two carry -- and screen-hidden print copy), so the
+ * in-flow children must be exactly the five chrome rows this screen fills, in order. `declaredRows`
+ * and the tiling assertions catch the layout consequence of one: an in-flow child takes its height
+ * out of the workspace's `1fr` and pushes the status bar's bottom edge off the fold.
+ */
+async function measureShellGeometry(page: Page) {
+  return page.evaluate(() => {
+    const application = document.querySelector<HTMLElement>('.application');
+    if (!application) throw new Error('Missing .application.');
+    const box = (selector: string) => {
+      const element = application.querySelector<HTMLElement>(selector);
+      if (!element) throw new Error(`Missing ${selector} inside .application.`);
+      const rect = element.getBoundingClientRect();
+      return { bottom: rect.bottom, height: rect.height, top: rect.top };
+    };
+    return {
+      applicationHeight: application.getBoundingClientRect().height,
+      // The resolved *used* values of the explicit track list -- one entry per declared row, in
+      // pixels, which is what makes a collapsed row and a missing row distinguishable here.
+      declaredRows: getComputedStyle(application)
+        .gridTemplateRows.split(' ')
+        .map((value) => parseFloat(value)),
+      documentScrollHeight: document.documentElement.scrollHeight,
+      inFlowChildren: Array.from(application.children)
+        .filter((child) => {
+          const style = getComputedStyle(child);
+          return (
+            style.display !== 'none' && style.position !== 'absolute' && style.position !== 'fixed'
+          );
+        })
+        .map((child) => child.className),
+      menubar: box('.menubar'),
+      statusbar: box('.statusbar'),
+      titlebar: box('.titlebar'),
+      toolbar: box('.toolbar'),
+      viewportHeight: window.innerHeight,
+      workspace: box('.workspace'),
+    };
+  });
+}
+
+/** The four fixed chrome row heights `.application` declares at this viewport width (38 + 31 + 47
+ * + 30). The banner row is `0px` for an editable screenplay, and the workspace's `minmax(0, 1fr)`
+ * is everything left over -- which is the identity the tiling assertions below turn on. */
+const FIXED_CHROME_HEIGHT_PX = 38 + 31 + 47 + 30;
+
+/**
  * Zoom modes (progress/zoom-modes.md): "Fit page" and "Fit width" are computed from
  * `.editor-region`'s real available area against the page's real physical dimensions
  * (App.tsx/zoom.ts), and the character grid -- where lines break, where pages break -- must stay
@@ -2082,6 +2147,70 @@ test.describe('zoom modes: real editor, real DOM', () => {
     expect(gridAt100.blocks.length).toBeGreaterThanOrEqual(2);
     expect(gridAt100.widgets.length).toBe(1);
 
+    /**
+     * The shell extraction's own proof (progress/screenplay-diff.md): `App.tsx` no longer renders
+     * `<main className="application">` and its six rows itself -- `applicationShell.tsx` does, for
+     * the editor and for the read-only comparison both -- and the editor's layout must be exactly
+     * what it was before. See `measureShellGeometry`'s own comment for why this is a real risk and
+     * why no jsdom test can stand in for it.
+     *
+     * It runs as a further phase of this test's own session rather than as its own `test.describe`,
+     * per this test's top-of-function comment: a nineteenth real account against a real,
+     * rate-limited API is what reproduced the "Projects could not be loaded." failure that comment
+     * describes. The manuscript half of the same proof -- "still on its character grid at two zoom
+     * levels" -- is the `measureGrid` equality this test already asserts at 50%, 70%, 100%, 150%,
+     * fit-width and fit-page, against this same `gridAt100` baseline.
+     */
+    const shellAt100 = await measureShellGeometry(page);
+
+    // Six declared rows, resolved: the four fixed chrome heights, a collapsed banner row (this
+    // screenplay is editable, so there is no banner and the shell opens no row for one), and the
+    // workspace taking everything that is left.
+    expect(shellAt100.declaredRows).toHaveLength(6);
+    expect(shellAt100.declaredRows[0]).toBeCloseTo(38, 1);
+    expect(shellAt100.declaredRows[1]).toBeCloseTo(31, 1);
+    expect(shellAt100.declaredRows[2]).toBe(0);
+    expect(shellAt100.declaredRows[3]).toBeCloseTo(47, 1);
+    expect(shellAt100.declaredRows[4]).toBeCloseTo(
+      shellAt100.viewportHeight - FIXED_CHROME_HEIGHT_PX,
+      1,
+    );
+    expect(shellAt100.declaredRows[5]).toBeCloseTo(30, 1);
+
+    // Each chrome element renders at its declared row's height, which is the other half of the
+    // claim: a declared track list means nothing if a child is sitting in the wrong track.
+    expect(shellAt100.titlebar.height).toBeCloseTo(38, 1);
+    expect(shellAt100.menubar.height).toBeCloseTo(31, 1);
+    expect(shellAt100.toolbar.height).toBeCloseTo(47, 1);
+    expect(shellAt100.statusbar.height).toBeCloseTo(30, 1);
+    expect(shellAt100.workspace.height).toBeCloseTo(
+      shellAt100.viewportHeight - FIXED_CHROME_HEIGHT_PX,
+      1,
+    );
+
+    // The five rows tile the viewport exactly: no gap, no overlap, nothing past the end. The status
+    // bar's bottom edge is the fold -- the single number the original defect got wrong by 490px,
+    // and the one an extra in-flow child in the shell gets wrong by that child's own height.
+    expect(shellAt100.applicationHeight).toBeCloseTo(shellAt100.viewportHeight, 0);
+    expect(shellAt100.titlebar.top).toBeCloseTo(0, 1);
+    expect(shellAt100.menubar.top).toBeCloseTo(shellAt100.titlebar.bottom, 1);
+    expect(shellAt100.toolbar.top).toBeCloseTo(shellAt100.menubar.bottom, 1);
+    expect(shellAt100.workspace.top).toBeCloseTo(shellAt100.toolbar.bottom, 1);
+    expect(shellAt100.statusbar.top).toBeCloseTo(shellAt100.workspace.bottom, 1);
+    expect(shellAt100.statusbar.bottom).toBeCloseTo(shellAt100.viewportHeight, 0);
+    // And the document itself still never scrolls, however tall the manuscript inside is.
+    expect(shellAt100.documentScrollHeight).toBeLessThanOrEqual(shellAt100.viewportHeight);
+
+    // The structural half: the only children of `.application` that are in flow are those five
+    // chrome rows, in that order. Anything else the shell renders is out of flow by construction.
+    expect(shellAt100.inFlowChildren).toEqual([
+      'titlebar',
+      'menubar',
+      'toolbar',
+      'workspace',
+      'statusbar',
+    ]);
+
     /** `.editor-region`'s real content box, and `.page`'s real rendered box -- both measured
      * fresh after each zoom-mode change, exactly what `App.tsx`'s recompute effect and
      * `zoom.ts`'s `measureAvailableArea` do, but read here independently through Playwright
@@ -2223,6 +2352,9 @@ test.describe('zoom modes: real editor, real DOM', () => {
     await zoomPreset.selectOption('50');
     await expect(zoomLevel).toHaveText('50%');
     expect(await measureGrid(page)).toEqual(gridAt100);
+    // The chrome is not part of the manuscript and does not scale with it: the same six rows, at
+    // the same heights, at a second zoom level.
+    expect(await measureShellGeometry(page)).toEqual(shellAt100);
     const gapAt50 = await measureTitlePageGap();
 
     await zoomPreset.selectOption('100');

@@ -1,3 +1,5 @@
+import { clampZoomPercent } from './zoomPresets.js';
+
 /**
  * Zoom as a mode, not only a number (plan.md's "Zoom controls"): "Storing the computed percentage
  * instead is the mistake that makes fit silently stop fitting after the first resize." `ZoomMode`
@@ -19,31 +21,21 @@ export type ZoomMode =
   | { readonly kind: 'fit-width' };
 
 /**
- * The floor moved from 70 to 50 in this slice. At 100% the page is 8.5in, roughly 816px
- * (`PAGE_WIDTH_IN * CSS_PX_PER_IN` below); fit-width lands around 60-85% on ordinary windows, so
- * 50% only binds where 12pt Courier is already at the edge of legibility. A fit mode clamps to
- * this floor rather than overriding it -- the *mode* survives the clamp, so a later resize that
- * creates room recomputes and un-clamps on its own (`resolveZoomPercent` below). At the clamp,
- * fit-width genuinely does not fit and horizontal scroll appears; that is accepted, not a defect
- * to design around.
+ * The reachable range, the step, the default, the preset list and the clamp now live in
+ * `zoomPresets.ts` -- a module with no DOM and no editor, so `applicationToolbar.tsx` (shared by the
+ * editor and the read-only comparison) can render the identical zoom control on both screens from
+ * one authority. They are re-exported here rather than moved away, because everything that already
+ * reads them reads them from this module, and "where zoom lives" should not become a thing a caller
+ * has to know two answers to. See `zoomPresets.ts`'s own comment.
  */
-export const ZOOM_MIN_PERCENT = 50;
-/** Unchanged from before this slice. */
-export const ZOOM_MAX_PERCENT = 150;
-/** The step the zoom in/out controls and their keyboard equivalents move by -- unchanged from the
- * pre-existing `updateZoom(10)` / `updateZoom(-10)` calls this slice replaces. */
-export const ZOOM_STEP_PERCENT = 10;
-export const ZOOM_DEFAULT_PERCENT = 100;
-
-/** The preset dropdown's fixed-percentage options (plan.md: "a set of fixed percentages plus
- * 'Fit page' and 'Fit width'"). Deliberately includes both new boundary values -- 50, the new
- * floor, and 150, the unchanged ceiling -- so every reachable fixed extreme is one click away, not
- * only reachable by repeatedly pressing the stepper. */
-export const ZOOM_PRESET_PERCENTS = [50, 60, 70, 80, 90, 100, 110, 125, 150] as const;
-
-export function clampZoomPercent(percent: number): number {
-  return Math.min(ZOOM_MAX_PERCENT, Math.max(ZOOM_MIN_PERCENT, percent));
-}
+export {
+  clampZoomPercent,
+  ZOOM_DEFAULT_PERCENT,
+  ZOOM_MAX_PERCENT,
+  ZOOM_MIN_PERCENT,
+  ZOOM_PRESET_PERCENTS,
+  ZOOM_STEP_PERCENT,
+} from './zoomPresets.js';
 
 /**
  * Pinch-to-zoom (plan.md:662): a trackpad pinch arrives at `.editor-region` as a `wheel` event

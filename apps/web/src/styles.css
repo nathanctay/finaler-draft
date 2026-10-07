@@ -116,34 +116,93 @@ select:focus-visible,
      shell" in plan.md. 100dvh over 100vh so mobile browser chrome doesn't clip the status bar. */
   height: 100dvh;
   display: grid;
-  grid-template-rows: 38px 31px 47px minmax(0, 1fr) 30px;
+  /*
+   * Six named rows, each chrome element explicitly placed into its own (`grid-area: titlebar` and
+   * friends, below), rather than one fixed track list consumed by auto-placement in document
+   * order. Two reasons, in order of severity:
+   *
+   * 1. Auto-placement is why this layout broke in production once already. `.readonly-banner`
+   *    (applicationShell.tsx's `banner` slot) is an extra child present only for an
+   *    entitlement-driven read-only screenplay, a historical-revision preview, a comparison, or a
+   *    tab awaiting its first collaborative sync. With no row budgeted for it, it silently took
+   *    the toolbar's 47px row, shoving the toolbar into the workspace's `minmax(0, 1fr)`, the
+   *    workspace into the status bar's 30px, and the status bar into an implicit, unstyled row
+   *    past the end of the list -- the exact broken layout a real lapsed-subscription run
+   *    surfaced. Under explicit placement a child that is not one of these six cannot displace
+   *    any of them at all.
+   * 2. More than one screen now wears this chrome, and they do not all have the same rows. The
+   *    read-only comparison view (applicationShell.tsx; the diff route) has a title bar, a banner
+   *    and a workspace, and no menubar or toolbar, because it has nothing to edit. Auto-placement
+   *    cannot express a missing row: the workspace would simply slide up into the menubar's 31px.
+   *
+   * Each optional row's height is its own custom property so a screen that omits one collapses
+   * exactly that track to 0px (`.shell-without-*` below) and leaves the others untouched -- one
+   * declaration per absent row, not one track list per combination of rows. The `0px` default for
+   * the banner row and the `auto` override on `.has-readonly-banner` keep the previous behaviour
+   * exactly: `auto`, not a fixed height, because the banner's message length (and so its wrapped
+   * line count) varies with which read-only reason produced it.
+   *
+   * This also removes the drift risk the old arrangement carried into the `max-width: 600px`
+   * block below, which had to restate the whole track list twice (once per banner state) to change
+   * one number. It now overrides one property, and `.shell-without-toolbar`'s higher specificity
+   * keeps winning over it with no second copy to keep in step.
+   */
+  --fd-shell-titlebar-row: 38px;
+  --fd-shell-menubar-row: 31px;
+  --fd-shell-banner-row: 0px;
+  --fd-shell-toolbar-row: 47px;
+  --fd-shell-statusbar-row: 30px;
+  grid-template-rows:
+    var(--fd-shell-titlebar-row)
+    var(--fd-shell-menubar-row)
+    var(--fd-shell-banner-row)
+    var(--fd-shell-toolbar-row)
+    minmax(0, 1fr)
+    var(--fd-shell-statusbar-row);
+  grid-template-areas:
+    'titlebar'
+    'menubar'
+    'banner'
+    'toolbar'
+    'workspace'
+    'statusbar';
   color: var(--text-19);
   background: var(--surface-08);
 }
 
-/* `.readonly-banner` (App.tsx) is an extra grid child, present for an entitlement-driven
-   read-only screenplay or while this tab awaits its first collaborative sync
-   (`awaitingFirstSync`) -- `.application`'s own five-row track list above has no row budgeted for
-   it. Without this modifier class, the banner would silently occupy the toolbar's 47px row,
-   shoving the toolbar into the workspace's `minmax(0, 1fr)` row, the workspace into the status
-   bar's 30px row, and the status bar into an implicit, unstyled row past the end of the track
-   list -- the exact broken layout a real lapsed-subscription test run surfaced. `auto`, not a
-   fixed pixel height, because the banner's message length (and therefore its wrapped line count)
-   varies with which read-only reason produced it -- see the entitlement messages in
-   $projectId.screenplays.$screenplayId.tsx and the sync-gate message in App.tsx itself. Inserted
-   between the menubar and the toolbar rows, matching the banner's actual position in the DOM
-   (App.tsx renders it directly before `.toolbar`), so grid auto-placement (row tracks are
-   consumed in document order) lines up with this list without any child needing an explicit
-   `grid-row`. The `max-width: 600px` copy of the base rule below must gain the identical extra
-   `auto` row for the same reason -- the two are listed together at the top of this file's own
-   history for exactly that kind of drift risk.
-*/
+/* The banner row, opened by `applicationShell.tsx` whenever (and only whenever) it was given a
+   banner to put in it -- one expression derives both the class and the child, so the track and
+   its occupant cannot disagree. See `.application`'s own comment above for the production defect
+   that taught this and for why `auto` rather than a fixed height. */
 .application.has-readonly-banner {
-  grid-template-rows: 38px 31px auto 47px minmax(0, 1fr) 30px;
+  --fd-shell-banner-row: auto;
+}
+
+/* The rows a screen can legitimately not have. `applicationShell.tsx` emits each of these from the
+   absence of the corresponding slot, so this is never a hand-applied class. Collapsing the track
+   to 0px, rather than removing it from the list, is what keeps every other row's size and every
+   child's placement identical between screens: the read-only comparison view's title bar, banner
+   and workspace sit in exactly the tracks the editor's do.
+
+   Specificity, deliberately: each of these is `.application.shell-without-*` (two classes) and so
+   outranks the single-class `.application` rule in the `max-width: 600px` block below, in either
+   source order. A screen without a toolbar therefore stays without one at every viewport width
+   without that block needing a copy of these rules. */
+.application.shell-without-menubar {
+  --fd-shell-menubar-row: 0px;
+}
+
+.application.shell-without-toolbar {
+  --fd-shell-toolbar-row: 0px;
+}
+
+.application.shell-without-statusbar {
+  --fd-shell-statusbar-row: 0px;
 }
 
 .titlebar {
   display: flex;
+  grid-area: titlebar;
   align-items: center;
   gap: 24px;
   padding: 0 12px;
@@ -228,6 +287,7 @@ select:focus-visible,
 
 .menubar {
   padding: 0 8px;
+  grid-area: menubar;
 }
 
 .menubar > span:not(.menubar-spacer),
@@ -291,6 +351,7 @@ select:focus-visible,
 .toolbar {
   gap: 3px;
   padding: 6px 10px;
+  grid-area: toolbar;
 }
 
 .tool-button {
@@ -419,6 +480,7 @@ select:focus-visible,
 
 .workspace {
   display: flex;
+  grid-area: workspace;
   min-height: 0;
   overflow: hidden;
 }
@@ -1499,6 +1561,7 @@ select:focus-visible,
 
 .statusbar {
   display: flex;
+  grid-area: statusbar;
   align-items: center;
   padding: 0 10px;
   border-top: 1px solid var(--border-05);
@@ -1824,6 +1887,7 @@ select:focus-visible,
    this is an explained state with a working way out, not a failure. */
 .readonly-banner {
   display: flex;
+  grid-area: banner;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
@@ -2390,15 +2454,11 @@ select:focus-visible,
 }
 
 @media (max-width: 600px) {
+  /* One number, not two track lists: the banner row is already `auto` in both states and the
+     `.shell-without-*` rules already outrank this one (see their own comment), so this breakpoint
+     no longer needs a copy of either. */
   .application {
-    grid-template-rows: 38px 31px 42px minmax(0, 1fr) 30px;
-  }
-
-  /* The narrow-viewport counterpart to `.application.has-readonly-banner` above -- same extra
-     `auto` row for the banner, inserted in the same position, over this breakpoint's own 42px
-     (not 47px) toolbar-row override. */
-  .application.has-readonly-banner {
-    grid-template-rows: 38px 31px auto 42px minmax(0, 1fr) 30px;
+    --fd-shell-toolbar-row: 42px;
   }
 
   .toolbar {
