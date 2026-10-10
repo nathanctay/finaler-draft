@@ -1,6 +1,10 @@
 import { checkEntitlement, type EntitlementSnapshot } from '@finaler-draft/entitlements';
 import type { ConnectionTokenVerification } from '@finaler-draft/collab-token';
-import { TRANSIENT_SYNC_AUTH_FAILURE_REASON } from '@finaler-draft/config';
+import {
+  parseCollabDocumentName,
+  TRANSIENT_SYNC_AUTH_FAILURE_REASON,
+  UNKNOWN_DOCUMENT_EPOCH_FAILURE_REASON,
+} from '@finaler-draft/config';
 import { isTrustedConnectionOrigin } from './originGuard.js';
 
 /**
@@ -14,7 +18,16 @@ import { isTrustedConnectionOrigin } from './originGuard.js';
  */
 export type ConnectionAuthorization =
   | { allowed: false }
-  | { allowed: true; actorId: string; readOnly: boolean };
+  | {
+      allowed: true;
+      actorId: string;
+      readOnly: boolean;
+      /** The screenplay's current collaboration epoch (`screenplays.current_epoch`), read in the same
+       * query as the role -- collaboration slice 5. Resolved here, at connection time, from the
+       * database, for the identical reason the role and the entitlement decision are: the client's
+       * claim about which epoch it holds is only ever a claim to be checked against this. */
+      currentEpoch: number;
+    };
 
 /** Structurally compatible with both `Pool` and `PoolClient`, matching the rest of this codebase's
  * convention for a query surface that does not care which one it was handed. */
@@ -23,7 +36,8 @@ export interface Queryable {
 }
 
 /**
- * The project role this actor holds on the screenplay named `documentName` (a screenplay id),
+ * The project role this actor holds on `screenplayId`, and that screenplay's current collaboration
+ * epoch,
  * mirroring `apps/api/src/projects.ts`'s `getScreenplay` query exactly: joined through
  * `project_members`, and requiring both the screenplay and its parent project to be live
  * (`deleted_at is null`) -- a soft-deleted screenplay or project is unreachable here the same way
@@ -31,13 +45,13 @@ export interface Queryable {
  * does not exist" without distinguishing the two, the same information-hiding convention
  * `projects.ts` already uses.
  */
-async function fetchRole(
+async function fetchRoleAndEpoch(
   queryable: Queryable,
   screenplayId: string,
   actorId: string,
-): Promise<'owner' | 'editor' | 'reviewer' | undefined> {
+): Promise<{ role: 'owner' | 'editor' | 'reviewer'; currentEpoch: number } | undefined> {
   const result = await queryable.query(
-    `select m.role
+    `select m.role, s.current_epoch as "currentEpoch"
        from screenplays s
        join projects p on p.id = s.project_id
        join project_members m on m.project_id = s.project_id
@@ -47,11 +61,12 @@ async function fetchRole(
         and p.deleted_at is null`,
     [screenplayId, actorId],
   );
-  return (result.rows[0] as { role?: string } | undefined)?.role as
-    | 'owner'
-    | 'editor'
-    | 'reviewer'
-    | undefined;
+  const row = result.rows[0] as { role?: string; currentEpoch?: number } | undefined;
+  if (!row?.role || typeof row.currentEpoch !== 'number') return undefined;
+  return {
+    role: row.role as 'owner' | 'editor' | 'reviewer',
+    currentEpoch: row.currentEpoch,
+  };
 }
 
 /**
@@ -129,10 +144,12 @@ async function fetchEntitlementSnapshot(
 }
 
 /**
- * The single decision `onAuthenticate` (server.ts) delegates to. `documentName` is the
- * screenplay's own id -- the client connects with `name: screenplayId` (see
- * `packages/screenplay-editor`'s `SCREENPLAY_YJS_FRAGMENT` comment for the matching convention on
- * the fragment name within a document, a separate concern from the document name itself).
+ * The single role/entitlement/epoch decision `authenticateConnection` (below) delegates to.
+ * `screenplayId` is parsed out of the Hocuspocus document name by the caller -- since collaboration
+ * slice 5 that name is `<screenplayId>:<epoch>` (`@finaler-draft/config`'s
+ * `formatCollabDocumentName`), not a bare screenplay id, because the epoch is part of the
+ * collaboration document's identity rather than a parameter alongside it. See
+ * `authenticateConnection` for what happens to the epoch half.
  *
  * Role resolution first, entitlement second, exactly mirroring `entitlementProjectStore.ts`'s own
  * layering (membership before billing): a `reviewer` is `readOnly` unconditionally and never
@@ -146,20 +163,69 @@ async function fetchEntitlementSnapshot(
  */
 export async function resolveConnectionAuthorization(
   queryable: Queryable,
-  documentName: string,
+  screenplayId: string,
   actorId: string,
   now: Date,
 ): Promise<ConnectionAuthorization> {
-  const role = await fetchRole(queryable, documentName, actorId);
-  if (!role) return { allowed: false };
-  if (role === 'reviewer') return { allowed: true, actorId, readOnly: true };
+  const membership = await fetchRoleAndEpoch(queryable, screenplayId, actorId);
+  if (!membership) return { allowed: false };
+  const { currentEpoch, role } = membership;
+  if (role === 'reviewer') return { allowed: true, actorId, currentEpoch, readOnly: true };
 
   const snapshot = await fetchEntitlementSnapshot(queryable, actorId, now);
   const decision = checkEntitlement(snapshot, {
     type: 'edit-screenplay',
-    screenplayId: documentName,
+    screenplayId,
   });
-  return { allowed: true, actorId, readOnly: !decision.allowed };
+  return { allowed: true, actorId, currentEpoch, readOnly: !decision.allowed };
+}
+
+/**
+ * What one authenticated connection resolved to. `screenplayId`/`epoch` come from the document name
+ * the client asked for; `currentEpoch` is what the database says is current *now*; `staleEpoch` is
+ * the comparison, pre-computed here so `server.ts` never re-derives it (and so the one test that
+ * matters -- a stale connection cannot write -- has a single place to assert against).
+ */
+export interface AuthenticatedConnection {
+  actorId: string;
+  screenplayId: string;
+  epoch: number;
+  currentEpoch: number;
+  readOnly: boolean;
+  staleEpoch: boolean;
+}
+
+/**
+ * Reads back the `AuthenticatedConnection` fields `server.ts`'s `onAuthenticate` cached on the
+ * connection's Hocuspocus `context`. Every later hook for that connection receives the same object,
+ * so this is how `onChange`/`beforeHandleMessage`/`connected` learn which (screenplay, epoch) pair
+ * the connection belongs to without re-parsing the document name -- one parse, one meaning.
+ *
+ * Validated rather than cast. `context` is `any` in Hocuspocus's own types and is genuinely
+ * `undefined` for a server-internal `DirectConnection` (per the installed types' own comment); this
+ * application never makes one, but a hook that assumed the shape would crash rather than no-op if
+ * that ever changed. Returning `undefined` is what lets each caller choose the fail-closed behaviour
+ * appropriate to it.
+ */
+export function readAuthenticatedConnectionContext(
+  context: unknown,
+): AuthenticatedConnection | undefined {
+  if (typeof context !== 'object' || context === null) return undefined;
+  const candidate = context as Partial<AuthenticatedConnection>;
+  if (typeof candidate.actorId !== 'string') return undefined;
+  if (typeof candidate.screenplayId !== 'string') return undefined;
+  if (typeof candidate.epoch !== 'number') return undefined;
+  if (typeof candidate.currentEpoch !== 'number') return undefined;
+  if (typeof candidate.readOnly !== 'boolean') return undefined;
+  if (typeof candidate.staleEpoch !== 'boolean') return undefined;
+  return {
+    actorId: candidate.actorId,
+    currentEpoch: candidate.currentEpoch,
+    epoch: candidate.epoch,
+    readOnly: candidate.readOnly,
+    screenplayId: candidate.screenplayId,
+    staleEpoch: candidate.staleEpoch,
+  };
 }
 
 /** What `authenticateConnection` needs from the wider process: a database handle, a function that
@@ -233,6 +299,26 @@ export class TransientAuthenticationError extends Error {
  * dispatch on that reason alone, not on the error's class, so this is a drop-in member of the
  * exact same "retry, don't give up" bucket `TransientAuthenticationError` already established.
  */
+/**
+ * The connection asked for an epoch this screenplay has never reached -- a client inventing a future
+ * epoch, or one pointed at the wrong screenplay entirely. Deliberately distinct from the *stale*
+ * direction (an epoch older than current), which is not an error at all: that connection is admitted
+ * read-only so an offline writer's unsynced work can be retained rather than refused at the door
+ * (plan.md step 5). There is nothing to retain for an epoch that never existed, and no reconnect that
+ * would make it exist, so this one is a denial.
+ *
+ * Carries its own `reason` so `apps/web` can tell it apart from "you cannot see this document":
+ * the remedy is to reload the screenplay and pick up the real epoch, not to ask for access.
+ */
+export class UnknownDocumentEpochError extends Error {
+  readonly reason = UNKNOWN_DOCUMENT_EPOCH_FAILURE_REASON;
+
+  constructor() {
+    super('This collaboration document epoch does not exist for this screenplay');
+    this.name = 'UnknownDocumentEpochError';
+  }
+}
+
 export class ExpiredConnectionTokenError extends Error {
   readonly reason = TRANSIENT_SYNC_AUTH_FAILURE_REASON;
 
@@ -273,9 +359,18 @@ export class ExpiredConnectionTokenError extends Error {
 export async function authenticateConnection(
   deps: AuthenticateConnectionDependencies,
   params: { documentName: string; requestHeaders: Headers; token: string; now?: Date },
-): Promise<{ actorId: string; readOnly: boolean }> {
+): Promise<AuthenticatedConnection> {
   if (!isTrustedConnectionOrigin(params.requestHeaders.get('origin'), deps.trustedOrigins)) {
     throw new Error('Cross-origin connection rejected');
+  }
+  // Parsed before anything else is even attempted: a name this server cannot resolve to a
+  // (screenplay, epoch) pair is not a question about access that a token or a role could answer.
+  // A *bare* screenplay id with no epoch lands here too, which is deliberate -- see
+  // `parseCollabDocumentName`'s own comment on why such a client is refused rather than assumed to
+  // mean epoch 0.
+  const document = parseCollabDocumentName(params.documentName);
+  if (!document) {
+    throw new Error('Malformed collaboration document name');
   }
   const now = params.now ?? new Date();
   let verification: ConnectionTokenVerification;
@@ -295,7 +390,7 @@ export async function authenticateConnection(
   try {
     authorization = await resolveConnectionAuthorization(
       deps.queryable,
-      params.documentName,
+      document.screenplayId,
       actorId,
       now,
     );
@@ -305,5 +400,24 @@ export async function authenticateConnection(
   if (!authorization.allowed) {
     throw new Error('This document is not visible to this account');
   }
-  return { actorId, readOnly: authorization.readOnly };
+  if (document.epoch > authorization.currentEpoch) {
+    throw new UnknownDocumentEpochError();
+  }
+  const staleEpoch = document.epoch < authorization.currentEpoch;
+  return {
+    actorId,
+    currentEpoch: authorization.currentEpoch,
+    epoch: document.epoch,
+    // Forced read-only for a stale epoch regardless of role or entitlement. This is plan.md step
+    // 4's "the server rejects writes to the old epoch" on the WebSocket path, and the mechanism is
+    // the one slice 3 already built: Hocuspocus's own low-level `readOnly` check drops the update
+    // before it is applied, and `server.ts`'s `beforeHandleMessage` retains the exact bytes it
+    // would otherwise drop in `document_yjs_quarantined_updates`, tagged with the *old* epoch. So a
+    // returning offline writer's work is neither merged into the restored document nor appended to
+    // the retired epoch's live log -- it is held aside, which is precisely what plan.md step 5
+    // requires ("never auto-merged").
+    readOnly: authorization.readOnly || staleEpoch,
+    screenplayId: document.screenplayId,
+    staleEpoch,
+  };
 }

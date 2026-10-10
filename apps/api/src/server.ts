@@ -8,6 +8,7 @@ import { loadRootEnvironment, shouldLoadRootEnvironment } from './environment.js
 import { selectMailPort, type MailMessage } from '@finaler-draft/auth-server/mail';
 import { createPostgresProjectStore } from './projects.js';
 import { createPostgresRevisionStore } from './revisions.js';
+import { createPostgresRestoreStore } from './restore.js';
 import { createStripeClient } from './stripeClient.js';
 import {
   createStripeIpAllowlist,
@@ -203,6 +204,11 @@ async function buildPersistentApp(
     // entitlement's own axis is which *one* screenplay a restricted account may edit at all, a
     // different question from whether a revision may be captured of one they can already edit.
     revisions: createPostgresRevisionStore(pool),
+    // Collaboration slice 5. Takes `entitlements` directly rather than being wrapped the way
+    // `projects` is: there is exactly one gated operation here, and the decision it needs
+    // (`edit-screenplay` for this specific screenplay) is not one `createEntitlementEnforcedProjectStore`
+    // makes for any of its own methods -- see `restore.ts`'s own module comment.
+    restore: createPostgresRestoreStore(pool, entitlements),
     collab: collabTokenConfigured ? { secret: persistence.COLLAB_TOKEN_SECRET! } : undefined,
     stripe: stripeConfigured
       ? {

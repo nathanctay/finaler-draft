@@ -80,6 +80,7 @@ function persistedScreenplay(
   return {
     id,
     projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+    currentEpoch: 0,
     screenplay: {
       annotations: [],
       blocks: [
@@ -128,6 +129,7 @@ const twoCharacterScreenplay: Screenplay = {
 const twoCharacterPersisted: PersistedScreenplay = {
   id: twoCharacterScreenplay.id,
   projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+  currentEpoch: 0,
   screenplay: twoCharacterScreenplay,
   title: twoCharacterScreenplay.title,
 };
@@ -161,6 +163,7 @@ const mixedCaseCharacterScreenplay: Screenplay = {
 const mixedCaseCharacterPersisted: PersistedScreenplay = {
   id: mixedCaseCharacterScreenplay.id,
   projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+  currentEpoch: 0,
   screenplay: mixedCaseCharacterScreenplay,
   title: mixedCaseCharacterScreenplay.title,
 };
@@ -192,6 +195,7 @@ const mixedCaseParentheticalLastScreenplay: Screenplay = {
 const mixedCaseParentheticalLastPersisted: PersistedScreenplay = {
   id: mixedCaseParentheticalLastScreenplay.id,
   projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+  currentEpoch: 0,
   screenplay: mixedCaseParentheticalLastScreenplay,
   title: mixedCaseParentheticalLastScreenplay.title,
 };
@@ -234,6 +238,7 @@ describe('local semantic screenplay editor', () => {
         initial={{
           id: screenplayFixture.id,
           projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+          currentEpoch: 0,
           screenplay: screenplayFixture,
           title: screenplayFixture.title,
         }}
@@ -999,6 +1004,7 @@ describe('local semantic screenplay editor', () => {
         initial={{
           id: screenplay.id,
           projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+          currentEpoch: 0,
           screenplay,
           title: screenplay.title,
         }}
@@ -1844,6 +1850,7 @@ describe('an invalid projection is never silent', () => {
     return {
       id,
       projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+      currentEpoch: 0,
       screenplay: {
         annotations: [],
         blocks: [
@@ -1974,7 +1981,7 @@ describe('FDX download', () => {
       expect(fetchMock).toHaveBeenCalledWith(
         '/api/screenplays/9c7c5f7b-c2f0-47a0-a639-dfd0c5702b87/revisions',
         expect.objectContaining({
-          body: JSON.stringify({ kind: 'export', format: 'fdx' }),
+          body: JSON.stringify({ epoch: 0, format: 'fdx', kind: 'export' }),
           method: 'POST',
         }),
       ),
@@ -2242,7 +2249,10 @@ describe('named revision saving', () => {
     await user.type(within(dialog).getByRole('textbox', { name: 'Revision label' }), 'Draft 2');
     await user.click(within(dialog).getByRole('button', { name: 'Save' }));
 
-    await waitFor(() => expect(createSpy).toHaveBeenCalledWith(script.id, 'Draft 2'));
+    // The third argument is collaboration slice 5's required `epoch`: a named revision carries the
+    // epoch the writer believed was current, and the server refuses it with a 409 if that is no longer
+    // the live one (`createRevisionInput`'s own comment, apps/api).
+    await waitFor(() => expect(createSpy).toHaveBeenCalledWith(script.id, 'Draft 2', 0));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'File menu' })).toHaveFocus();
     createSpy.mockRestore();

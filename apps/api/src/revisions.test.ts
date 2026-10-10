@@ -61,29 +61,35 @@ beforeEach(() => {
 
 describe('createRevisionInput', () => {
   it('accepts a named input with a trimmed, non-empty label', () => {
-    expect(createRevisionInput.parse({ kind: 'named', label: ' Draft 2 ' })).toEqual({
+    expect(createRevisionInput.parse({ epoch: 0, kind: 'named', label: ' Draft 2 ' })).toEqual({
+      epoch: 0,
       kind: 'named',
       label: 'Draft 2',
     });
   });
 
   it('rejects a named input with a blank or overlong label', () => {
-    expect(() => createRevisionInput.parse({ kind: 'named', label: '' })).toThrow();
-    expect(() => createRevisionInput.parse({ kind: 'named', label: 'x'.repeat(201) })).toThrow();
+    expect(() => createRevisionInput.parse({ epoch: 0, kind: 'named', label: '' })).toThrow();
+    expect(() =>
+      createRevisionInput.parse({ epoch: 0, kind: 'named', label: 'x'.repeat(201) }),
+    ).toThrow();
   });
 
   it('accepts an export input with a known format and rejects an unknown one', () => {
-    expect(createRevisionInput.parse({ kind: 'export', format: 'pdf' })).toEqual({
+    expect(createRevisionInput.parse({ epoch: 0, kind: 'export', format: 'pdf' })).toEqual({
+      epoch: 0,
       kind: 'export',
       format: 'pdf',
     });
-    expect(() => createRevisionInput.parse({ kind: 'export', format: 'txt' })).toThrow();
+    expect(() => createRevisionInput.parse({ epoch: 0, kind: 'export', format: 'txt' })).toThrow();
   });
 
   it('rejects a named input carrying an export-only field, and vice versa', () => {
-    expect(() => createRevisionInput.parse({ kind: 'named', label: 'x', format: 'pdf' })).toThrow();
     expect(() =>
-      createRevisionInput.parse({ kind: 'export', format: 'pdf', label: 'x' }),
+      createRevisionInput.parse({ epoch: 0, kind: 'named', label: 'x', format: 'pdf' }),
+    ).toThrow();
+    expect(() =>
+      createRevisionInput.parse({ epoch: 0, kind: 'export', format: 'pdf', label: 'x' }),
     ).toThrow();
   });
 });
@@ -152,7 +158,7 @@ describe('createRevision', () => {
     const pool = fakePool([rows([])]);
     const store = createPostgresRevisionStore(pool);
     await expect(
-      store.createRevision(actorId, screenplayId, { kind: 'named', label: 'Draft 2' }),
+      store.createRevision(actorId, screenplayId, { epoch: 0, kind: 'named', label: 'Draft 2' }),
     ).resolves.toBe('missing');
     expect(mockInsert).not.toHaveBeenCalled();
   });
@@ -161,7 +167,7 @@ describe('createRevision', () => {
     const pool = fakePool([rows([{ role: 'reviewer' }])]);
     const store = createPostgresRevisionStore(pool);
     await expect(
-      store.createRevision(actorId, screenplayId, { kind: 'named', label: 'Draft 2' }),
+      store.createRevision(actorId, screenplayId, { epoch: 0, kind: 'named', label: 'Draft 2' }),
     ).resolves.toBe('forbidden');
     expect(mockInsert).not.toHaveBeenCalled();
   });
@@ -169,12 +175,15 @@ describe('createRevision', () => {
   it('allows an editor to name a milestone', async () => {
     const pool = fakePool([
       rows([{ role: 'editor' }]),
-      rows([{ canonicalScreenplay: screenplayFixture, canonicalHash: 'live-hash' }]),
+      rows([
+        { canonicalScreenplay: screenplayFixture, canonicalHash: 'live-hash', currentEpoch: 0 },
+      ]),
     ]);
     mockInsert.mockResolvedValue({ ...revisionRow(), created: true });
     const store = createPostgresRevisionStore(pool);
 
     const result = await store.createRevision(actorId, screenplayId, {
+      epoch: 0,
       kind: 'named',
       label: 'Draft 2',
     });
@@ -194,18 +203,78 @@ describe('createRevision', () => {
     );
   });
 
+  /**
+   * Collaboration slice 5's HTTP half of plan.md step 4, "the server rejects writes to the old
+   * epoch". The content this revision would capture is never *wrong* -- `createRevision` always
+   * reads the screenplay's current canonical projection, never the client's -- but a writer naming
+   * "this moment" after a restore has replaced what they were looking at is labelling content they
+   * never saw. Refused before the insert, not after it.
+   */
+  it('refuses a revision confirmed against an epoch a restore has since retired, without inserting anything', async () => {
+    const pool = fakePool([
+      rows([{ role: 'owner' }]),
+      rows([
+        { canonicalScreenplay: screenplayFixture, canonicalHash: 'live-hash', currentEpoch: 2 },
+      ]),
+    ]);
+    const store = createPostgresRevisionStore(pool);
+
+    await expect(
+      store.createRevision(actorId, screenplayId, { epoch: 1, kind: 'named', label: 'Draft 2' }),
+    ).resolves.toBe('stale-epoch');
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  it('refuses a stale epoch for an export revision too -- the gate is the write, not the kind', async () => {
+    const pool = fakePool([
+      rows([{ role: 'reviewer' }]),
+      rows([
+        { canonicalScreenplay: screenplayFixture, canonicalHash: 'live-hash', currentEpoch: 1 },
+      ]),
+    ]);
+    const store = createPostgresRevisionStore(pool);
+
+    await expect(
+      store.createRevision(actorId, screenplayId, { epoch: 0, kind: 'export', format: 'pdf' }),
+    ).resolves.toBe('stale-epoch');
+    expect(mockInsert).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The epoch actually written is the screenplay's own `current_epoch`, read in the same query as
+   * the canonical projection this revision captures -- not the literal `0` this code held before
+   * slice 5, and not the client's claim either (that is only ever checked, never written).
+   */
+  it("records the screenplay's real current epoch as the revision's source epoch", async () => {
+    const pool = fakePool([
+      rows([{ role: 'owner' }]),
+      rows([
+        { canonicalScreenplay: screenplayFixture, canonicalHash: 'live-hash', currentEpoch: 3 },
+      ]),
+    ]);
+    mockInsert.mockResolvedValue({ ...revisionRow({ sourceEpoch: 3 }), created: true });
+    const store = createPostgresRevisionStore(pool);
+
+    await store.createRevision(actorId, screenplayId, { epoch: 3, kind: 'named', label: 'D' });
+
+    expect(mockInsert).toHaveBeenCalledWith(pool, expect.objectContaining({ sourceEpoch: 3 }));
+  });
+
   // The reviewer/export case plan.md requires: "a lapsed account keeps every screenplay readable
   // and exportable" -- exporting (and the revision it captures) must never be gated behind edit
   // rights the way naming a milestone is.
   it('allows a reviewer to trigger an export revision', async () => {
     const pool = fakePool([
       rows([{ role: 'reviewer' }]),
-      rows([{ canonicalScreenplay: screenplayFixture, canonicalHash: 'live-hash' }]),
+      rows([
+        { canonicalScreenplay: screenplayFixture, canonicalHash: 'live-hash', currentEpoch: 0 },
+      ]),
     ]);
     mockInsert.mockResolvedValue({ ...revisionRow(), kind: 'export', label: null, created: true });
     const store = createPostgresRevisionStore(pool);
 
     const result = await store.createRevision(actorId, screenplayId, {
+      epoch: 0,
       kind: 'export',
       format: 'pdf',
     });
@@ -227,7 +296,7 @@ describe('createRevision', () => {
     const pool = fakePool([rows([{ role: 'owner' }]), rows([])]);
     const store = createPostgresRevisionStore(pool);
     await expect(
-      store.createRevision(actorId, screenplayId, { kind: 'named', label: 'Draft 2' }),
+      store.createRevision(actorId, screenplayId, { epoch: 0, kind: 'named', label: 'Draft 2' }),
     ).resolves.toBe('missing');
     expect(mockInsert).not.toHaveBeenCalled();
   });
@@ -239,12 +308,19 @@ describe('createRevision', () => {
   it("surfaces insertRevisionIfChanged's own dedupe: created: false when an export's hash is unchanged", async () => {
     const pool = fakePool([
       rows([{ role: 'owner' }]),
-      rows([{ canonicalScreenplay: screenplayFixture, canonicalHash: 'unchanged-hash' }]),
+      rows([
+        {
+          canonicalScreenplay: screenplayFixture,
+          canonicalHash: 'unchanged-hash',
+          currentEpoch: 0,
+        },
+      ]),
     ]);
     mockInsert.mockResolvedValue({ ...revisionRow(), kind: 'export', label: null, created: false });
     const store = createPostgresRevisionStore(pool);
 
     const result = await store.createRevision(actorId, screenplayId, {
+      epoch: 0,
       kind: 'export',
       format: 'pdf',
     });

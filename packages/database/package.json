@@ -13,7 +13,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:integration": "node ../../apps/api/scripts/require-test-database.mjs && vitest run src/migrationCheck.integration.test.ts src/migrationBootstrapCheckpoint.integration.test.ts",
+    "test:integration": "node ../../apps/api/scripts/require-test-database.mjs && vitest run src/migrationCheck.integration.test.ts src/migrationBootstrapCheckpoint.integration.test.ts src/restore.integration.test.ts",
     "test:coverage": "vitest run --coverage",
     "db:generate": "node ./scripts/run-drizzle.mjs generate",
     "db:migrate": "node ./scripts/run-drizzle.mjs migrate",

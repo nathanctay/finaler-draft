@@ -1,3 +1,4 @@
+import { Client } from 'pg';
 import { Server } from '@hocuspocus/server';
 import { Database } from '@hocuspocus/extension-database';
 import { createAuth } from '@finaler-draft/auth-server';
@@ -10,9 +11,11 @@ import {
 import {
   authenticateConnection,
   ExpiredConnectionTokenError,
+  readAuthenticatedConnectionContext,
   TransientAuthenticationError,
+  UnknownDocumentEpochError,
 } from './authenticate.js';
-import { createFetch, createStore, DEFAULT_EPOCH } from './database.js';
+import { createFetch, createStore } from './database.js';
 import { unreachableMailPort } from './mailStub.js';
 import {
   resolvePresenceIdentity,
@@ -26,6 +29,12 @@ import {
   updateCarriesNewContent,
 } from './quarantine.js';
 import { createIdleSessionRevisionScheduler, maybeCreateIdleSessionRevision } from './revisions.js';
+import {
+  startRestoreNotificationListener,
+  supersedeRestoredDocuments,
+  type NotificationClient,
+} from './restoreNotifications.js';
+import { encodeCollabRestoredMessage } from '@finaler-draft/config';
 
 try {
   if (shouldLoadRootEnvironment(process.env)) {
@@ -68,6 +77,50 @@ try {
     },
   );
 
+  // Collaboration slice 5 (plan.md step 4). Declared before the `Server` so `onDestroy` can close it,
+  // and assigned immediately after -- the listener's own callback needs `server.hocuspocus.documents`,
+  // which does not exist until the `Server` is constructed. See `restoreNotifications.ts` for why this
+  // is a dedicated connection rather than a pooled one, and why Postgres `NOTIFY` rather than an HTTP
+  // call from `apps/api`.
+  let onRestored: (notification: { screenplayId: string; epoch: number }) => void = () => undefined;
+  const restoreNotifications = startRestoreNotificationListener({
+    connect: async () => {
+      const client = new Client({ connectionString: environment.DATABASE_URL });
+      await client.connect();
+      // Adapted to `NotificationClient` explicitly rather than passed through: that interface exists
+      // so the listener's reconnect logic is testable without a database, and an adapter here is what
+      // keeps the production path honest about using exactly the four operations it describes.
+      const adapted: NotificationClient = {
+        close: async () => {
+          await client.end();
+        },
+        listen: async (channel) => {
+          // The channel name is a compile-time constant from `@finaler-draft/database`, never
+          // user-supplied -- `listen` takes no bind parameters, so a dynamic value here would be
+          // string interpolation into SQL.
+          await client.query(`listen ${channel}`);
+        },
+        onFailure: (listener) => {
+          client.on('error', listener);
+          client.on('end', () => listener(new Error('Notification connection ended')));
+        },
+        onNotification: (listener) => {
+          client.on('notification', (message) => listener(message.payload));
+        },
+      };
+      return adapted;
+    },
+    onError: (error) => {
+      console.error(
+        JSON.stringify({
+          event: 'collab_restore_listener_failed',
+          error: error instanceof Error ? error.name : 'UnknownError',
+        }),
+      );
+    },
+    onRestored: (notification) => onRestored(notification),
+  });
+
   const server = new Server({
     extensions: [
       new Database({
@@ -101,14 +154,15 @@ try {
     ...(process.env.FINALER_SYSTEM_TEST === 'true' ? { debounce: 300, maxDebounce: 1000 } : {}),
     async onAuthenticate(data) {
       try {
-        const { actorId, readOnly } = await authenticateConnection(
-          { queryable: pool, verifyToken, trustedOrigins },
-          {
-            documentName: data.documentName,
-            requestHeaders: data.requestHeaders,
-            token: data.token,
-          },
-        );
+        const { actorId, currentEpoch, epoch, readOnly, screenplayId, staleEpoch } =
+          await authenticateConnection(
+            { queryable: pool, verifyToken, trustedOrigins },
+            {
+              documentName: data.documentName,
+              requestHeaders: data.requestHeaders,
+              token: data.token,
+            },
+          );
         // Mutates the *same* `connectionConfig` object Hocuspocus later reads to decide the
         // connection's own `readOnly` flag (confirmed by reading the installed
         // `@hocuspocus/server` source: `onAuthenticate`'s payload spreads the pending
@@ -119,6 +173,12 @@ try {
         // `readOnly` is `true` -- see `authenticate.ts`'s own module comment and
         // `authenticate.integration.test.ts`'s "a reviewer's own edit never reaches..." test,
         // which fails if this line is removed.
+        //
+        // Since collaboration slice 5 `readOnly` is additionally `true` for every connection whose
+        // requested epoch is older than the screenplay's current one, whatever the actor's role --
+        // see `authenticate.ts`'s own comment on why that is where plan.md step 4's "the server
+        // rejects writes to the old epoch" lands on this path, and why rejecting means
+        // quarantine-not-merge rather than refusing the connection.
         data.connectionConfig.readOnly = readOnly;
         // Resolved once per connection, not per awareness update (which can fire as often as
         // every caret move): cached here on the connection's own `context`, which every later
@@ -126,7 +186,12 @@ try {
         // unchanged. See `presence.ts`'s own comment on why the server, not the client, is
         // authoritative for a connection's displayed name and colour.
         const presence = await resolvePresenceIdentity(pool, actorId);
-        return { actorId, presence };
+        // `screenplayId`/`epoch` are cached on the context for the same reason `presence` is: every
+        // later hook for this connection receives the context back unchanged, and re-parsing the
+        // document name in each of them would be the same string parsed four times -- with four
+        // chances to disagree about what it meant. `currentEpoch`/`staleEpoch` are what the
+        // `connected` hook below needs to tell this client its document has been superseded.
+        return { actorId, currentEpoch, epoch, presence, readOnly, screenplayId, staleEpoch };
       } catch (error) {
         // Previously silent: Hocuspocus reports only "permission-denied" (or, for a transient
         // failure, the same message tagged with `TransientAuthenticationError`'s own `reason`)
@@ -151,6 +216,7 @@ try {
         // a failure of any lookup, it is the token's own clock running out).
         const transientFailure = error instanceof TransientAuthenticationError;
         const expiredToken = error instanceof ExpiredConnectionTokenError;
+        const unknownEpoch = error instanceof UnknownDocumentEpochError;
         const cause = transientFailure ? error.cause : undefined;
         console.error(
           JSON.stringify({
@@ -159,6 +225,11 @@ try {
             errorName: error instanceof Error ? error.name : 'UnknownError',
             reason: error instanceof Error ? error.message : String(error),
             transient: transientFailure || expiredToken,
+            // Not transient and not a permission problem: the client named an epoch this screenplay
+            // has never reached (`UnknownDocumentEpochError`). Logged distinctly because the remedy
+            // is a reload, and because seeing this in production would mean a client is constructing
+            // document names from something other than `GET /api/screenplays/:id`.
+            unknownEpoch,
             stage: transientFailure ? error.stage : undefined,
             causeName:
               cause instanceof Error
@@ -184,19 +255,32 @@ try {
     // *were* applied -- so this hook, by construction, only ever logs a write from a connection
     // that was actually allowed to make one.
     async onChange({ document, documentName, update, context }) {
-      const actorId = (context as { actorId?: string } | undefined)?.actorId;
+      const connection = readAuthenticatedConnectionContext(context);
+      // No context (a server-internal `DirectConnection`; this application never makes one) means
+      // there is no connection whose epoch this update belongs to, and appending it under a guessed
+      // epoch is exactly the mistake slice 5 exists to prevent. Skipped rather than defaulted.
+      if (!connection) return;
       await appendUpdate(pool, {
-        screenplayId: documentName,
-        epoch: DEFAULT_EPOCH,
+        // Deliberately the *connection's own* epoch, not the screenplay's current one. These are the
+        // same number for every ordinary connection, and differ only for a connection that outlived
+        // a restore -- in which case this update belongs to the epoch it was made against, and
+        // writing it under the current epoch would be precisely the auto-merge into the restored
+        // screenplay that plan.md step 5 forbids. (That update cannot normally reach this hook at
+        // all: `supersedeRestoredDocuments` forces such a connection read-only the moment the restore
+        // commits, and a read-only connection's updates never get applied, so `onChange` never fires
+        // for them. This is the second of the two mechanisms, not the first.)
+        screenplayId: connection.screenplayId,
+        epoch: connection.epoch,
         update,
-        actorId,
+        actorId: connection.actorId,
       });
       void document; // reconstruction reads the durable log, not this live object -- see updateLog.ts.
+      void documentName; // the (screenplayId, epoch) pair it encodes is already on `context`.
       // Resets this screenplay's idle-session timer -- by construction, `onChange` only ever fires
       // for a write that was actually applied to the live document (see this hook's own comment
       // above on quarantine/`readOnly` connections never reaching here), so this is exactly "real
       // editing activity happened just now," the one signal the idle-session trigger needs.
-      idleSessionRevisions.noteActivity(documentName, DEFAULT_EPOCH);
+      idleSessionRevisions.noteActivity(connection.screenplayId, connection.epoch);
     },
     // Quarantine (progress/collaboration-offline-durable.md): the detection and retention half of
     // "accept the data, never grant editing access" for a reconnecting client whose connection
@@ -207,18 +291,41 @@ try {
     // it possible to retain exactly the bytes that check is about to silently drop with no trace.
     // Never applies anything to `document` itself -- the live document staying unchanged does not
     // depend on this hook at all; Hocuspocus's own existing drop already guarantees that.
-    async beforeHandleMessage({ connection, document, update, documentName, context }) {
+    // Since collaboration slice 5 this hook additionally carries plan.md step 5: a returning offline
+    // client whose epoch has been superseded is read-only (`authenticate.ts`), so the work it made
+    // while offline arrives here and is retained in `document_yjs_quarantined_updates` tagged with
+    // the epoch it was actually written against -- never merged into the restored screenplay, and
+    // never appended to the retired epoch's live log either. The writer is told separately (the
+    // restore stateless message, `connected` below) and offers their own copy as a recovery
+    // screenplay from the browser; this is the server-side half that survives a cleared browser.
+    async beforeHandleMessage({ connection, document, update, context }) {
       if (!connection.readOnly) return;
       const payload = extractSyncUpdatePayload(update);
       if (!payload) return;
       if (!updateCarriesNewContent(document, payload)) return;
-      const actorId = (context as { actorId?: string } | undefined)?.actorId;
+      const identity = readAuthenticatedConnectionContext(context);
+      if (!identity) return;
       await quarantineUpdate(pool, {
-        screenplayId: documentName,
-        epoch: DEFAULT_EPOCH,
+        screenplayId: identity.screenplayId,
+        epoch: identity.epoch,
         update: payload,
-        actorId,
+        actorId: identity.actorId,
       });
+    },
+    /**
+     * Tells a client that connected to an already-superseded epoch so, the moment its connection is
+     * established. The counterpart to `supersedeRestoredDocuments`, which handles the connections
+     * that were *already* open when the restore committed: between them, every connection to a
+     * retired epoch is told exactly once, whether it was open at the time or arrived afterwards.
+     *
+     * `sendStateless` on the one connection rather than `broadcastStateless` on the document: the
+     * other connections to this same document have each already been told by whichever of the two
+     * paths applied to them, and telling them again on every new arrival would be noise.
+     */
+    async connected({ connection, context }) {
+      const identity = readAuthenticatedConnectionContext(context);
+      if (!identity?.staleEpoch) return;
+      connection.sendStateless(encodeCollabRestoredMessage(identity.currentEpoch));
     },
     // Presence: the awareness-protocol half of this slice (plan.md's "Cursors and presence are
     // transient and never belong in history" -- see `presence.ts`'s own comment for the full
@@ -253,11 +360,30 @@ try {
     // ever calling `process.exit(0)`), so this always finishes before the process actually exits.
     async onDestroy() {
       idleSessionRevisions.dispose();
+      await restoreNotifications.dispose();
       await pool.end();
     },
     port: environment.PORT,
     quiet: environment.NODE_ENV === 'production',
   });
+
+  // Wired after construction for the reason stated above the listener: this closure needs the
+  // `Hocuspocus` instance the `Server` owns. A notification that arrives before this assignment (the
+  // window is the synchronous gap between the two statements) would find the default no-op -- which
+  // is correct rather than a dropped event, because there are no connections to supersede before the
+  // server has started listening.
+  onRestored = (notification) => {
+    const result = supersedeRestoredDocuments(server.hocuspocus.documents.values(), notification);
+    console.info(
+      JSON.stringify({
+        event: 'collab_restore_superseded_documents',
+        screenplayId: notification.screenplayId,
+        epoch: notification.epoch,
+        supersededDocuments: result.supersededDocuments,
+        notifiedConnections: result.notifiedConnections,
+      }),
+    );
+  };
 
   await server.listen();
 } catch (error) {

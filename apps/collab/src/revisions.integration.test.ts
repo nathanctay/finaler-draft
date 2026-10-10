@@ -3,6 +3,7 @@ import type { Pool } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import * as Y from 'yjs';
 import { seedScreenplayYDoc, type EditorContent } from '@finaler-draft/screenplay-editor';
+import { formatCollabDocumentName } from '@finaler-draft/config';
 import { createStore, DEFAULT_EPOCH } from './database.js';
 import { createIdleSessionRevisionScheduler, maybeCreateIdleSessionRevision } from './revisions.js';
 import { writeCheckpoint } from './updateLog.js';
@@ -60,7 +61,7 @@ describe.skipIf(!databaseUrl)('collaboration slice 4a revisions (PostgreSQL)', (
     // of them later stays comfortably under the 25% block-ratio threshold (1/8 = 12.5%).
     const before = buildDoc([sceneHeading(0, 'INT. KITCHEN - DAY'), ...actionBlocks(1, 7)]);
     await createStore(pool!)({
-      documentName: screenplayId,
+      documentName: formatCollabDocumentName(screenplayId, DEFAULT_EPOCH),
       document: before,
       state: Buffer.from(Y.encodeStateAsUpdate(before)),
     } as never);
@@ -83,7 +84,7 @@ describe.skipIf(!databaseUrl)('collaboration slice 4a revisions (PostgreSQL)', (
       { id: blockId(7), type: 'action', text: 'Edited on a later save.' },
     ]);
     await createStore(pool!)({
-      documentName: screenplayId,
+      documentName: formatCollabDocumentName(screenplayId, DEFAULT_EPOCH),
       document: after,
       state: Buffer.from(Y.encodeStateAsUpdate(after)),
     } as never);
@@ -111,7 +112,7 @@ describe.skipIf(!databaseUrl)('collaboration slice 4a revisions (PostgreSQL)', (
 
     const before = buildDoc([sceneHeading(0, 'INT. KITCHEN - DAY'), ...actionBlocks(1, 7)]);
     await createStore(pool!)({
-      documentName: screenplayId,
+      documentName: formatCollabDocumentName(screenplayId, DEFAULT_EPOCH),
       document: before,
       state: Buffer.from(Y.encodeStateAsUpdate(before)),
     } as never);
@@ -132,7 +133,7 @@ describe.skipIf(!databaseUrl)('collaboration slice 4a revisions (PostgreSQL)', (
       ...actionBlocks(9, 3),
     ]);
     await createStore(pool!)({
-      documentName: screenplayId,
+      documentName: formatCollabDocumentName(screenplayId, DEFAULT_EPOCH),
       document: after,
       state: Buffer.from(Y.encodeStateAsUpdate(after)),
     } as never);
@@ -159,7 +160,7 @@ describe.skipIf(!databaseUrl)('collaboration slice 4a revisions (PostgreSQL)', (
     // Hocuspocus's own `onStoreDocument` firing again after a decoration-only pagination
     // recompute that never touched the Yjs document at all (plan.md's exact stated trap).
     await createStore(pool!)({
-      documentName: screenplayId,
+      documentName: formatCollabDocumentName(screenplayId, DEFAULT_EPOCH),
       document: doc,
       state: Buffer.from(Y.encodeStateAsUpdate(doc)),
     } as never);
@@ -168,7 +169,7 @@ describe.skipIf(!databaseUrl)('collaboration slice 4a revisions (PostgreSQL)', (
     expect(revisionsAfterFirst).toHaveLength(1);
 
     await createStore(pool!)({
-      documentName: screenplayId,
+      documentName: formatCollabDocumentName(screenplayId, DEFAULT_EPOCH),
       document: doc,
       state: Buffer.from(Y.encodeStateAsUpdate(doc)),
     } as never);

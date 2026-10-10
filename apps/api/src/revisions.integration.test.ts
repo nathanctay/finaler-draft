@@ -55,7 +55,11 @@ describe.skipIf(!databaseUrl)('named/export revision creation (PostgreSQL)', () 
 
     expect(await store!.listRevisions(stranger, screenplayId)).toBe('missing');
     expect(
-      await store!.createRevision(stranger, screenplayId, { kind: 'named', label: 'Draft 2' }),
+      await store!.createRevision(stranger, screenplayId, {
+        epoch: 0,
+        kind: 'named',
+        label: 'Draft 2',
+      }),
     ).toBe('missing');
   });
 
@@ -66,10 +70,15 @@ describe.skipIf(!databaseUrl)('named/export revision creation (PostgreSQL)', () 
     await addMember(projectId, reviewer, 'reviewer');
 
     expect(
-      await store!.createRevision(reviewer, screenplayId, { kind: 'named', label: 'Draft 2' }),
+      await store!.createRevision(reviewer, screenplayId, {
+        epoch: 0,
+        kind: 'named',
+        label: 'Draft 2',
+      }),
     ).toBe('forbidden');
 
     const exportResult = await store!.createRevision(reviewer, screenplayId, {
+      epoch: 0,
       kind: 'export',
       format: 'pdf',
     });
@@ -86,10 +95,11 @@ describe.skipIf(!databaseUrl)('named/export revision creation (PostgreSQL)', () 
     await addMember(projectId, editor, 'editor');
 
     const created = await store!.createRevision(owner, screenplayId, {
+      epoch: 0,
       kind: 'named',
       label: 'Draft 2',
     });
-    if (created === 'missing' || created === 'forbidden') throw new Error('Unexpected result.');
+    if (typeof created === 'string') throw new Error(`Unexpected result: ${created}`);
     expect(created.created).toBe(true);
     expect(created.kind).toBe('named');
     expect(created.label).toBe('Draft 2');
@@ -117,19 +127,21 @@ describe.skipIf(!databaseUrl)('named/export revision creation (PostgreSQL)', () 
     const { screenplayId } = await createProjectAndScreenplay(owner);
 
     const first = await store!.createRevision(owner, screenplayId, {
+      epoch: 0,
       kind: 'named',
       label: 'Draft A',
     });
-    if (first === 'missing' || first === 'forbidden') throw new Error('Unexpected result.');
+    if (typeof first === 'string') throw new Error(`Unexpected result: ${first}`);
     expect(first.created).toBe(true);
 
     // Nothing changed the live screenplay row in between -- an export triggered right after the
     // named milestone, on the identical content, must dedupe rather than duplicate.
     const second = await store!.createRevision(owner, screenplayId, {
+      epoch: 0,
       kind: 'export',
       format: 'fdx',
     });
-    if (second === 'missing' || second === 'forbidden') throw new Error('Unexpected result.');
+    if (typeof second === 'string') throw new Error(`Unexpected result: ${second}`);
     expect(second.created).toBe(false);
     expect(second.id).toBe(first.id);
     // The reused revision keeps the *original* kind/label -- deduping never rewrites an existing
@@ -151,10 +163,12 @@ describe.skipIf(!databaseUrl)('named/export revision creation (PostgreSQL)', () 
     const { screenplayId } = await createProjectAndScreenplay(owner);
 
     const first = await store!.createRevision(owner, screenplayId, {
+      epoch: 0,
       kind: 'named',
       label: 'Draft A',
     });
-    if (first === 'missing' || first === 'forbidden') throw new Error('Unexpected result.');
+    if (first === 'missing' || first === 'forbidden' || first === 'stale-epoch')
+      throw new Error('Unexpected result.');
 
     // Relocate "EXT. UNION STATION - CONTINUOUS" (and everything in it) ahead of
     // "INT. UNION STATION - NIGHT" -- a real scene reorder on the fixture's real content, not a
@@ -175,10 +189,12 @@ describe.skipIf(!databaseUrl)('named/export revision creation (PostgreSQL)', () 
     );
 
     const second = await store!.createRevision(owner, screenplayId, {
+      epoch: 0,
       kind: 'named',
       label: 'Draft B (reordered)',
     });
-    if (second === 'missing' || second === 'forbidden') throw new Error('Unexpected result.');
+    if (second === 'missing' || second === 'forbidden' || second === 'stale-epoch')
+      throw new Error('Unexpected result.');
 
     const diffResult = await store!.getRevisionDiff(owner, screenplayId, first.id, second.id);
     if (diffResult === 'missing') throw new Error('Unexpected result.');
@@ -215,10 +231,12 @@ describe.skipIf(!databaseUrl)('named/export revision creation (PostgreSQL)', () 
     const { screenplayId } = await createProjectAndScreenplay(owner);
 
     const first = await store!.createRevision(owner, screenplayId, {
+      epoch: 0,
       kind: 'named',
       label: 'Draft A',
     });
-    if (first === 'missing' || first === 'forbidden') throw new Error('Unexpected result.');
+    if (first === 'missing' || first === 'forbidden' || first === 'stale-epoch')
+      throw new Error('Unexpected result.');
 
     // A further live edit after the revision was captured -- standing in for `apps/collab`'s own
     // debounced projection write, the same convention the immutability test above uses.
@@ -243,10 +261,12 @@ describe.skipIf(!databaseUrl)('named/export revision creation (PostgreSQL)', () 
     const stranger = await createUser();
 
     const first = await store!.createRevision(owner, screenplayId, {
+      epoch: 0,
       kind: 'named',
       label: 'Draft A',
     });
-    if (first === 'missing' || first === 'forbidden') throw new Error('Unexpected result.');
+    if (first === 'missing' || first === 'forbidden' || first === 'stale-epoch')
+      throw new Error('Unexpected result.');
 
     expect(await store!.getRevisionDiff(stranger, screenplayId, first.id)).toBe('missing');
     expect(await store!.getRevisionDiff(owner, screenplayId, randomUUID())).toBe('missing');

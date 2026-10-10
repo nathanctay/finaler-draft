@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
+import { formatCollabDocumentName } from '@finaler-draft/config';
 import { PERSISTED_POLL_TIMEOUT_MS } from './persistedPollTimeout.js';
 import { signIn, verifyEmail } from './testMail.js';
 
@@ -119,37 +120,47 @@ test('an edit made during a real connection drop is persisted to this browser’
   await expect
     .poll(
       async () => {
-        const hasContent = await page.evaluate(async (name) => {
-          const databases = await indexedDB.databases();
-          if (!databases.some((entry) => entry.name === name)) return false;
-          return await new Promise<boolean>((resolve) => {
-            const request = indexedDB.open(name);
-            request.onerror = () => resolve(false);
-            request.onsuccess = () => {
-              const db = request.result;
-              const storeNames = Array.from(db.objectStoreNames);
-              if (storeNames.length === 0) {
-                db.close();
-                resolve(false);
-                return;
-              }
-              const tx = db.transaction(storeNames, 'readonly');
-              let anyRows = false;
-              let pending = storeNames.length;
-              for (const storeName of storeNames) {
-                const countRequest = tx.objectStore(storeName).count();
-                countRequest.onsuccess = () => {
-                  if (countRequest.result > 0) anyRows = true;
-                  pending -= 1;
-                  if (pending === 0) {
-                    db.close();
-                    resolve(anyRows);
-                  }
-                };
-              }
-            };
-          });
-        }, screenplayId);
+        const hasContent = await page.evaluate(
+          async (name) => {
+            const databases = await indexedDB.databases();
+            if (!databases.some((entry) => entry.name === name)) return false;
+            // The bare screenplay id must *not* be a database: collaboration slice 5 keys one store
+            // per (screenplay, epoch) precisely so a retired epoch's offline work can never be
+            // merged into a restored document, and this is what would catch a regression back to
+            // keying by screenplay alone.
+            if (databases.some((entry) => entry.name === name.split(':')[0])) return false;
+            return await new Promise<boolean>((resolve) => {
+              const request = indexedDB.open(name);
+              request.onerror = () => resolve(false);
+              request.onsuccess = () => {
+                const db = request.result;
+                const storeNames = Array.from(db.objectStoreNames);
+                if (storeNames.length === 0) {
+                  db.close();
+                  resolve(false);
+                  return;
+                }
+                const tx = db.transaction(storeNames, 'readonly');
+                let anyRows = false;
+                let pending = storeNames.length;
+                for (const storeName of storeNames) {
+                  const countRequest = tx.objectStore(storeName).count();
+                  countRequest.onsuccess = () => {
+                    if (countRequest.result > 0) anyRows = true;
+                    pending -= 1;
+                    if (pending === 0) {
+                      db.close();
+                      resolve(anyRows);
+                    }
+                  };
+                }
+              };
+            });
+            // Composed with the real helper rather than restating `<id>:<epoch>` here. A freshly
+            // created screenplay is at epoch 0; this test never restores.
+          },
+          formatCollabDocumentName(screenplayId, 0),
+        );
         return hasContent;
       },
       { timeout: 10_000 },

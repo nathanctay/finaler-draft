@@ -15,19 +15,39 @@ import {
   writeTitlePageToYMap,
 } from '@finaler-draft/screenplay-editor';
 import * as Y from 'yjs';
+import { parseCollabDocumentName } from '@finaler-draft/config';
 import { createCheckpoint, reconstructDocumentState, writeCheckpoint } from './updateLog.js';
 import { maybeCreateStructuralChangeRevision } from './revisions.js';
 
 /**
- * The collaboration epoch this slice writes and reads exclusively. `document_yjs_updates`/
- * `document_yjs_checkpoints` carry a real `epoch` column (see `packages/database/src/schema.ts`'s
- * own comment on why it was introduced now rather than deferred) but nothing in this codebase
- * varies it yet -- there is no restore-as-current, no epoch cutover, and therefore exactly one
- * epoch per screenplay. A single named constant, not a literal `0` scattered across this file and
- * `updateLog.ts`'s callers, is what makes that assumption legible and gives slice 5 one place to
- * start threading a real per-document epoch through instead of a silent literal.
+ * The epoch every screenplay starts its collaborative life at, and the value
+ * `screenplays.current_epoch` defaults to -- including for every screenplay that already existed
+ * when collaboration slice 5's migration added that column, which is what keeps the rows slices 3
+ * and 4a wrote at epoch `0` as the *live* epoch rather than orphaning them.
+ *
+ * Until slice 5 this constant was also what every read and write in this file *used*, because
+ * nothing varied the epoch. That is no longer true: the epoch now travels in the Hocuspocus
+ * document name (`<screenplayId>:<epoch>`, `@finaler-draft/config`'s `formatCollabDocumentName`),
+ * so every hook below derives it from the name it was handed. The constant remains only as the name
+ * for "the first epoch," used by tests and by nothing on the request path.
  */
 export const DEFAULT_EPOCH = 0;
+
+/**
+ * Every Hocuspocus hook in this file and in `server.ts` receives a document *name*, and since slice
+ * 5 that name identifies a (screenplay, epoch) pair rather than a screenplay alone. Parsing it is
+ * therefore the first thing each of them does, and `undefined` means a name this server never
+ * issued.
+ *
+ * In practice `onAuthenticate` (`authenticate.ts`) has already rejected such a connection before any
+ * of these hooks can run, so `undefined` here is unreachable through the real request path. It is
+ * still handled rather than asserted away: a hook that threw on a malformed name would turn a
+ * client-supplied string into a server error, and `fetch` returning `null` / `store` doing nothing
+ * is the same fail-closed behaviour both already use for a screenplay row that has vanished.
+ */
+function parseDocument(documentName: string): { screenplayId: string; epoch: number } | undefined {
+  return parseCollabDocumentName(documentName);
+}
 
 type CanonicalScreenplayRow = {
   titlePages?: TitlePage[];
@@ -45,11 +65,11 @@ type CanonicalScreenplayRow = {
  */
 async function fetchCanonicalTitlePageAndDocumentSettings(
   pool: Pool,
-  documentName: string,
+  screenplayId: string,
 ): Promise<CanonicalScreenplayRow | undefined> {
   const result = await pool.query<{ canonicalScreenplay: CanonicalScreenplayRow }>(
     'select canonical_screenplay as "canonicalScreenplay" from screenplays where id = $1 and deleted_at is null',
-    [documentName],
+    [screenplayId],
   );
   return result.rows[0]?.canonicalScreenplay;
 }
@@ -139,7 +159,10 @@ function backfillTitlePageAndDocumentSettings(
  */
 export function createFetch(pool: Pool) {
   return async function fetch({ documentName }: fetchPayload): Promise<Uint8Array | null> {
-    const reconstruction = await reconstructDocumentState(pool, documentName, DEFAULT_EPOCH);
+    const document = parseDocument(documentName);
+    if (!document) return null;
+    const { epoch, screenplayId } = document;
+    const reconstruction = await reconstructDocumentState(pool, screenplayId, epoch);
     if (reconstruction) {
       const { doc, throughSequence } = reconstruction;
       const alreadySeeded =
@@ -147,7 +170,7 @@ export function createFetch(pool: Pool) {
         isDocumentSettingsMapSeeded(doc.getMap(DOCUMENT_SETTINGS_YJS_MAP));
       if (alreadySeeded) return Y.encodeStateAsUpdate(doc);
 
-      const canonical = await fetchCanonicalTitlePageAndDocumentSettings(pool, documentName);
+      const canonical = await fetchCanonicalTitlePageAndDocumentSettings(pool, screenplayId);
       // The screenplay row is gone (deleted between the document being opened and this fetch) --
       // nothing to backfill from; hand back the reconstructed state exactly as found rather than
       // treating a vanished row as a reason to invent content.
@@ -156,8 +179,8 @@ export function createFetch(pool: Pool) {
       const migrated = backfillTitlePageAndDocumentSettings(doc, canonical);
       if (migrated) {
         await writeCheckpoint(pool, {
-          screenplayId: documentName,
-          epoch: DEFAULT_EPOCH,
+          screenplayId,
+          epoch,
           throughSequence,
           doc,
         });
@@ -167,7 +190,7 @@ export function createFetch(pool: Pool) {
 
     const existing = await pool.query<{ canonicalScreenplay: unknown }>(
       'select canonical_screenplay as "canonicalScreenplay" from screenplays where id = $1 and deleted_at is null',
-      [documentName],
+      [screenplayId],
     );
     const row = existing.rows[0];
     if (!row) return null;
@@ -185,8 +208,8 @@ export function createFetch(pool: Pool) {
         screenplay.documentSettings,
       );
       await writeCheckpoint(pool, {
-        screenplayId: documentName,
-        epoch: DEFAULT_EPOCH,
+        screenplayId,
+        epoch,
         throughSequence: 0,
         doc: seeded,
       });
@@ -247,14 +270,19 @@ function canonicalHash(canonicalJson: string): string {
  */
 export function createStore(pool: Pool) {
   return async function store({ documentName, document }: storePayload): Promise<void> {
+    const parsed = parseDocument(documentName);
+    if (!parsed) return;
+    const { epoch, screenplayId } = parsed;
     const existing = await pool.query<{
       title: string;
       canonicalScreenplay: { title?: string };
+      currentEpoch: number;
     }>(
-      `select title, canonical_screenplay as "canonicalScreenplay"
+      `select title, canonical_screenplay as "canonicalScreenplay",
+              current_epoch as "currentEpoch"
          from screenplays
         where id = $1 and deleted_at is null`,
-      [documentName],
+      [screenplayId],
     );
     const row = existing.rows[0];
     if (!row) {
@@ -264,10 +292,36 @@ export function createStore(pool: Pool) {
       return;
     }
 
-    await createCheckpoint(pool, { screenplayId: documentName, epoch: DEFAULT_EPOCH });
+    // Collaboration slice 5: a debounced flush for an epoch the screenplay has already moved past
+    // must not write anything. The canonical projection is the dangerous half -- it is *not*
+    // epoch-scoped (there is one `screenplays.canonical_screenplay`, and a restore has just set it
+    // to the restored content), so a stale flush writing it would overwrite the restored screenplay
+    // with the retired epoch's content. Checkpointing is skipped alongside it: compacting a retired
+    // epoch's log is harmless but pointless, and leaving that epoch exactly as the cutover found it
+    // is what makes "the previous epoch's updates and checkpoints remain readable" a frozen record
+    // rather than one that keeps moving.
+    //
+    // This check is not the only thing standing between a stale flush and the restored content --
+    // the `update` below is additionally conditioned on `current_epoch` in SQL, so even a flush that
+    // passed this check and *then* raced a committing restore cannot clobber it (Postgres
+    // re-evaluates an `update`'s predicate against the row version it actually locked). Two
+    // mechanisms deliberately, because the window between this read and that write is real.
+    if (epoch !== row.currentEpoch) {
+      console.error(
+        JSON.stringify({
+          event: 'collab_store_skipped_stale_epoch',
+          screenplayId,
+          epoch,
+          currentEpoch: row.currentEpoch,
+        }),
+      );
+      return;
+    }
+
+    await createCheckpoint(pool, { screenplayId, epoch });
 
     const projection = projectYDocScreenplay(document, {
-      id: documentName,
+      id: screenplayId,
       title: row.canonicalScreenplay.title ?? row.title,
     });
     if (projection.valid) {
@@ -275,8 +329,8 @@ export function createStore(pool: Pool) {
       await pool.query(
         `update screenplays
             set canonical_screenplay = $1::jsonb, canonical_hash = $2, updated_at = now()
-          where id = $3`,
-        [canonicalJson, canonicalHash(canonicalJson), documentName],
+          where id = $3 and current_epoch = $4`,
+        [canonicalJson, canonicalHash(canonicalJson), screenplayId, epoch],
       );
       // Collaboration slice 4a's "major structural change" revision trigger (plan.md). Runs after
       // the canonical projection above has already been persisted, on the exact same valid
@@ -286,8 +340,8 @@ export function createStore(pool: Pool) {
       // whether to *attempt* a write, and why `insertRevisionIfChanged`'s dedupe remains the actual
       // authority on whether a row is created.
       await maybeCreateStructuralChangeRevision(pool, {
-        screenplayId: documentName,
-        epoch: DEFAULT_EPOCH,
+        screenplayId,
+        epoch,
         screenplay: projection.screenplay,
       }).catch((error: unknown) => {
         console.error(

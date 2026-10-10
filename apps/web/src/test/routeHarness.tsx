@@ -180,15 +180,17 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
       historicalRevision,
       initial,
       onOpenRevisionHistory,
+      onReloadRestoredDocument,
     }: {
       entitlementReadOnly?: {
         cooldownUntil?: string;
         message: string;
         onMakeEditable?: () => Promise<void>;
       };
-      historicalRevision?: { label: string };
+      historicalRevision?: { label: string; onRestore?: () => void };
       initial: { title: string };
       onOpenRevisionHistory?: () => void;
+      onReloadRestoredDocument?: () => void;
     }) => {
       const [mountId] = react.useState(() => ++routeState.editorMounts);
       return (
@@ -221,6 +223,22 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
               needing the real, Tiptap-backed `App`. */}
           {historicalRevision && (
             <p data-testid="historical-revision">{historicalRevision.label}</p>
+          )}
+          {/* Collaboration slice 5. Both of these are callbacks the *route* owns (see
+              `HistoricalRevisionInfo.onRestore` and `onReloadRestoredDocument` in App.tsx): the
+              preview route decides whether a restore may even be offered, and the live route owns
+              what "reload the new epoch" means. Exposed here as real buttons so a route test can
+              prove both the decision and the click-through without the Tiptap-backed `App`;
+              `App.restore.test.tsx` owns how the real component renders them. */}
+          {historicalRevision?.onRestore && (
+            <button onClick={historicalRevision.onRestore} type="button">
+              Restore this revision…
+            </button>
+          )}
+          {onReloadRestoredDocument && (
+            <button onClick={onReloadRestoredDocument} type="button">
+              Open the restored screenplay
+            </button>
           )}
           {onOpenRevisionHistory && (
             <button onClick={onOpenRevisionHistory} type="button">

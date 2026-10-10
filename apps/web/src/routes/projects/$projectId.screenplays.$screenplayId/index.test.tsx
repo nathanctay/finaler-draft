@@ -163,6 +163,66 @@ describe('screenplay page', () => {
     });
   });
 
+  /**
+   * Collaboration slice 5, plan.md step 4's "reload the new epoch". The route owns both halves: the
+   * epoch is part of the editor's React `key`, and `onReloadRestoredDocument` is what makes the
+   * refetch that changes it happen. Keying on the screenplay id alone would keep the retired
+   * document's provider and `y-indexeddb` database alive across the cutover -- the editor would look
+   * restored while still writing to a document the server refuses.
+   */
+  describe('restore cutover', () => {
+    const script = (currentEpoch: number, title: string) => ({
+      id: screenplayId,
+      projectId,
+      currentEpoch,
+      screenplay: {
+        annotations: [],
+        blocks: [],
+        id: screenplayId,
+        schemaVersion: 1,
+        title,
+        titlePages: [],
+      },
+      title,
+    });
+
+    it('remounts the editor when the epoch changes, even though the screenplay id has not', async () => {
+      setQueries(script(0, 'Before the restore'));
+      const { rerender } = render(<ScreenplayPage />);
+      expect(await screen.findByTestId('editor-instance')).toHaveTextContent(
+        '1:Before the restore',
+      );
+
+      // What the invalidation below produces: the same screenplay, a new epoch. The mount counter in
+      // the editor stub is what makes "this is a fresh mount" observable at all.
+      setQueries(script(1, 'After the restore'));
+      rerender(<ScreenplayPage />);
+      expect(await screen.findByTestId('editor-instance')).toHaveTextContent('2:After the restore');
+    });
+
+    it('does not remount when the screenplay is refetched at the same epoch', async () => {
+      setQueries(script(3, 'A Working Draft'));
+      const { rerender } = render(<ScreenplayPage />);
+      expect(await screen.findByTestId('editor-instance')).toHaveTextContent('1:A Working Draft');
+
+      setQueries(script(3, 'A Working Draft'));
+      rerender(<ScreenplayPage />);
+      // Still mount 1: a remount tears down the provider and the editor's undo history, so it must
+      // happen when the epoch changes and not merely when the query refetches.
+      expect(await screen.findByTestId('editor-instance')).toHaveTextContent('1:A Working Draft');
+    });
+
+    it('reloads the restored document by invalidating its own screenplay query, never by reloading the page', async () => {
+      setQueries(script(0, 'A Working Draft'));
+      render(<ScreenplayPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Open the restored screenplay' }));
+
+      expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ['screenplay', screenplayId] });
+      // The writer keeps their place in the application -- no navigation, no reload.
+      expect(routeState.navigate).not.toHaveBeenCalled();
+    });
+  });
+
   describe('entitlement-driven editability', () => {
     const script = {
       id: screenplayId,

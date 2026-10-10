@@ -22,6 +22,7 @@ import { PAGE_HEIGHT_IN, PAGE_WIDTH_IN } from '@finaler-draft/screenplay/pageFor
 import { TRANSIENT_SYNC_AUTH_FAILURE_REASON } from '@finaler-draft/config';
 import type { Editor } from '@tiptap/core';
 import { EditorContent, useEditor } from '@tiptap/react';
+import { formatCollabDocumentName, parseCollabRestoredMessage } from '@finaler-draft/config';
 import { HocuspocusProvider } from '@hocuspocus/provider';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import {
@@ -156,6 +157,7 @@ type NavigatorTabId = (typeof NAVIGATOR_TABS)[number]['id'];
 const legacyInitial: PersistedScreenplay = {
   id: '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
   projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+  currentEpoch: 0,
   title: 'The Long Way Home',
   screenplay: {
     annotations: [],
@@ -302,6 +304,19 @@ export interface HistoricalRevisionInfo {
    * inventing a destination; the button simply does not appear.
    */
   onBackToLiveDocument?: (() => void) | undefined;
+  /**
+   * Collaboration slice 5's step 1 entry point: "an authorized owner/editor previews ... and confirms
+   * the target revision." Supplied only by the historical-preview route, and only for an
+   * owner/editor -- `App` renders a "Restore this revision…" button in the historical banner when it
+   * is present and nothing at all when it is not, so a reviewer (or any account the route could not
+   * confirm may edit) sees no path from history back into the live document.
+   *
+   * A callback rather than this component performing the restore, for the identical reason
+   * `onOpenRevisionHistory` is one: the confirmation dialog, the idempotency key, the API call and the
+   * post-restore navigation all belong to the route, and `App` stays free of
+   * `@tanstack/react-router` and of any knowledge of revision identity beyond `label`.
+   */
+  onRestore?: (() => void) | undefined;
 }
 
 export function App({
@@ -309,6 +324,7 @@ export function App({
   historicalRevision,
   initial = legacyInitial,
   onOpenRevisionHistory,
+  onReloadRestoredDocument,
 }: {
   entitlementReadOnly?: EntitlementReadOnly | undefined;
   historicalRevision?: HistoricalRevisionInfo | undefined;
@@ -323,6 +339,16 @@ export function App({
    * while already viewing history.
    */
   onOpenRevisionHistory?: () => void;
+  /**
+   * Collaboration slice 5, plan.md step 4: "connected clients receive a restore event and reload the
+   * new epoch." Called when the writer accepts the restore banner's invitation to open the restored
+   * document. Supplied by the live screenplay route, which invalidates its own
+   * `GET /api/screenplays/:id` query -- that refetch carries the new `currentEpoch`, and the route's
+   * `key` includes it, so `App` remounts onto the restored collaboration document with a fresh
+   * provider and a fresh (empty) `y-indexeddb` database rather than this component trying to retarget
+   * a provider in place.
+   */
+  onReloadRestoredDocument?: () => void;
 }) {
   const [panels, setPanels] = useState<Record<Panel, boolean>>({
     navigator: true,
@@ -454,6 +480,18 @@ export function App({
   // banner is the only place that outcome is ever shown.
   const [makeEditableState, setMakeEditableState] = useState<'idle' | 'pending' | 'error'>('idle');
   const [makeEditableError, setMakeEditableError] = useState<string>();
+  // Collaboration slice 5. `undefined` until `apps/collab` tells this connection its document has been
+  // superseded (the restore stateless message -- see the `stateless` effect below); the new epoch
+  // afterwards. Terminal for this mount: the document this tab holds is never going to become live
+  // again, so nothing here ever clears it except the remount `onReloadRestoredDocument` triggers.
+  const [restoredEpoch, setRestoredEpoch] = useState<number>();
+  // The recovery copy's own state (plan.md step 5: unsynced work is "preserved as a recovery fork/new
+  // screenplay for manual comparison or copying"). Separate from `restoredEpoch` because the banner
+  // stays regardless of whether the writer takes the offer, and taking it can fail.
+  const [recoveryState, setRecoveryState] = useState<'idle' | 'pending' | 'saved' | 'error'>(
+    'idle',
+  );
+  const [recoveryError, setRecoveryError] = useState<string>();
   // `editorContentFromScreenplay` throws for canonical features this text-block editor cannot
   // faithfully preserve (more than one title page, notes, dual dialogue, page breaks); `undefined`
   // here means "read-only", same meaning `initialContent` carried before the title page split out
@@ -502,10 +540,17 @@ export function App({
   // now that `syncState` has two more values (`'denied'`, `'timedOut'`) that must never make this
   // `true`: both mean this tab's first sync has *not* completed, so allowing edits under either
   // would reopen the exact null-id race gating on `'connecting'` alone exists to close.
+  //
+  // Collaboration slice 5 adds a fourth, terminal reason: `restoredEpoch !== undefined` means the
+  // server has told this tab that the collaboration document it holds has been superseded by a
+  // restore. The server already refuses this tab's writes (`apps/collab`'s stale-epoch read-only
+  // forcing), so this is not what keeps the restored screenplay safe -- it is what stops the writer
+  // typing into a document whose keystrokes are being set aside rather than saved.
   const editingAllowed =
     initialContent !== undefined &&
     entitlementReadOnly === undefined &&
     historicalRevision === undefined &&
+    restoredEpoch === undefined &&
     (syncState === 'synced' || syncState === 'offline');
   const editorContent = useMemo(() => {
     if (initialContent === undefined) return initialContent;
@@ -653,9 +698,17 @@ export function App({
         indexeddbPersistence: undefined as IndexeddbPersistence | undefined,
       };
     }
+    // Collaboration slice 5: the Hocuspocus document name is `<screenplayId>:<epoch>`, not a bare
+    // screenplay id. The epoch is part of the collaboration document's identity -- a restore creates a
+    // new document rather than rewriting this one -- so a client holding a pre-restore document is
+    // asking for a different name, which `apps/collab`'s `onAuthenticate` recognises and refuses to
+    // let write (`authenticate.ts`). `initial.currentEpoch` comes from `GET /api/screenplays/:id`,
+    // read fresh on every mount of this route, so this is always the epoch the server considered
+    // current at load time.
+    const documentName = formatCollabDocumentName(initial.id, initial.currentEpoch);
     const provider = new HocuspocusProvider({
       url: COLLAB_WS_URL,
-      name: initial.id,
+      name: documentName,
       token: async () => (await api.connectionToken()).token,
     });
     // The browser-offline half of this slice (progress/collaboration-offline-durable.md):
@@ -675,14 +728,26 @@ export function App({
     // IndexedDB replays and whatever the server's own first sync delivers are both just Yjs
     // updates applied to the identical `Y.Doc`, and Yjs's CRDT merge is commutative -- the two
     // can arrive in either order and the document converges to the same content either way.
-    const indexeddbPersistence = new IndexeddbPersistence(initial.id, provider.document);
+    // Keyed on the epoch-qualified document name, not on `initial.id` -- and this is the single most
+    // load-bearing line in slice 5's "offline work is never auto-merged into the restored screenplay"
+    // guarantee. `y-indexeddb` replays whatever it finds under its key straight into the `Y.Doc` the
+    // provider is about to sync; with a bare screenplay id as the key, a browser returning from
+    // offline after a restore would replay its pre-restore document -- including work the server
+    // never saw -- into the *restored* document and push the merge up as ordinary edits. One database
+    // per (screenplay, epoch) makes that structurally impossible: the restored document's store is a
+    // different database that starts empty, and the offline work stays intact in its own, available
+    // for the recovery copy the restore banner offers.
+    const indexeddbPersistence = new IndexeddbPersistence(documentName, provider.document);
     return { doc: provider.document, provider, indexeddbPersistence };
     // `editorContent`/`initialContent` deliberately omitted: this must only ever run once per
     // mounted screenplay (a fresh `Y.Doc`/`HocuspocusProvider` every render would reconnect and
-    // re-seed on every keystroke), and `initial.id` alone already uniquely identifies which
-    // screenplay this is for the component's whole lifetime.
+    // re-seed on every keystroke), and `initial.id` plus `initial.currentEpoch` together uniquely
+    // identify which collaboration document this is for the component's whole lifetime. The epoch is
+    // in the dependency list rather than assumed constant because a restore changes it: the route
+    // refetches the screenplay and remounts, and this memo must then build a provider for the new
+    // document rather than reusing the retired one.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initial.id]);
+  }, [initial.id, initial.currentEpoch]);
 
   // Reports this browser's own connection to `apps/collab`, for the status line below. Yjs keeps
   // queuing local edits while offline and flushes them the moment the connection recovers, so
@@ -1579,11 +1644,82 @@ export function App({
     // keeps it possible later.)
     if (historicalRevision === undefined) {
       void api
-        .createExportRevision(initial.id, label.toLowerCase() as 'docx' | 'fdx' | 'pdf')
+        .createExportRevision(
+          initial.id,
+          label.toLowerCase() as 'docx' | 'fdx' | 'pdf',
+          initial.currentEpoch,
+        )
         .catch((error: unknown) => {
           console.error(`${label} export revision failed:`, error);
         });
     }
+  };
+
+  // Collaboration slice 5, plan.md steps 4 and 5. `apps/collab` sends this connection a stateless
+  // message the moment its epoch is superseded -- whether the restore happened while this tab was
+  // connected (`supersedeRestoredDocuments`) or this tab reconnected into an already-retired epoch
+  // after being offline (the `connected` hook). Either way this tab learns, from the server, that the
+  // document it holds is no longer the live one.
+  //
+  // Hocuspocus's own stateless channel rather than a second transport: it already reaches exactly the
+  // connections for one document name, and `@hocuspocus/provider` already surfaces it as an event.
+  // The payload is validated (`parseCollabRestoredMessage`), never assumed -- a stateless channel is
+  // shared by definition, and a future sender's unrelated payload must be ignored here rather than
+  // coerced into a restore.
+  useEffect(() => {
+    const provider = collab.provider;
+    if (!provider) return;
+    const handleStateless = ({ payload }: { payload: string }) => {
+      const message = parseCollabRestoredMessage(payload);
+      if (!message) return;
+      setRestoredEpoch(message.epoch);
+    };
+    provider.on('stateless', handleStateless);
+    return () => {
+      provider.off('stateless', handleStateless);
+    };
+  }, [collab.provider]);
+
+  /**
+   * The recovery fork, plan.md step 5: this browser's own unsynced work becomes *a new screenplay*,
+   * never a merge into the restored one. Deliberately client-driven, and deliberately explicit:
+   *
+   *  - Client-driven because this browser is the only place the unsynced work exists in a form that
+   *    can be projected to a canonical screenplay -- it is in the local `Y.Doc` (replayed from this
+   *    epoch's own `y-indexeddb` database) and in `projection`, which this component already keeps
+   *    current. The server holds the same bytes in `document_yjs_quarantined_updates`, tagged with the
+   *    retired epoch, which is the durable backstop if this browser never comes back; it is not a
+   *    substitute for giving the writer their work in a form they can open.
+   *  - Explicit because creating a screenplay in someone's project without being asked is rude, and
+   *    because the work is already safe either way (locally and in quarantine) while the writer
+   *    decides. Nothing here ever writes to the restored screenplay.
+   *
+   * `api.createScreenplay` is the ordinary create path, with the ordinary entitlement rules: a
+   * restricted-tier account at its one-screenplay limit gets the same 402 explanation it would get
+   * anywhere else, shown inline rather than swallowed.
+   */
+  const saveRecoveryCopy = () => {
+    if (!projection.valid || recoveryState === 'pending') return;
+    setRecoveryState('pending');
+    setRecoveryError(undefined);
+    const title = `${initial.title} (recovered)`;
+    api.createScreenplay(initial.projectId, title, { ...projection.screenplay, title }).then(
+      () => setRecoveryState('saved'),
+      (error: unknown) => {
+        setRecoveryState('error');
+        // `serverMessage`, not `message`: `api.createScreenplay` is a `jsonWithServerMessage` call
+        // precisely so the 402 a restricted-tier account hits at its one-screenplay limit arrives
+        // with the sentence `entitlements.ts` wrote to explain it (the same one the free-tier prompt
+        // shows). `ApiError`'s own `message` is the bare `Request failed (402)`, which would tell a
+        // writer whose work is at stake nothing at all -- the identical idiom
+        // `handleMakeEditable` above already uses.
+        setRecoveryError(
+          error instanceof MessageApiError
+            ? error.serverMessage
+            : 'Your changes could not be saved as a new screenplay. They are still on this device.',
+        );
+      },
+    );
   };
 
   // The sync gate's own banner reason, mutually exclusive with `entitlementReadOnly`'s (a
@@ -1610,10 +1746,67 @@ export function App({
   // happened in production when it did. The shell now derives the class from the presence of this
   // slot, so the only thing left to get right here is which banner, if any, there is. Exactly one
   // is ever true: they key off disjoint `syncState` values or its absence (see `editingAllowed`).
+  //
+  // Collaboration slice 5's `documentRestored` is checked *first* and suppresses every other banner,
+  // including the entitlement one: once the document this tab holds has been retired, every other
+  // explanation on this screen is about a document that is no longer live, and showing two reasons
+  // would leave the writer guessing which one to act on.
+  const documentRestored = restoredEpoch !== undefined;
   const banner =
-    entitlementReadOnly || historicalRevision || awaitingFirstSync || syncDenied || syncTimedOut ? (
+    documentRestored ||
+    entitlementReadOnly ||
+    historicalRevision ||
+    awaitingFirstSync ||
+    syncDenied ||
+    syncTimedOut ? (
       <>
-        {entitlementReadOnly && (
+        {documentRestored && (
+          // plan.md step 5: "A returning offline client is told the document was restored. Its
+          // unsynced work is preserved as a recovery fork/new screenplay for manual comparison or
+          // copying; it is never auto-merged into the restored screenplay." This banner is the
+          // "is told" half, and it is deliberately blunt about all three facts a writer needs: the
+          // document was replaced, their own recent typing is *not* in it, and here is how to keep
+          // that typing.
+          //
+          // Terminal and non-dismissible, for the strongest version of the entitlement banner's own
+          // reasoning: this does not resolve itself, and dismissing it would leave a writer typing
+          // into a document whose keystrokes are being set aside.
+          <div className="readonly-banner readonly-banner-restored" role="alert">
+            <p>
+              <strong>This screenplay was restored to an earlier revision.</strong> The document you
+              have open is no longer the live one, and any changes you made since the restore are
+              not part of it.
+            </p>
+            {onReloadRestoredDocument && (
+              <button className="primary-button" onClick={onReloadRestoredDocument} type="button">
+                Open the restored screenplay
+              </button>
+            )}
+            {recoveryState !== 'saved' && (
+              <button
+                disabled={!projection.valid || recoveryState === 'pending'}
+                onClick={saveRecoveryCopy}
+                type="button"
+              >
+                {recoveryState === 'pending'
+                  ? 'Saving a copy…'
+                  : 'Save my changes as a new screenplay'}
+              </button>
+            )}
+            {recoveryState === 'saved' && (
+              <p className="readonly-banner-cooldown">
+                Saved as “{initial.title} (recovered)” in this project. The restored screenplay was
+                not changed.
+              </p>
+            )}
+            {recoveryState === 'error' && (
+              <p className="field-error" role="alert">
+                {recoveryError}
+              </p>
+            )}
+          </div>
+        )}
+        {!documentRestored && entitlementReadOnly && (
           // Persistent, not dismissible: plan.md's lapse policy means this state does not resolve
           // itself, so nothing here ever offers a way to hide it without actually addressing it.
           // Rendered above the toolbar so it is visible regardless of which panels are open or
@@ -1655,7 +1848,7 @@ export function App({
             )}
           </div>
         )}
-        {historicalRevision && (
+        {!documentRestored && historicalRevision && (
           // Collaboration slice 4a's historical preview. Reuses `.readonly-banner`'s markup and grid
           // mechanics (the lapse-chooser slice's own established pattern -- see the comment on
           // `awaitingFirstSync` below for why this is deliberately not a second read-only mechanism)
@@ -1664,31 +1857,44 @@ export function App({
           // colour-only distinction. Persistent and non-dismissible, matching the entitlement
           // banner's own reasoning -- there is nothing to dismiss into; this document stays this
           // revision for as long as this page is open. No "Make this one editable" affordance
-          // exists here, ever: promoting a past revision to the live document is restore-as-current
-          // (plan.md), a separate, later feature this slice deliberately does not build.
+          // exists here, ever: entitlement is not what this banner is about. What *is* offered here,
+          // since collaboration slice 5, is restore-as-current -- and only when the route supplied
+          // `onRestore`, which it does only for an owner/editor. The button opens a confirmation
+          // dialog owned by the route; nothing is restored by this click alone.
           <div className="readonly-banner readonly-banner-historical" role="status">
             <p>
               <strong>Historical revision.</strong> {historicalRevision.label} — this is a read-only
               copy, separate from the live document.
             </p>
-            {/* Right-aligned with no extra CSS: `.readonly-banner` is already
-                `display: flex; justify-content: space-between`, so a second child lands at the far
-                end -- the same mechanic the entitlement banner's own action button above relies on.
-                This exists because the preview previously had no way out at all: a writer who
-                opened a revision could reach the live document only through the browser's back
-                button or by editing the URL. */}
-            {historicalRevision.onBackToLiveDocument && (
-              <button
-                className="primary-button"
-                onClick={historicalRevision.onBackToLiveDocument}
-                type="button"
-              >
-                Back to live document
-              </button>
-            )}
+            {/* Two actions in one banner, grouped by `.readonly-banner-actions` (styles.css) so
+                `.readonly-banner`'s own `justify-content: space-between` does not spread them apart
+                from each other -- the class main already added for the comparison banner's own pair.
+                "Back to live document" exists because the preview previously had no way out at all;
+                "Restore this revision..." is slice 5's step 1 entry point, and appears only for an
+                account the route could confirm may edit. */}
+            <div className="readonly-banner-actions">
+              {historicalRevision.onBackToLiveDocument && (
+                <button
+                  className="primary-button"
+                  onClick={historicalRevision.onBackToLiveDocument}
+                  type="button"
+                >
+                  Back to live document
+                </button>
+              )}
+              {historicalRevision.onRestore && (
+                <button
+                  className="primary-button"
+                  onClick={historicalRevision.onRestore}
+                  type="button"
+                >
+                  Restore this revision...
+                </button>
+              )}
+            </div>
           </div>
         )}
-        {awaitingFirstSync && (
+        {!documentRestored && awaitingFirstSync && (
           // The sync gate's own banner (`editingAllowed`'s comment above): reuses the exact
           // `entitlementReadOnly` banner's markup and class -- the lapse-chooser slice's own
           // pattern for a legibly read-only editor, not a second one invented for this -- but never
@@ -1707,7 +1913,7 @@ export function App({
             </p>
           </div>
         )}
-        {syncDenied && (
+        {!documentRestored && syncDenied && (
           // The sync gate's *terminal* banner (`syncState`'s own comment on `'denied'`): a resolved,
           // deliberate decision that this actor may not see this document -- wrong Origin, no
           // session, or a role lookup that genuinely found none (`apps/collab`'s
@@ -1721,7 +1927,7 @@ export function App({
             </p>
           </div>
         )}
-        {syncTimedOut && (
+        {!documentRestored && syncTimedOut && (
           // The backstop banner (`syncState`'s own comment on `'timedOut'`): this tab has been
           // waiting for its first sync for longer than `SYNC_TIMEOUT_MS` with no `synced` and no
           // `authenticationFailed` at all -- covers whatever the transient-retry loop does not
@@ -1881,7 +2087,7 @@ export function App({
             <NamedRevisionDialog
               onClose={closeNamedRevisionDialog}
               onSave={async (label) => {
-                await api.createNamedRevision(initial.id, label);
+                await api.createNamedRevision(initial.id, label, initial.currentEpoch);
               }}
             />
           )}

@@ -4,6 +4,7 @@ import { createConnection } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from '@hocuspocus/provider';
 import { mintConnectionToken } from '@finaler-draft/collab-token';
+import { formatCollabDocumentName } from '@finaler-draft/config';
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import type { Pool } from 'pg';
 import WS from 'ws';
@@ -218,7 +219,14 @@ async function runEditThenSignal(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       WebSocketPolyfill: OriginOnlyWebSocket as any,
     });
-    const provider = new HocuspocusProvider({ websocketProvider, name: screenplayId, token });
+    const provider = new HocuspocusProvider({
+      websocketProvider,
+      // Since collaboration slice 5 the Hocuspocus document name is `<screenplayId>:<epoch>`
+      // (`@finaler-draft/config`'s `formatCollabDocumentName`), never a bare screenplay id: the real
+      // `server.ts` spawned above refuses a name it cannot resolve to a (screenplay, epoch) pair.
+      name: formatCollabDocumentName(screenplayId, 0),
+      token,
+    });
     provider.attach();
 
     await new Promise<void>((resolvePromise, rejectPromise) => {

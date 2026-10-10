@@ -1949,6 +1949,31 @@ select:focus-visible,
   gap: 12px;
 }
 
+/* Collaboration slice 5's restore banner (App.tsx). Marked with `--feedback-error` on the same
+   left-border mechanic `.readonly-banner-historical` above uses, rather than a new background token:
+   this is the one read-only state that reports something the writer has to act on -- the document
+   they have open has been replaced and their recent typing is not in it -- so it carries the warning
+   colour the rest of this stylesheet already reserves for exactly that, and nothing else about the
+   banner's layout differs. */
+.readonly-banner-restored {
+  border-left: 3px solid var(--feedback-error);
+}
+
+/* The restore confirmation's consequence list (restoreRevisionDialog.tsx). Deliberately a plain
+   bulleted list at the dialog's own muted size -- the dialog's job is to be read before a cutover,
+   and three short, scannable statements do that better than one dense paragraph. */
+.restore-revision-consequences {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-17);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.restore-revision-consequences li + li {
+  margin-top: 4px;
+}
+
 .readonly-banner .field-error {
   flex-basis: 100%;
 }

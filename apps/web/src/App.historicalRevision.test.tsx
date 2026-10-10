@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_DOCUMENT_SETTINGS, type Screenplay } from '@finaler-draft/screenplay';
@@ -42,6 +42,7 @@ function historicalPersistedScreenplay(): PersistedScreenplay {
   return {
     id: '99999999-0000-4000-8000-000000000099',
     projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
+    currentEpoch: 0,
     title: 'A Working Draft',
     screenplay: {
       annotations: [],
@@ -147,6 +148,61 @@ describe('historical revision preview', () => {
     expect(
       screen.queryByRole('button', { name: 'Make this one editable' }),
     ).not.toBeInTheDocument();
+  });
+
+  /**
+   * plan.md's standing export requirement: "a test that an export made from a historical revision
+   * exactly identifies that revision rather than the mutable current document." Two halves, both
+   * asserted here:
+   *
+   *  - The bytes downloaded are built from *this revision's* screenplay (its own title lands on the
+   *    file name and in the document), not from whatever the live screenplay has become since.
+   *  - No `export` revision is recorded. An export revision always captures the *live* canonical
+   *    projection (`apps/api/src/revisions.ts` reads `screenplays.canonical_screenplay`, never the
+   *    client's), so recording one here would file a history entry claiming an export of the live
+   *    document that nobody made -- misidentifying exactly what this requirement is about. The
+   *    historical preview is also, by construction, not connected to any collaboration document
+   *    (the first test in this file), so there is no epoch it could honestly send either.
+   */
+  it('exports the revision it is showing, and records no export revision against the live document', async () => {
+    // The exporter itself is mocked so the *screenplay handed to it* can be asserted directly --
+    // `triggerFdxDownload` is a `Blob`/object-URL wrapper around the pure `screenplayToFdx`
+    // (`fdxDownload.ts`), and jsdom's `Blob` cannot be read back, so inspecting the bytes would
+    // prove less than inspecting the input. `vi.doMock` works on the already-imported `App` because
+    // `runExport` reaches the module through a dynamic `import()`, resolved at click time.
+    const triggerFdxDownload = vi.fn();
+    vi.doMock('./fdxDownload.js', () => ({ triggerFdxDownload }));
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const user = userEvent.setup();
+    render(
+      <App
+        historicalRevision={{ label: 'Historical revision from March 4, 2026, 3:04 PM' }}
+        initial={historicalPersistedScreenplay()}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Download FDX…' }));
+
+    await waitFor(() => expect(triggerFdxDownload).toHaveBeenCalledTimes(1));
+    const exported = triggerFdxDownload.mock.calls[0]![0] as {
+      id: string;
+      title: string;
+      blocks: Array<{ text?: string }>;
+    };
+    // This revision's own content and identity -- never the live screenplay's.
+    expect(exported.title).toBe('A Working Draft');
+    expect(exported.id).toBe('99999999-0000-4000-8000-000000000099');
+    expect(exported.blocks[0]?.text).toBe('INT. APARTMENT - MORNING');
+
+    // Nothing was posted at all -- no export revision, and no connection token request either.
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    vi.doUnmock('./fdxDownload.js');
+    vi.unstubAllGlobals();
   });
 
   it('disables every other affordance that could mutate the document -- undo/redo, the element selector, and Document settings', async () => {
