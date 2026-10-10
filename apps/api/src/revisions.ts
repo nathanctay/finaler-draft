@@ -33,9 +33,23 @@ import {
 
 const revisionLabel = z.string().trim().min(1).max(200);
 export const exportFormatSchema = z.enum(['fdx', 'docx', 'pdf']);
+/**
+ * `epoch` is collaboration slice 5's stale-epoch rejection on the HTTP write path (plan.md step 4:
+ * "The server rejects writes to the old epoch", on both paths). Required, not optional: the whole
+ * point is that a client which still believes it is looking at a superseded epoch must be refused,
+ * and an optional field would let exactly that client omit it and be accepted. The content such a
+ * client would capture is never *wrong* -- `createRevision` always reads the screenplay's current
+ * canonical projection, never the client's -- but a writer naming "this moment" after a restore has
+ * replaced what they were looking at is labelling content they never saw, which is precisely the
+ * silent mislabelling an audit trail must not contain. A 409 sends them back to the restored
+ * document first.
+ */
+const revisionEpoch = z.number().int().min(0);
 export const createRevisionInput = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('named'), label: revisionLabel }).strict(),
-  z.object({ kind: z.literal('export'), format: exportFormatSchema }).strict(),
+  z.object({ epoch: revisionEpoch, kind: z.literal('named'), label: revisionLabel }).strict(),
+  z
+    .object({ epoch: revisionEpoch, format: exportFormatSchema, kind: z.literal('export') })
+    .strict(),
 ]);
 export type CreateRevisionInput = z.infer<typeof createRevisionInput>;
 
@@ -110,7 +124,15 @@ type DiffResult = RevisionDiffResult | 'missing';
  * because nothing had changed -- see that function's own comment on why reusing, rather than
  * refusing, is what lets an export or a named-milestone attempt always resolve to a concrete
  * revision id. */
-type CreateResult = (RevisionListItem & { created: boolean }) | 'missing' | 'forbidden';
+type CreateResult =
+  | (RevisionListItem & { created: boolean })
+  | 'missing'
+  | 'forbidden'
+  /** The request's `epoch` is not this screenplay's current one -- see `createRevisionInput`'s own
+   * comment. A flat literal rather than an object carrying the real epoch: the only remedy is for the
+   * client to reload the screenplay, which re-reads the epoch from `GET /api/screenplays/:id`
+   * alongside the content it also now needs, so a number here would be a value nothing would use. */
+  | 'stale-epoch';
 
 export interface RevisionStore {
   listRevisions(actorId: string, screenplayId: string): Promise<ListResult>;
@@ -154,7 +176,7 @@ export interface RevisionStore {
   ): Promise<DiffResult>;
 }
 
-function canEdit(role: unknown): boolean {
+export function canEdit(role: unknown): boolean {
   return role === 'owner' || role === 'editor';
 }
 
@@ -162,7 +184,7 @@ function canEdit(role: unknown): boolean {
  * `getScreenplay` (`projects.ts`) already uses: any project role, screenplay and project both
  * active. Returns the actor's role so `createRevision` can additionally check `canEdit` for the
  * `named` case without a second query. */
-async function resolveMembership(
+export async function resolveMembership(
   pool: Pool,
   screenplayId: string,
   actorId: string,
@@ -188,9 +210,14 @@ async function resolveMembership(
 async function fetchCurrentScreenplay(
   pool: Pool,
   screenplayId: string,
-): Promise<{ screenplay: Screenplay; canonicalHash: string } | undefined> {
-  const current = await pool.query<{ canonicalScreenplay: unknown; canonicalHash: string }>(
-    `select canonical_screenplay as "canonicalScreenplay", canonical_hash as "canonicalHash"
+): Promise<{ screenplay: Screenplay; canonicalHash: string; currentEpoch: number } | undefined> {
+  const current = await pool.query<{
+    canonicalScreenplay: unknown;
+    canonicalHash: string;
+    currentEpoch: number;
+  }>(
+    `select canonical_screenplay as "canonicalScreenplay", canonical_hash as "canonicalHash",
+            current_epoch as "currentEpoch"
        from screenplays
       where id = $1 and deleted_at is null`,
     [screenplayId],
@@ -200,6 +227,10 @@ async function fetchCurrentScreenplay(
   return {
     screenplay: screenplaySchema.parse(row.canonicalScreenplay),
     canonicalHash: row.canonicalHash,
+    // Collaboration slice 5: every caller that writes on behalf of a client needs this to reject a
+    // write confirmed against an epoch a restore has since retired. Read here, in the one helper
+    // that already fetches the live row, rather than by a second query beside it.
+    currentEpoch: row.currentEpoch,
   };
 }
 
@@ -247,16 +278,20 @@ export function createPostgresRevisionStore(pool: Pool): RevisionStore {
       // Deleted between the membership check above and this read -- a genuine, if narrow, race;
       // treated the same as "missing" everywhere else in this codebase treats a vanished row.
       if (!current) return 'missing';
+      // Collaboration slice 5's HTTP half of "the server rejects writes to the old epoch": this
+      // client confirmed against an epoch a restore has since retired, so what it is asking to
+      // record describes a document state that no longer exists.
+      if (input.epoch !== current.currentEpoch) return 'stale-epoch';
       const { screenplay, canonicalHash } = current;
       const canonicalScreenplayJson = JSON.stringify(screenplay);
 
       const result = await insertRevisionIfChanged(pool, {
         screenplayId,
-        // `apps/collab`'s own `DEFAULT_EPOCH` is `0` and not (yet) varied by anything in this
-        // codebase -- see that constant's own comment. Not imported from `apps/collab` (apps do
-        // not depend on one another in this monorepo); restated here as the same literal, for the
-        // same reason `canonicalHash`'s own sha256 wrapper is restated rather than shared.
-        sourceEpoch: 0,
+        // The screenplay's real current epoch, read in the same query as the canonical projection
+        // this revision captures -- not the literal `0` this line held before collaboration slice 5,
+        // and not the client's `input.epoch` either (that is only ever a claim to be checked, never
+        // a value to be written; the check above has already refused it if it disagreed).
+        sourceEpoch: current.currentEpoch,
         kind: input.kind,
         label: input.kind === 'named' ? input.label : null,
         // Both `named` and `export` are explicit actions by a specific, authenticated actor --

@@ -1,4 +1,5 @@
 import {
+  type AnyPgColumn,
   bigint,
   boolean,
   customType,
@@ -131,6 +132,33 @@ export const screenplays = pgTable(
     // deletion explicitly.
     canonicalScreenplay: jsonb('canonical_screenplay').notNull(),
     canonicalHash: varchar('canonical_hash', { length: 64 }).notNull(),
+    // Collaboration slice 5 (restore-as-current, plan.md's "Restore as current"): *the* stored
+    // current epoch for this screenplay's collaboration document, and the only place it is stored.
+    // Before this slice there was none at all -- `document_yjs_updates`/`document_yjs_checkpoints`/
+    // `document_yjs_quarantined_updates`/`document_revisions` each carried an `epoch` column written
+    // with a hard-coded `0`, with nothing anywhere saying which epoch was *current* (see
+    // `documentYjsUpdates.epoch`'s own comment, which anticipated exactly this slice).
+    //
+    // **Why on `screenplays` rather than its own table.** A screenplay *is* the collaboration
+    // document in this schema (the same reasoning every `screenplay_id` foreign key above already
+    // records), so this is a column of the document, not a relationship to one. Concretely: every
+    // reader needs it in a query it was already running -- `apps/collab`'s `createFetch`/
+    // `createStore` already select from `screenplays` by id, `authenticate.ts`'s role lookup
+    // already joins it, `apps/api`'s `getScreenplay` already reads the row -- so a column here
+    // costs zero extra round trips, while a separate `document_epochs` table would need a row
+    // created for every screenplay that already exists, a join or second query on every one of
+    // those paths, and a decision about what a *missing* row means. It also puts the epoch under
+    // the same row lock (`select ... for update`) the restore transaction already needs to hold on
+    // this row to install the restored canonical projection atomically with the increment, instead
+    // of needing two locks in a fixed order to avoid deadlocking.
+    //
+    // `default 0` is what keeps the migration safe against existing rows: every screenplay that
+    // already exists becomes "currently at epoch 0," which is exactly the epoch slices 3 and 4a
+    // wrote all of their rows under -- so no existing update, checkpoint, quarantined update or
+    // revision is orphaned by this column appearing. Monotonic and never decremented; a restore is
+    // always `current_epoch + 1`, never a reuse of a retired number, so a stale client's epoch can
+    // always be classified as "older than current" rather than ambiguous.
+    currentEpoch: integer('current_epoch').notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
@@ -301,11 +329,27 @@ export const documentYjsQuarantinedUpdates = pgTable(
 // interface state." This table carries no per-block author attribution (that is Track Changes) and
 // models a revision as a single immutable snapshot, never a set of proposed changes (that is also
 // Track Changes). There is no "accept/reject" state anywhere here.
+//
+// Collaboration slice 5 adds two kinds, both written only by the restore transaction
+// (`packages/database/src/restore.ts`):
+//
+//  - `restore`: the audit record of one epoch cutover. Its `canonicalScreenplay`/`canonicalHash`
+//    are copied verbatim from the revision being restored, which is what makes "hash-identical to
+//    the selected revision" a copied value rather than a recomputed one, and it carries the two
+//    links plan.md's step 3 requires ("a `restore` revision linked to both the prior head and
+//    source revision") plus the epoch it retired.
+//  - `pre_restore`: the content that was live immediately *before* the cutover, captured in the
+//    same transaction so that "does not destroy old history" does not depend on anyone being able
+//    to replay the retired epoch's Yjs log. Written only when the live projection had actually
+//    moved on from the screenplay's latest existing revision; when it had not, that existing
+//    revision already *is* the prior head and is linked directly instead of copied.
 export const revisionKind = pgEnum('revision_kind', [
   'named',
   'idle_session',
   'structural_change',
   'export',
+  'restore',
+  'pre_restore',
 ]);
 
 export const documentRevisions = pgTable(
@@ -361,9 +405,52 @@ export const documentRevisions = pgTable(
     // `canonicalScreenplay` blob for every row. Nullable because it is a display convenience, not a
     // correctness-bearing field -- nothing in restoration or export-fidelity ever depends on it.
     previewMetadata: jsonb('preview_metadata'),
+    // The three audit columns of a `restore` revision (slice 5), null for every other kind.
+    //
+    // `sourceRevisionId` is the revision whose content this restore installed as current;
+    // `previousHeadRevisionId` is the revision holding what was live immediately before it (either a
+    // `pre_restore` row this same transaction wrote, or the already-current latest revision when the
+    // live projection had not moved on from it). Together they are plan.md's "linked to both the
+    // prior head and source revision," and they make a restore readable in both directions: what it
+    // brought back, and what it replaced.
+    //
+    // Self-referencing, and `onDelete: 'set null'` rather than `'cascade'`: nothing in this product
+    // deletes a revision row (there is no code path, and deletion of a screenplay cascades the whole
+    // table together), but if one ever were removed, the correct outcome is an audit link that
+    // degrades to "unknown" -- never a cascade that deletes the restore record itself, or the
+    // history on either side of it.
+    sourceRevisionId: uuid('source_revision_id').references(
+      (): AnyPgColumn => documentRevisions.id,
+      {
+        onDelete: 'set null',
+      },
+    ),
+    previousHeadRevisionId: uuid('previous_head_revision_id').references(
+      (): AnyPgColumn => documentRevisions.id,
+      { onDelete: 'set null' },
+    ),
+    // The epoch this restore retired -- `sourceEpoch` on a `restore` row is the *new* epoch (the one
+    // whose starting content this row describes), so the pair records the cutover itself rather than
+    // just one side of it. Null for every other kind, which belong to exactly one epoch.
+    previousEpoch: integer('previous_epoch'),
+    // The idempotency key, supplied by the client that confirmed the restore and unique across the
+    // whole table (partial unique index below). This is the mechanism behind plan.md's "idempotent":
+    // a retried or double-submitted confirmation carries the identical key, finds this row, and
+    // returns it without incrementing the epoch or writing a second `restore` revision. A
+    // *pre-check* alone could not provide that -- two app instances can run it simultaneously -- so
+    // the unique index is the actual guarantee and the pre-check is only what turns the common case
+    // into a clean reused result instead of a constraint violation.
+    restoreRequestId: uuid('restore_request_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
+    // Partial: only `restore` rows carry a request id at all, and `null` values would otherwise be
+    // permitted in unlimited number by a plain unique index anyway -- stating the predicate makes
+    // the index itself small (one entry per restore ever performed, not one per revision) and the
+    // intent explicit.
+    uniqueIndex('document_revisions_restore_request_id_unique')
+      .on(table.restoreRequestId)
+      .where(sql`${table.restoreRequestId} is not null`),
     // `createdAt` (not `id`) is the ordering column every reader wants ("history, newest first";
     // "the revision immediately before this one") -- `id` is a random `uuid`, not a sequence, so it
     // carries no chronological meaning to index on.

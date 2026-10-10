@@ -36,6 +36,7 @@ import {
   renameInput,
 } from './projects.js';
 import { createRevisionInput, type RevisionStore } from './revisions.js';
+import { restoreRevisionInput, type RestoreStore } from './restore.js';
 import {
   createCheckoutSession,
   createPortalSession,
@@ -175,6 +176,15 @@ export interface BuildAppOptions {
    * exports, owner/editor for naming a milestone -- is not identical to `ProjectStore`'s).
    */
   revisions?: RevisionStore;
+  /**
+   * Backs `POST /api/screenplays/:id/revisions/:revisionId/restore` -- collaboration slice 5's
+   * restore-as-current epoch cutover (plan.md's "Restore as current"). A separate option from
+   * `revisions` for the same reason `revisions` is separate from `projects`: its authorization is
+   * narrower (owner/editor only, never a reviewer, and never a read), and it is the one route in
+   * this file that changes which collaboration document is live. Absent means the route is not
+   * registered at all, matching every other optional store here.
+   */
+  restore?: RestoreStore;
 }
 
 const idParam = z.object({ id: z.string().uuid() });
@@ -275,6 +285,13 @@ const screenplayResponseSchema = z.object({
   projectId: z.string(),
   title: z.string(),
   screenplay: screenplaySchema,
+  // Collaboration slice 5: the screenplay's current collaboration epoch
+  // (`screenplays.current_epoch`). The browser needs it for two things it cannot do without it --
+  // naming the Hocuspocus document it connects to (`<screenplayId>:<epoch>`, see
+  // `@finaler-draft/config`'s `formatCollabDocumentName`) and keying its own `y-indexeddb`
+  // database, which is what keeps a pre-restore document's offline work from merging into the
+  // restored one -- and for the `epoch` every epoch-gated write below must carry.
+  currentEpoch: z.number().int().min(0),
 });
 // Shared by both projects and screenplays: rename and restore both return the resource's
 // current id and title, and delete returns just the id it acted on. One schema per shape rather
@@ -306,7 +323,16 @@ const deletedResponseSchema = z.object({
 // reason to pin its exact shape the way every other field here is pinned.
 const revisionListItemSchema = z.object({
   id: z.string().uuid(),
-  kind: z.enum(['named', 'idle_session', 'structural_change', 'export']),
+  kind: z.enum([
+    'named',
+    'idle_session',
+    'structural_change',
+    'export',
+    // Collaboration slice 5's two kinds. A revision list shows them like any other entry -- a
+    // restore and the head it replaced are part of a screenplay's history, not metadata about it.
+    'restore',
+    'pre_restore',
+  ]),
   label: z.string().nullable(),
   authoredBy: z.string().nullable(),
   createdAt: z.string(),
@@ -411,6 +437,18 @@ const revisionDiffResponseSchema = z.object({
   diff: screenplayDiffSchema,
   olderScreenplay: screenplaySchema,
   newerScreenplay: screenplaySchema,
+});
+
+// Mirrors `RestoreStore`'s own `RestoreSuccess` field for field. `created` is `false` for the
+// idempotent replay of an already-committed restore -- see `restore.ts`'s own comment; a replay is a
+// 200 carrying the original restore's identity, never a second cutover and never an error.
+const restoreResponseSchema = z.object({
+  epoch: z.number().int().min(0),
+  previousEpoch: z.number().int().min(0),
+  restoreRevisionId: z.string().uuid(),
+  canonicalHash: z.string(),
+  previousHeadRevisionId: z.string().uuid().nullable(),
+  created: z.boolean(),
 });
 // Mirrors `describeEntitlement`'s return shape below field for field, for the same reason every
 // other response schema in this file mirrors its handler's actual return value: a schema whose
@@ -1375,6 +1413,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
             200: createRevisionResponseSchema,
             403: errorResponseSchema,
             404: errorResponseSchema,
+            // Collaboration slice 5's stale-epoch rejection on the HTTP write path -- see
+            // `createRevisionInput`'s own comment in `revisions.ts`.
+            409: errorResponseSchema,
           },
         },
       },
@@ -1387,6 +1428,66 @@ export async function buildApp(options: BuildAppOptions = {}) {
         if (result === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
         if (result === 'forbidden')
           return reply.code(403).send({ error: 'Screenplay editor access required' });
+        if (result === 'stale-epoch')
+          return reply.code(409).send({
+            error:
+              'This screenplay was restored to an earlier revision. Reload before saving a revision.',
+          });
+        return result;
+      },
+    );
+  }
+  if (options.auth && options.restore) {
+    // Collaboration slice 5. Nested under the revision being restored rather than hung off the
+    // screenplay: `POST /api/screenplays/:id/restore` already exists and means something entirely
+    // different (undoing a *soft delete* -- `ProjectStore.restoreScreenplay`), and two unrelated
+    // operations sharing one path would be a defect waiting to be written, not a tidy coincidence.
+    typedApp.post(
+      '/api/screenplays/:id/revisions/:revisionId/restore',
+      {
+        schema: {
+          params: idParam.extend({ revisionId: z.string().uuid() }),
+          body: restoreRevisionInput,
+          response: {
+            200: restoreResponseSchema,
+            402: errorResponseSchema,
+            403: errorResponseSchema,
+            404: errorResponseSchema,
+            409: errorResponseSchema,
+            422: errorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        const result = await options.restore!.restoreRevision(
+          request.actorId!,
+          request.params.id,
+          request.params.revisionId,
+          request.body,
+        );
+        if (result === 'missing') return reply.code(404).send({ error: 'Revision not found' });
+        if (result === 'forbidden')
+          return reply.code(403).send({ error: 'Screenplay editor access required' });
+        // 402, not 403, for the identical reason the free-tier screenplay limit answers 402 (see
+        // `POST /api/projects/:id/screenplays` above): the account has rights here, just not on its
+        // current tier, and the client shows an upgrade path rather than a dead end.
+        if (result === 'entitlement-required')
+          return reply.code(402).send({
+            error:
+              'Restoring a revision needs edit access to this screenplay. Make it your editable screenplay, or upgrade.',
+          });
+        if (result === 'unreadable-revision')
+          return reply
+            .code(422)
+            .send({ error: 'This revision cannot be opened in the editor and was not restored.' });
+        if (result === 'request-id-conflict')
+          return reply
+            .code(409)
+            .send({ error: 'This restore request identifier belongs to another screenplay.' });
+        if (result === 'stale-epoch')
+          return reply.code(409).send({
+            error: 'This screenplay has already moved on to a newer version. Reload and try again.',
+          });
         return result;
       },
     );

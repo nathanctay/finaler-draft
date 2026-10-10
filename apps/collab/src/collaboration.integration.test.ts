@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Server } from '@hocuspocus/server';
 import { Database } from '@hocuspocus/extension-database';
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from '@hocuspocus/provider';
@@ -17,22 +17,45 @@ import {
   TITLE_PAGE_YJS_MAP,
   writeTitlePageToYMap,
 } from '@finaler-draft/screenplay-editor';
+import {
+  computeRevisionPreviewMetadata,
+  screenplaySchema,
+  screenplayToPlainText,
+} from '@finaler-draft/screenplay';
+import {
+  restoreRevisionAsCurrent,
+  type RestoreRevisionAsCurrentResult,
+} from '@finaler-draft/database';
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import type { Pool } from 'pg';
 import WS from 'ws';
 import * as Y from 'yjs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { TRANSIENT_SYNC_AUTH_FAILURE_REASON } from '@finaler-draft/config';
-import { authenticateConnection } from './authenticate.js';
+import {
+  encodeCollabRestoredMessage,
+  formatCollabDocumentName,
+  parseCollabRestoredMessage,
+  TRANSIENT_SYNC_AUTH_FAILURE_REASON,
+  UNKNOWN_DOCUMENT_EPOCH_FAILURE_REASON,
+} from '@finaler-draft/config';
+import { Client } from 'pg';
+import { authenticateConnection, readAuthenticatedConnectionContext } from './authenticate.js';
 import { createFetch, createStore, DEFAULT_EPOCH } from './database.js';
+import {
+  startRestoreNotificationListener,
+  supersedeRestoredDocuments,
+  type NotificationClient,
+  type RestoreNotificationListener,
+} from './restoreNotifications.js';
 import {
   resolvePresenceIdentity,
   sanitizeAwarenessStates,
   type ServerPresenceIdentity,
 } from './presence.js';
-import { appendUpdate } from './updateLog.js';
+import { appendUpdate, reconstructDocumentState } from './updateLog.js';
 import {
   extractSyncUpdatePayload,
+  listQuarantinedUpdates,
   quarantineUpdate,
   updateCarriesNewContent,
 } from './quarantine.js';
@@ -108,21 +131,63 @@ async function startServer(
   // meaningful: `authenticateConnection` must classify *whatever* `verifyToken` throws as
   // transient, regardless of why it threw.)
   const verifyToken = wrapVerifyToken(realVerifyToken);
+  // Collaboration slice 5's `LISTEN`/`NOTIFY` bridge, wired exactly as `server.ts` wires it -- a
+  // dedicated `pg.Client` (never a pooled one; a `LISTEN` is session state) adapted to
+  // `NotificationClient`. This is what makes a restore committed by `@finaler-draft/database`'s
+  // `restoreRevisionAsCurrent` in one of the tests below actually reach the live connections this
+  // server is holding, rather than the test calling `supersedeRestoredDocuments` by hand and proving
+  // only half the path.
+  let onRestored: (notification: { screenplayId: string; epoch: number }) => void = () => undefined;
+  const restoreNotifications: RestoreNotificationListener = startRestoreNotificationListener({
+    connect: async () => {
+      const client = new Client({ connectionString: databaseUrl });
+      await client.connect();
+      const adapted: NotificationClient = {
+        close: async () => {
+          await client.end();
+        },
+        listen: async (channel) => {
+          await client.query(`listen ${channel}`);
+        },
+        onFailure: (listener) => {
+          client.on('error', listener);
+        },
+        onNotification: (listener) => {
+          client.on('notification', (message) => listener(message.payload));
+        },
+      };
+      return adapted;
+    },
+    onError: () => undefined,
+    onRestored: (notification) => onRestored(notification),
+  });
   const instance = new Server({
     address: '127.0.0.1',
     extensions: [new Database({ fetch: createFetch(pool!), store: createStore(pool!) })],
     async onAuthenticate(data) {
-      const { actorId, readOnly } = await authenticateConnection(
-        { queryable: pool!, verifyToken, trustedOrigins: trustedOrigins! },
-        {
-          documentName: data.documentName,
-          requestHeaders: data.requestHeaders,
-          token: data.token,
-        },
-      );
+      const { actorId, currentEpoch, epoch, readOnly, screenplayId, staleEpoch } =
+        await authenticateConnection(
+          { queryable: pool!, verifyToken, trustedOrigins: trustedOrigins! },
+          {
+            documentName: data.documentName,
+            requestHeaders: data.requestHeaders,
+            token: data.token,
+          },
+        );
       data.connectionConfig.readOnly = readOnly;
       const presence = await resolvePresenceIdentity(pool!, actorId);
-      return { actorId, presence };
+      // The full context `server.ts` caches, not a two-field subset: every hook below reads the
+      // (screenplay, epoch) pair back off it through `readAuthenticatedConnectionContext`, which
+      // validates all six fields and returns `undefined` if any is missing -- so a harness that
+      // returned less would silently turn every hook into a no-op.
+      return { actorId, currentEpoch, epoch, presence, readOnly, screenplayId, staleEpoch };
+    },
+    // Collaboration slice 5, plan.md step 4: a connection that arrives at an already-retired epoch
+    // is told so the moment it is established. Mirrors `server.ts`'s own `connected` hook.
+    async connected({ connection, context }) {
+      const identity = readAuthenticatedConnectionContext(context);
+      if (!identity?.staleEpoch) return;
+      connection.sendStateless(encodeCollabRestoredMessage(identity.currentEpoch));
     },
     // Mirrors `server.ts`'s own `onChange`/`beforeHandleMessage`/`beforeHandleAwareness` -- this
     // harness rebuilds the server's hook wiring rather than importing `server.ts` (a
@@ -130,26 +195,34 @@ async function startServer(
     // The tests below (append, compaction-under-load, quarantine, presence) exist specifically to
     // catch that file and this one drifting apart.
     async onChange({ document, documentName, update, context }) {
-      const actorId = (context as { actorId?: string } | undefined)?.actorId;
+      // The connection's *own* epoch, read off the context, exactly as `server.ts` does -- never the
+      // document name used as a bare screenplay id (which is what this harness did before
+      // collaboration slice 5), and never the screenplay's current epoch. An update made against a
+      // retired epoch belongs to that epoch's log, and writing it under the current one would be the
+      // auto-merge into the restored screenplay plan.md step 5 forbids.
+      const connection = readAuthenticatedConnectionContext(context);
+      if (!connection) return;
       await appendUpdate(pool!, {
-        screenplayId: documentName,
-        epoch: DEFAULT_EPOCH,
+        screenplayId: connection.screenplayId,
+        epoch: connection.epoch,
         update,
-        actorId,
+        actorId: connection.actorId,
       });
       void document;
+      void documentName;
     },
-    async beforeHandleMessage({ connection, document, update, documentName, context }) {
+    async beforeHandleMessage({ connection, document, update, context }) {
       if (!connection.readOnly) return;
       const payload = extractSyncUpdatePayload(update);
       if (!payload) return;
       if (!updateCarriesNewContent(document, payload)) return;
-      const actorId = (context as { actorId?: string } | undefined)?.actorId;
+      const identity = readAuthenticatedConnectionContext(context);
+      if (!identity) return;
       await quarantineUpdate(pool!, {
-        screenplayId: documentName,
-        epoch: DEFAULT_EPOCH,
+        screenplayId: identity.screenplayId,
+        epoch: identity.epoch,
         update: payload,
-        actorId,
+        actorId: identity.actorId,
       });
     },
     async beforeHandleAwareness({ states, context }) {
@@ -160,9 +233,21 @@ async function startServer(
       }
       sanitizeAwarenessStates(states, presence);
     },
+    // Mirrors `server.ts`'s own `onDestroy` for the one resource this harness owns per instance.
+    // The suite's shared `pool` is deliberately *not* closed here (unlike production, where the
+    // process is exiting): several tests destroy and restart the server mid-run.
+    async onDestroy() {
+      await restoreNotifications.dispose();
+    },
     port: 0,
     quiet: true,
   });
+  // Assigned after construction for the reason `server.ts` gives for the identical two-step: the
+  // callback needs `instance.hocuspocus.documents`, which does not exist until the `Server` does.
+  onRestored = (notification) => {
+    supersedeRestoredDocuments(instance.hocuspocus.documents.values(), notification);
+  };
+  await restoreNotifications.started;
   await instance.listen();
   return instance;
 }
@@ -1050,7 +1135,472 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
       client.destroy();
     }
   }, 20_000);
+
+  /**
+   * Collaboration slice 5 (restore-as-current), on the WebSocket path. plan.md's step 4 -- "connected
+   * clients receive a restore event and reload the new epoch. The server rejects writes to the old
+   * epoch" -- and step 5's "never auto-merged", proven through the real socket against a real
+   * restore transaction rather than by reasoning about `readOnly`.
+   *
+   * Two writers are connected when the cutover lands, which is also plan.md's "two active writers
+   * racing a restore" from the side `packages/database/src/restore.integration.test.ts` cannot see:
+   * that suite proves the *transaction* refuses a second cutover; this proves what happens to the
+   * live sockets of writers who were mid-sentence when the first one committed.
+   */
+  it('a restore cuts every connected writer over: each is told once, the retired epoch log is frozen, their next keystrokes are retained in quarantine, and none of it reaches the restored document', async () => {
+    const owner = await signUp('owner-restore-cutover@example.test');
+    const editor = await signUp('editor-restore-cutover@example.test');
+    const { projectId, screenplayId } = await createProjectAndScreenplay(
+      owner.actorId,
+      editableBodyFields,
+    );
+    await addMember(projectId, editor.actorId, 'editor');
+    const source = await captureRevision(screenplayId, 'A LINE FROM THE RESTORED REVISION.');
+
+    const ownerClient = connectProvider(screenplayId, owner.token);
+    const editorClient = connectProvider(screenplayId, editor.token);
+    const ownerRestoreMessages = watchRestoreMessages(ownerClient);
+    const editorRestoreMessages = watchRestoreMessages(editorClient);
+    try {
+      await Promise.all([waitForSynced(ownerClient), waitForSynced(editorClient)]);
+
+      writeLine(ownerClient, 'Live content written before the restore.');
+      await waitForCondition(() =>
+        projectedText(editorClient).includes('Live content written before the restore.'),
+      );
+      // Forces the debounced projection so `screenplays.canonical_screenplay` really holds the live
+      // content at the instant of the cutover -- which is what the transaction's `pre_restore`
+      // capture copies. Without this the capture would describe the seed, not what these two
+      // writers could see on screen.
+      server!.hocuspocus.flushPendingStores();
+      await waitForCanonicalText(screenplayId, 'Live content written before the restore.');
+      const retiredEpochAtCutover = await reconstructedText(screenplayId, 0);
+      expect(retiredEpochAtCutover).toContain('Live content written before the restore.');
+
+      const restored = await performRestore(screenplayId, source.id, owner.actorId, 0);
+      expect(restored.outcome).toBe('restored');
+      if (restored.outcome !== 'restored') return;
+      expect(restored.epoch).toBe(1);
+
+      // plan.md step 4, first half: each connected writer is told, over the connection it already
+      // holds, and told the *new* epoch so it can reload without a second round trip.
+      await waitForCondition(() => ownerRestoreMessages.epochs.includes(1));
+      await waitForCondition(() => editorRestoreMessages.epochs.includes(1));
+
+      // Both writers keep typing into the document they still have open -- exactly what a real
+      // writer does for the seconds between the cutover and noticing the banner.
+      writeLine(ownerClient, 'An owner keystroke made against the retired epoch.');
+      writeLine(editorClient, 'An editor keystroke made against the retired epoch.');
+
+      // Retained, not dropped: both arrive, tagged with the epoch they were actually written
+      // against, never the current one.
+      await waitForCondition(
+        async () => (await listQuarantinedUpdates(pool!, screenplayId, 0)).length >= 2,
+      );
+      const quarantined = await listQuarantinedUpdates(pool!, screenplayId, 0);
+      expect(quarantined.map((row) => row.actorId).sort()).toEqual(
+        [owner.actorId, editor.actorId].sort(),
+      );
+      expect(await listQuarantinedUpdates(pool!, screenplayId, 1)).toHaveLength(0);
+
+      // A fixed wait, not a `waitForCondition` polling for absence: the three assertions below are
+      // all negatives, which polling can only ever report as "not yet".
+      await sleep(500);
+      // plan.md step 4, second half: "the server rejects writes to the old epoch". The retired
+      // epoch's own durable record reconstructs to exactly what the cutover found -- a frozen
+      // historical record, not a branch that quietly keeps growing.
+      expect(await reconstructedText(screenplayId, 0)).toBe(retiredEpochAtCutover);
+      // And nothing was redirected into the *new* epoch either, which would be the auto-merge
+      // plan.md step 5 forbids wearing a different hat.
+      expect(await countUpdates(screenplayId, 1)).toBe(0);
+
+      // The restored document itself: the revision's content, and neither keystroke, and not even
+      // the content that was live at the cutover.
+      const afterRestore = connectProvider(screenplayId, owner.token, 1);
+      try {
+        await waitForSynced(afterRestore);
+        expect(projectedText(afterRestore)).toContain('A LINE FROM THE RESTORED REVISION.');
+        expect(projectedText(afterRestore)).not.toContain(
+          'An owner keystroke made against the retired epoch.',
+        );
+        expect(projectedText(afterRestore)).not.toContain(
+          'An editor keystroke made against the retired epoch.',
+        );
+        expect(projectedText(afterRestore)).not.toContain(
+          'Live content written before the restore.',
+        );
+      } finally {
+        afterRestore.destroy();
+      }
+    } finally {
+      ownerClient.destroy();
+      editorClient.destroy();
+    }
+  }, 30_000);
+
+  /**
+   * plan.md step 5 in full: "A returning offline client is told the document was restored. Its
+   * unsynced work is preserved as a recovery fork/new screenplay for manual comparison or copying;
+   * it is never auto-merged into the restored screenplay."
+   *
+   * The distinction from the test above is the one that matters most and is easiest to lose: that
+   * writer was *connected* when the restore committed, so `supersedeRestoredDocuments` reached them.
+   * This writer was offline the whole time and reconnects afterwards to the document name their
+   * browser still holds -- nothing superseded them, so the denial-or-admission decision is made
+   * fresh by `authenticateConnection`, and the telling is done by the `connected` hook. A design
+   * that merely closed stale sockets would pass the test above and fail this one.
+   *
+   * The recovery half is asserted at its strongest available point: the retained bytes are replayed
+   * onto the retired epoch's own reconstructed document and the writer's sentence is read back out
+   * of it. "A row exists in `document_yjs_quarantined_updates`" would be satisfied by retaining
+   * garbage.
+   */
+  it('an offline writer who reconnects after a restore is admitted, told, and has their unsynced work retained and recoverable -- never merged into the restored screenplay', async () => {
+    const owner = await signUp('owner-restore-offline@example.test');
+    const editor = await signUp('editor-restore-offline@example.test');
+    const { projectId, screenplayId } = await createProjectAndScreenplay(
+      owner.actorId,
+      editableBodyFields,
+    );
+    await addMember(projectId, editor.actorId, 'editor');
+    const source = await captureRevision(
+      screenplayId,
+      'THE REVISION THIS SCREENPLAY WAS RESET TO.',
+    );
+
+    const { provider: editorClient, websocketProvider } = connectProviderWithSocket(
+      screenplayId,
+      editor.token,
+    );
+    const restoreMessages = watchRestoreMessages(editorClient);
+    try {
+      await waitForSynced(editorClient);
+      writeLine(editorClient, 'Synced work from before the editor went offline.');
+      server!.hocuspocus.flushPendingStores();
+      await waitForCanonicalText(screenplayId, 'Synced work from before the editor went offline.');
+
+      const disconnected = new Promise<void>((resolvePromise) => {
+        websocketProvider.on('disconnect', () => resolvePromise());
+      });
+      websocketProvider.disconnect();
+      await disconnected;
+
+      // The restore happens with this writer entirely absent -- there is no connection of theirs for
+      // `supersedeRestoredDocuments` to find.
+      const restored = await performRestore(screenplayId, source.id, owner.actorId, 0);
+      expect(restored.outcome).toBe('restored');
+
+      // Offline work, made with no server in the loop at all, against the document this browser
+      // still holds -- the retired epoch.
+      writeLine(editorClient, 'Unsynced work made offline while the screenplay was restored.');
+      const retiredEpochBeforeReconnect = await reconstructedText(screenplayId, 0);
+
+      websocketProvider.connect();
+      // Admitted, not denied: there is work here to retain, so refusing the connection outright
+      // would be the one outcome that loses it (`authenticate.ts`'s own comment on why the stale
+      // direction is not an error).
+      await waitForSynced(editorClient);
+      // "is told the document was restored", by the `connected` hook rather than by having been
+      // superseded.
+      await waitForCondition(() => restoreMessages.epochs.includes(1));
+
+      await waitForCondition(
+        async () => (await listQuarantinedUpdates(pool!, screenplayId, 0)).length >= 1,
+      );
+      await sleep(500);
+      // Never merged into the retired epoch's own durable record, and never appended to the
+      // restored epoch's at all.
+      expect(await reconstructedText(screenplayId, 0)).toBe(retiredEpochBeforeReconnect);
+      expect(await reconstructedText(screenplayId, 0)).not.toContain(
+        'Unsynced work made offline while the screenplay was restored.',
+      );
+      expect(await countUpdates(screenplayId, 1)).toBe(0);
+
+      // Recoverable, not merely retained: the retired epoch reconstructed from its own durable log,
+      // with the quarantined bytes replayed on top, reads back the writer's actual sentence. This is
+      // the fork plan.md asks for, in the form the server can offer it (the browser offers its own
+      // copy from `y-indexeddb`; this is the half that survives a cleared browser).
+      const retained = await listQuarantinedUpdates(pool!, screenplayId, 0);
+      const fork = await reconstructDocumentState(pool!, screenplayId, 0);
+      expect(fork).toBeDefined();
+      for (const row of retained) {
+        Y.applyUpdate(fork!.doc, new Uint8Array(row.update));
+      }
+      const recovered = fork!.doc.getXmlFragment(SCREENPLAY_YJS_FRAGMENT).toString();
+      expect(recovered).toContain('Unsynced work made offline while the screenplay was restored.');
+
+      // And the restored screenplay never acquired any of it.
+      const restoredClient = connectProvider(screenplayId, owner.token, 1);
+      try {
+        await waitForSynced(restoredClient);
+        expect(projectedText(restoredClient)).toContain(
+          'THE REVISION THIS SCREENPLAY WAS RESET TO.',
+        );
+        expect(projectedText(restoredClient)).not.toContain(
+          'Unsynced work made offline while the screenplay was restored.',
+        );
+        expect(projectedText(restoredClient)).not.toContain(
+          'Synced work from before the editor went offline.',
+        );
+      } finally {
+        restoredClient.destroy();
+      }
+    } finally {
+      editorClient.destroy();
+    }
+  }, 30_000);
+
+  /**
+   * The *other* direction of the epoch comparison, and the only one that is an outright denial:
+   * a connection naming an epoch this screenplay has never reached (`UnknownDocumentEpochError`).
+   * There is nothing to retain for a document that never existed and no reconnect that would make it
+   * exist, so unlike the stale direction this is refused at the door -- with its own reason, so a
+   * client can tell "reload and pick up the real epoch" apart from "you cannot see this document".
+   */
+  it('a connection naming an epoch this screenplay has never reached is denied, with a reason distinct from a permission denial', async () => {
+    const owner = await signUp('owner-unknown-epoch@example.test');
+    const { screenplayId } = await createProjectAndScreenplay(owner.actorId, editableBodyFields);
+
+    const client = connectProvider(screenplayId, owner.token, 99);
+    try {
+      const reason = await new Promise<string | undefined>((resolvePromise, rejectPromise) => {
+        const timeout = setTimeout(
+          () => rejectPromise(new Error('Timed out waiting for authenticationFailed.')),
+          5_000,
+        );
+        client.on('synced', () => {
+          clearTimeout(timeout);
+          rejectPromise(
+            new Error('This connection must never sync -- epoch 99 has never existed.'),
+          );
+        });
+        client.on('authenticationFailed', ({ reason: failureReason }: { reason?: string }) => {
+          clearTimeout(timeout);
+          resolvePromise(failureReason);
+        });
+      });
+      expect(reason).toBe(UNKNOWN_DOCUMENT_EPOCH_FAILURE_REASON);
+      expect(reason).not.toBe(TRANSIENT_SYNC_AUTH_FAILURE_REASON);
+      await sleep(500);
+      expect(client.isSynced).toBe(false);
+      // Nothing was created for an epoch that does not exist -- no checkpoint, no seed, no log.
+      expect(await countCheckpoints(screenplayId, 99)).toBe(0);
+      expect(await countUpdates(screenplayId, 99)).toBe(0);
+    } finally {
+      client.destroy();
+    }
+  }, 20_000);
+
+  /**
+   * plan.md's "historical replay" requirement, and its "does not destroy old history": the retired
+   * epoch's updates and checkpoints are still there after the cutover and still reconstruct to the
+   * content that was live at the moment it happened -- so a restore can itself be undone by
+   * restoring the `pre_restore` revision it wrote, and the retired epoch remains readable
+   * independently of whatever the live document has become since.
+   */
+  it('historical replay: the retired epoch stays readable and reconstructible after a restore, and the restore itself is recorded as a revision pair', async () => {
+    const owner = await signUp('owner-historical-replay@example.test');
+    const { screenplayId } = await createProjectAndScreenplay(owner.actorId, editableBodyFields);
+    const source = await captureRevision(screenplayId, 'THE EARLIER DRAFT, BROUGHT BACK.');
+
+    const client = connectProvider(screenplayId, owner.token);
+    try {
+      await waitForSynced(client);
+      writeLine(client, 'The sentence that was live when the restore happened.');
+      await waitForCondition(() =>
+        projectedText(client).includes('The sentence that was live when the restore happened.'),
+      );
+      server!.hocuspocus.flushPendingStores();
+      await waitForCanonicalText(
+        screenplayId,
+        'The sentence that was live when the restore happened.',
+      );
+    } finally {
+      client.destroy();
+    }
+
+    const retiredEpochBefore = await reconstructedText(screenplayId, 0);
+    expect(retiredEpochBefore).toContain('The sentence that was live when the restore happened.');
+    expect(await countCheckpoints(screenplayId, 0)).toBeGreaterThan(0);
+
+    const restored = await performRestore(screenplayId, source.id, owner.actorId, 0);
+    expect(restored.outcome).toBe('restored');
+    if (restored.outcome !== 'restored') return;
+
+    // Nothing of the retired epoch was deleted or rewritten by the cutover: its checkpoints are
+    // still there, and it still replays to exactly what it held -- the whole point of keeping it.
+    expect(await countCheckpoints(screenplayId, 0)).toBeGreaterThan(0);
+    expect(await reconstructedText(screenplayId, 0)).toBe(retiredEpochBefore);
+
+    // The cutover is legible from history alone: a `restore` row at the new epoch, pointing both at
+    // the revision it brought back and at the revision holding what it displaced -- so the content
+    // that was live a moment before survives as a first-class revision, not only as a retired
+    // epoch's Yjs log.
+    const restoreRow = await pool!.query<{
+      sourceEpoch: number;
+      previousEpoch: number | null;
+      sourceRevisionId: string | null;
+    }>(
+      `select source_epoch as "sourceEpoch", previous_epoch as "previousEpoch",
+              source_revision_id as "sourceRevisionId"
+         from document_revisions where id = $1`,
+      [restored.restoreRevisionId],
+    );
+    expect(restoreRow.rows[0]).toEqual({
+      sourceEpoch: 1,
+      previousEpoch: 0,
+      sourceRevisionId: source.id,
+    });
+    // Which *kind* of revision the prior head is depends on whether the live projection had already
+    // been captured as one: here slice 4a's automatic `structural_change` revision had already
+    // captured this exact content, so the transaction links it directly rather than writing a
+    // redundant `pre_restore` copy (`restoreRevisionAsCurrent` step 5). The property that matters
+    // either way, and the one asserted, is that the prior head really holds what was live -- the
+    // `pre_restore` branch itself is exercised in `apps/api/src/restore.integration.test.ts`.
+    const priorHead = await pool!.query<{ renderedText: string }>(
+      `select rendered_text as "renderedText" from document_revisions where id = $1`,
+      [restored.previousHeadRevisionId],
+    );
+    expect(priorHead.rows[0]?.renderedText).toContain(
+      'The sentence that was live when the restore happened.',
+    );
+  }, 30_000);
 });
+
+/**
+ * A canonical screenplay this editor can genuinely represent (one title page, no dual dialogue, no
+ * notes, no page breaks -- `editorContentFromScreenplay`'s own limits), carrying `text` as its only
+ * body block. Collaboration slice 5's tests need this where the others do not: a restore installs a
+ * revision's canonical projection as the live document, and `createFetch` then seeds the *new*
+ * epoch's Yjs document from it -- so unlike every other screenplay in this file, this content has to
+ * survive that projection to be assertable through a socket at all.
+ */
+function representableScreenplay(screenplayId: string, text: string) {
+  return {
+    ...screenplayFixture,
+    annotations: [],
+    blocks: [{ id: randomUUID(), type: 'action' as const, text }],
+    id: screenplayId,
+    title: 'Test Screenplay',
+  };
+}
+
+/**
+ * Captures `text` as a revision of `screenplayId` at epoch 0 -- the revision a restore below selects
+ * as its source. Inserted directly rather than through `insertRevisionIfChanged` on purpose: that
+ * function's dedupe-against-the-latest-hash behaviour is `packages/database`'s own concern and is
+ * already tested there; what these tests need is simply a revision row with known content, with no
+ * dependence on whether the live screenplay happens to currently share its hash.
+ */
+async function captureRevision(
+  screenplayId: string,
+  text: string,
+): Promise<{ id: string; canonicalHash: string }> {
+  const screenplay = representableScreenplay(screenplayId, text);
+  const json = JSON.stringify(screenplay);
+  const canonicalHash = createHash('sha256').update(json).digest('hex');
+  const result = await pool!.query<{ id: string }>(
+    `insert into document_revisions
+       (screenplay_id, source_epoch, kind, label, authored_by, canonical_screenplay,
+        canonical_hash, rendered_text, preview_metadata)
+     values ($1, 0, 'named', $2, null, $3::jsonb, $4, $5, null)
+     returning id`,
+    [screenplayId, text.slice(0, 40), json, canonicalHash, text],
+  );
+  return { id: result.rows[0]!.id, canonicalHash };
+}
+
+/**
+ * Performs a real restore, through the real transaction (`@finaler-draft/database`'s
+ * `restoreRevisionAsCurrent`) with the same `derive` callback `apps/api/src/restore.ts` supplies in
+ * production. Deliberately not a hand-written `update screenplays set current_epoch = ...`: the
+ * notification `apps/collab` reacts to is issued *inside* that transaction, so a shortcut around it
+ * would prove the socket behaviour against an event this system never actually emits.
+ */
+async function performRestore(
+  screenplayId: string,
+  sourceRevisionId: string,
+  actorId: string,
+  expectedEpoch: number,
+): Promise<RestoreRevisionAsCurrentResult> {
+  return await restoreRevisionAsCurrent(pool!, {
+    actorId,
+    derive: (canonicalScreenplay) => {
+      const parsed = screenplaySchema.safeParse(canonicalScreenplay);
+      if (!parsed.success) return undefined;
+      return {
+        renderedText: screenplayToPlainText(parsed.data),
+        previewMetadata: computeRevisionPreviewMetadata(parsed.data),
+      };
+    },
+    expectedEpoch,
+    restoreRequestId: randomUUID(),
+    screenplayId,
+    sourceRevisionId,
+  });
+}
+
+/**
+ * Records every restore epoch this provider is told about over Hocuspocus's stateless channel,
+ * parsed with the same `@finaler-draft/config` validator `apps/web`'s own listener uses. Attached
+ * as soon as the provider exists, never at the point a test wants to wait: the `connected` hook
+ * fires the moment a reconnecting stale connection is established, which is before any `await` in
+ * the test body could have installed a listener.
+ */
+function watchRestoreMessages(provider: HocuspocusProvider): { epochs: number[] } {
+  const epochs: number[] = [];
+  provider.on('stateless', ({ payload }: { payload: string }) => {
+    const message = parseCollabRestoredMessage(payload);
+    if (message) epochs.push(message.epoch);
+  });
+  return { epochs };
+}
+
+/**
+ * Waits until `screenplays.canonical_screenplay` really holds `text` -- i.e. until Hocuspocus's own
+ * debounced `store` has run and `createStore` has persisted the projection. Needed before any
+ * restore below, because the transaction's `pre_restore` capture copies that column: polling the
+ * update log or the checkpoint count instead would pass the instant `onChange` fired, which is
+ * before the projection exists.
+ */
+async function waitForCanonicalText(screenplayId: string, text: string): Promise<void> {
+  await waitForCondition(async () => {
+    const row = await pool!.query<{ canonical: string }>(
+      'select canonical_screenplay::text as canonical from screenplays where id = $1',
+      [screenplayId],
+    );
+    return (row.rows[0]?.canonical ?? '').includes(text);
+  }, 10_000);
+}
+
+/**
+ * The durable content of one epoch, read back the way a historical replay would read it:
+ * `reconstructDocumentState`'s checkpoint-plus-log reconstruction, projected to text. Compared
+ * rather than counted, because compaction is free to fold the log into a checkpoint at any moment
+ * (`createCheckpoint` deletes the rows it absorbed) -- so a row count is not a stable description of
+ * an epoch's content, while this is.
+ */
+async function reconstructedText(screenplayId: string, epoch: number): Promise<string> {
+  const reconstruction = await reconstructDocumentState(pool!, screenplayId, epoch);
+  if (!reconstruction) throw new Error(`No durable state for epoch ${epoch}.`);
+  return reconstruction.doc.getXmlFragment(SCREENPLAY_YJS_FRAGMENT).toString();
+}
+
+async function countUpdates(screenplayId: string, epoch: number): Promise<number> {
+  const result = await pool!.query<{ count: number }>(
+    'select count(*)::int as count from document_yjs_updates where screenplay_id = $1 and epoch = $2',
+    [screenplayId, epoch],
+  );
+  return result.rows[0]?.count ?? 0;
+}
+
+async function countCheckpoints(screenplayId: string, epoch: number): Promise<number> {
+  const result = await pool!.query<{ count: number }>(
+    'select count(*)::int as count from document_yjs_checkpoints where screenplay_id = $1 and epoch = $2',
+    [screenplayId, epoch],
+  );
+  return result.rows[0]?.count ?? 0;
+}
 
 function projectedText(provider: HocuspocusProvider): string {
   const doc = yXmlFragmentToProseMirrorRootNode(
@@ -1094,6 +1644,7 @@ function writeLine(provider: HocuspocusProvider, text: string): void {
 function buildProviderPair(
   screenplayId: string,
   token: string | (() => string) | (() => Promise<string>),
+  epoch: number = DEFAULT_EPOCH,
 ): { provider: HocuspocusProvider; websocketProvider: HocuspocusProviderWebsocket } {
   class OriginOnlyWebSocket extends WS {
     constructor(address: string, protocols?: string | string[]) {
@@ -1105,7 +1656,17 @@ function buildProviderPair(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     WebSocketPolyfill: OriginOnlyWebSocket as any,
   });
-  const provider = new HocuspocusProvider({ websocketProvider, name: screenplayId, token });
+  // Since collaboration slice 5 the document name is `<screenplayId>:<epoch>`, composed by
+  // `@finaler-draft/config`'s own helper rather than concatenated here -- `apps/collab` parses it back
+  // with that module's inverse, and a format assembled independently in each test is exactly the
+  // drift that would make these tests agree with each other while disagreeing with the server.
+  // `epoch` defaults to `DEFAULT_EPOCH`: every screenplay this suite creates is at epoch 0, and only
+  // the restore tests below name anything else.
+  const provider = new HocuspocusProvider({
+    websocketProvider,
+    name: formatCollabDocumentName(screenplayId, epoch),
+    token,
+  });
   // `HocuspocusProvider` only wires up its own forwarding listeners and connects automatically
   // (`manageSocket`) when it constructs its *own* internal `websocketProvider` from a bare `url`.
   // Supplying one explicitly here (the only way to attach a per-connection `Origin` via
@@ -1129,8 +1690,9 @@ function buildProviderPair(
 function connectProvider(
   screenplayId: string,
   token: string | (() => string) | (() => Promise<string>),
+  epoch: number = DEFAULT_EPOCH,
 ): HocuspocusProvider {
-  return buildProviderPair(screenplayId, token).provider;
+  return buildProviderPair(screenplayId, token, epoch).provider;
 }
 
 async function waitForSynced(provider: HocuspocusProvider): Promise<void> {
@@ -1165,8 +1727,9 @@ async function waitForSynced(provider: HocuspocusProvider): Promise<void> {
 function connectProviderWithSocket(
   screenplayId: string,
   token: string | (() => string) | (() => Promise<string>),
+  epoch: number = DEFAULT_EPOCH,
 ): { provider: HocuspocusProvider; websocketProvider: HocuspocusProviderWebsocket } {
-  return buildProviderPair(screenplayId, token);
+  return buildProviderPair(screenplayId, token, epoch);
 }
 
 /**

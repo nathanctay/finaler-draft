@@ -69,7 +69,9 @@ function compatibleScreenplay(overrides: Partial<Record<string, unknown>> = {}) 
 
 /** A fake `pg.Pool` for the queries `database.ts` still issues directly (the `screenplays` table
  * only -- everything durable-log-related goes through the mocked `updateLog.ts` above). */
-function fakePool(responses: { screenplay?: { title: string; canonicalScreenplay: unknown } }) {
+function fakePool(responses: {
+  screenplay?: { title: string; canonicalScreenplay: unknown; currentEpoch?: number };
+}) {
   const queries: string[] = [];
   const calls: Array<{ text: string; values: readonly unknown[] | undefined }> = [];
   const pool = {
@@ -84,7 +86,14 @@ function fakePool(responses: { screenplay?: { title: string; canonicalScreenplay
         };
       }
       if (text.startsWith('select title, canonical_screenplay')) {
-        return { rows: responses.screenplay ? [responses.screenplay] : [] };
+        // `currentEpoch` defaults to `0` -- the epoch every `documentName` in this file names, since
+        // collaboration slice 5 made the epoch part of the document name. A test that wants
+        // `createStore`'s stale-epoch refusal sets it explicitly to something else.
+        return {
+          rows: responses.screenplay
+            ? [{ ...responses.screenplay, currentEpoch: responses.screenplay.currentEpoch ?? 0 }]
+            : [],
+        };
       }
       if (text.startsWith('update screenplays')) {
         return { rows: [] };
@@ -127,7 +136,7 @@ describe('createFetch', () => {
     mockReconstructDocumentState.mockResolvedValue({ doc: seeded, throughSequence: 5 });
     const { pool, calls } = fakePool({});
 
-    const result = await createFetch(pool)({ documentName: 'doc-1' } as never);
+    const result = await createFetch(pool)({ documentName: 'doc-1:0' } as never);
 
     expect(result).toEqual(Y.encodeStateAsUpdate(seeded));
     expect(mockReconstructDocumentState).toHaveBeenCalledWith(pool, 'doc-1', DEFAULT_EPOCH);
@@ -152,7 +161,7 @@ describe('createFetch', () => {
       screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
     });
 
-    const result = await createFetch(pool)({ documentName: screenplay.id } as never);
+    const result = await createFetch(pool)({ documentName: `${screenplay.id}:0` } as never);
 
     expect(result).not.toBeNull();
     const seededDoc = new Y.Doc();
@@ -182,7 +191,7 @@ describe('createFetch', () => {
     const { pool } = fakePool({
       screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
     });
-    const result = await createFetch(pool)({ documentName: screenplay.id } as never);
+    const result = await createFetch(pool)({ documentName: `${screenplay.id}:0` } as never);
     expect(result).not.toBeNull();
     const seededDoc = new Y.Doc();
     Y.applyUpdate(seededDoc, result!);
@@ -196,7 +205,7 @@ describe('createFetch', () => {
   it('returns null, writing no checkpoint, when neither a checkpoint nor a screenplay row exists', async () => {
     mockReconstructDocumentState.mockResolvedValue(undefined);
     const { pool } = fakePool({});
-    const result = await createFetch(pool)({ documentName: 'missing' } as never);
+    const result = await createFetch(pool)({ documentName: 'missing:0' } as never);
     expect(result).toBeNull();
     expect(mockWriteCheckpoint).not.toHaveBeenCalled();
   });
@@ -212,7 +221,7 @@ describe('createFetch', () => {
     const { pool } = fakePool({
       screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
     });
-    const result = await createFetch(pool)({ documentName: screenplay.id } as never);
+    const result = await createFetch(pool)({ documentName: `${screenplay.id}:0` } as never);
     expect(result).toBeNull();
     expect(mockWriteCheckpoint).not.toHaveBeenCalled();
   });
@@ -242,7 +251,7 @@ describe('createFetch', () => {
         screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
       });
 
-      const result = await createFetch(pool)({ documentName: screenplay.id } as never);
+      const result = await createFetch(pool)({ documentName: `${screenplay.id}:0` } as never);
 
       expect(result).not.toBeNull();
       const migratedDoc = new Y.Doc();
@@ -286,7 +295,7 @@ describe('createFetch', () => {
         screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
       });
 
-      const result = await createFetch(pool)({ documentName: screenplay.id } as never);
+      const result = await createFetch(pool)({ documentName: `${screenplay.id}:0` } as never);
 
       expect(result).not.toBeNull();
       const resultDoc = new Y.Doc();
@@ -311,7 +320,7 @@ describe('createFetch', () => {
         screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
       });
 
-      const result = await createFetch(pool)({ documentName: screenplay.id } as never);
+      const result = await createFetch(pool)({ documentName: `${screenplay.id}:0` } as never);
 
       expect(result).not.toBeNull();
       const resultDoc = new Y.Doc();
@@ -325,7 +334,7 @@ describe('createFetch', () => {
       mockReconstructDocumentState.mockResolvedValue({ doc: preSliceDoc, throughSequence: 2 });
       const { pool } = fakePool({});
 
-      const result = await createFetch(pool)({ documentName: 'gone' } as never);
+      const result = await createFetch(pool)({ documentName: 'gone:0' } as never);
 
       expect(result).toEqual(Y.encodeStateAsUpdate(preSliceDoc));
       expect(mockWriteCheckpoint).not.toHaveBeenCalled();
@@ -373,7 +382,7 @@ describe('createStore', () => {
     );
 
     await createStore(pool)({
-      documentName: screenplay.id,
+      documentName: `${screenplay.id}:0`,
       document: seeded,
       state: Buffer.from(Y.encodeStateAsUpdate(seeded)),
     } as never);
@@ -407,7 +416,7 @@ describe('createStore', () => {
 
     await expect(
       createStore(pool)({
-        documentName: screenplay.id,
+        documentName: `${screenplay.id}:0`,
         document: bareDoc(),
         state: Buffer.from(Y.encodeStateAsUpdate(bareDoc())),
       } as never),
@@ -435,7 +444,7 @@ describe('createStore', () => {
     });
 
     await createStore(pool)({
-      documentName: screenplay.id,
+      documentName: `${screenplay.id}:0`,
       document: invalidDoc,
       state: Buffer.from(Y.encodeStateAsUpdate(invalidDoc)),
     } as never);
@@ -449,12 +458,82 @@ describe('createStore', () => {
     const emptyDoc = new Y.Doc();
 
     await createStore(pool)({
-      documentName: 'gone',
+      documentName: 'gone:0',
       document: emptyDoc,
       state: Buffer.from(Y.encodeStateAsUpdate(emptyDoc)),
     } as never);
 
     expect(queries.some((query) => query.startsWith('update screenplays'))).toBe(false);
     expect(mockCreateCheckpoint).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Collaboration slice 5. The dangerous half of a stale debounced flush is the canonical
+   * projection: there is exactly one `screenplays.canonical_screenplay`, it is not epoch-scoped, and
+   * a restore has just set it to the restored content -- so a flush belonging to the retired epoch
+   * writing it would overwrite the restored screenplay with the content the restore replaced.
+   * Compaction is skipped alongside it so the retired epoch's log stays exactly as the cutover found
+   * it.
+   */
+  it('writes nothing at all -- no canonical projection, no compaction -- for a flush belonging to an epoch the screenplay has already moved past', async () => {
+    const screenplay = compatibleScreenplay();
+    const { pool, queries } = fakePool({
+      screenplay: { title: 'Row Title', canonicalScreenplay: screenplay, currentEpoch: 1 },
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const seeded = seedScreenplayYDoc(
+      {
+        type: 'screenplayDocument',
+        content: [
+          {
+            type: 'screenplayBlock',
+            attrs: { element: 'action', id: '00000000-0000-4000-8000-0000000000a1' },
+            content: [{ type: 'text', text: 'Content from the retired epoch.' }],
+          },
+        ],
+      },
+      undefined,
+      undefined,
+    );
+
+    // The flush names epoch 0; the row says the screenplay is on epoch 1.
+    await createStore(pool)({
+      documentName: `${screenplay.id}:0`,
+      document: seeded,
+      state: Buffer.from(Y.encodeStateAsUpdate(seeded)),
+    } as never);
+
+    expect(queries.some((query) => query.startsWith('update screenplays'))).toBe(false);
+    expect(mockCreateCheckpoint).not.toHaveBeenCalled();
+    expect(mockMaybeCreateStructuralChangeRevision).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('collab_store_skipped_stale_epoch'),
+    );
+    errorSpy.mockRestore();
+  });
+
+  /**
+   * The second of the two mechanisms `createStore`'s own comment describes, and the one that holds
+   * when a flush passes the check above and *then* races a committing restore: the `update` itself is
+   * conditioned on `current_epoch` in SQL, so Postgres re-evaluates it against the row version it
+   * actually locked.
+   */
+  it('conditions the canonical write on the epoch in SQL, not only on the read it made first', async () => {
+    const screenplay = compatibleScreenplay();
+    const { pool, calls } = fakePool({
+      screenplay: { title: 'Row Title', canonicalScreenplay: screenplay },
+    });
+    mockCreateCheckpoint.mockResolvedValue({ throughSequence: 2 });
+
+    await createStore(pool)({
+      documentName: `${screenplay.id}:0`,
+      document: bareDoc(),
+      state: Buffer.from(Y.encodeStateAsUpdate(bareDoc())),
+    } as never);
+
+    const updateCall = calls.find((call) => call.text.startsWith('update screenplays'));
+    expect(updateCall).toBeDefined();
+    expect(updateCall!.text).toContain('current_epoch = $4');
+    expect(updateCall!.values![3]).toBe(DEFAULT_EPOCH);
   });
 });

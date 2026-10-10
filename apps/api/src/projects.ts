@@ -48,7 +48,19 @@ export interface ProjectStore {
   getScreenplay(
     actorId: string,
     screenplayId: string,
-  ): Promise<{ id: string; projectId: string; title: string; screenplay: Screenplay } | 'missing'>;
+  ): Promise<
+    | {
+        id: string;
+        projectId: string;
+        title: string;
+        screenplay: Screenplay;
+        /** The screenplay's current collaboration epoch (`screenplays.current_epoch`) --
+         * collaboration slice 5. The browser cannot name the Hocuspocus document to connect to, or
+         * key its own offline store, without it; see `app.ts`'s `screenplayResponseSchema`. */
+        currentEpoch: number;
+      }
+    | 'missing'
+  >;
   // Renames only the screenplay row's `title` (the listing/display field). It deliberately never
   // touches `canonicalScreenplay` or `canonicalHash` — see the comment on `renameScreenplay` below
   // for why the two title fields are intentionally independent.
@@ -310,7 +322,7 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
     async getScreenplay(actorId, screenplayId) {
       const result = await pool.query(
         `select s.id, s.project_id as "projectId", s.title,
-                s.canonical_screenplay as screenplay
+                s.canonical_screenplay as screenplay, s.current_epoch as "currentEpoch"
            from screenplays s
            join projects p on p.id = s.project_id
            join project_members m on m.project_id = s.project_id
@@ -324,12 +336,14 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
         projectId: string;
         screenplay: unknown;
         title: string;
+        currentEpoch: number;
       };
       return {
         id: row.id,
         projectId: row.projectId,
         title: row.title,
         screenplay: screenplaySchema.parse(row.screenplay),
+        currentEpoch: row.currentEpoch,
       };
     },
     async renameScreenplay(actorId, screenplayId, title) {

@@ -15,6 +15,13 @@ export function humanizeRevisionKind(revision: Pick<RevisionListItem, 'kind' | '
       return 'Autosave — structural change';
     case 'export':
       return 'Autosave — export';
+    // Collaboration slice 5. Worded as what happened to the document, not as a category of change:
+    // a writer scanning history needs to see immediately *where* the document was replaced, because
+    // every entry above that point describes a lineage the live document no longer continues.
+    case 'restore':
+      return 'Restored an earlier revision';
+    case 'pre_restore':
+      return 'Replaced by a restore';
   }
 }
 

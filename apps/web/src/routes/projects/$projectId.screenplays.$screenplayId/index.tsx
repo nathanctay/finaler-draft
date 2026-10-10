@@ -102,13 +102,26 @@ function ScreenplayPage() {
       <EditorWorkspace
         entitlementReadOnly={entitlementReadOnly}
         initial={screenplay.data as PersistedScreenplay}
-        key={screenplayId}
+        // Collaboration slice 5: the epoch is part of the key, not just the screenplay id. A restore
+        // (performed here or by a collaborator) changes `currentEpoch`, and `App` must then be a fresh
+        // mount -- new `HocuspocusProvider` for the new document name, new (empty) `y-indexeddb`
+        // database, new editor state seeded from the restored content. Keying on the screenplay id
+        // alone would keep the retired document's React tree and provider alive across the cutover.
+        key={`${screenplayId}:${(screenplay.data as PersistedScreenplay).currentEpoch}`}
         onOpenRevisionHistory={() =>
           void navigate({
             params: { projectId, screenplayId },
             to: '/projects/$projectId/screenplays/$screenplayId/revisions',
           })
         }
+        // Collaboration slice 5, plan.md step 4's "reload the new epoch". Invalidating this route's own
+        // screenplay query is the whole of it: the refetch carries the new `currentEpoch`, which changes
+        // the `key` above, which remounts `App` onto the restored collaboration document. Nothing here
+        // reloads the page -- the writer keeps their place in the application rather than being bounced
+        // through a full navigation.
+        onReloadRestoredDocument={() => {
+          void queryClient.invalidateQueries({ queryKey: ['screenplay', screenplayId] });
+        }}
       />
     </Suspense>
   );

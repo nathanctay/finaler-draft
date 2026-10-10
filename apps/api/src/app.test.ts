@@ -335,6 +335,7 @@ describe('persisted project API', () => {
       projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
       title: 'Draft',
       screenplay: screenplayFixture,
+      currentEpoch: 0,
     }),
     renameScreenplay: async () => renameScreenplayResult,
     deleteScreenplay: async () => deleteScreenplayResult,
@@ -447,6 +448,11 @@ describe('persisted project API', () => {
         projectId: '5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f',
         title: 'Draft',
         screenplay: screenplayFixture,
+        // Collaboration slice 5: the response schema must carry the screenplay's current
+        // collaboration epoch through unstripped -- the browser cannot name the Hocuspocus document
+        // to connect to without it, so a schema that silently dropped it would leave every editor
+        // unable to connect at all.
+        currentEpoch: 0,
       });
     } finally {
       await app.close();
@@ -908,6 +914,64 @@ describe('persisted project API', () => {
         });
         expect(missing.statusCode).toBe(404);
         expect(missing.json()).toEqual({ error: 'Screenplay not found' });
+      } finally {
+        restoreScreenplayResult = { id: screenplayId, title: 'Draft' };
+        await app.close();
+      }
+    });
+
+    /**
+     * Collaboration slice 5 nested its epoch cutover under the revision being restored rather than
+     * hanging it off the screenplay, because `POST /api/screenplays/:id/restore` already existed and
+     * means something entirely different: undoing a *soft delete*. Two unrelated operations sharing
+     * one path would be a defect waiting to be written, so this proves they are genuinely separate
+     * routes reaching separate stores -- with both ports wired at once, which is how production
+     * runs.
+     */
+    it('keeps undoing a soft delete and restoring a revision as two distinct routes, each reaching its own store', async () => {
+      const revisionId = '66666666-6666-4666-8666-666666666666';
+      let restoreRevisionCalls = 0;
+      const app = await buildApp({
+        auth,
+        projects: store,
+        restore: {
+          restoreRevision: async () => {
+            restoreRevisionCalls += 1;
+            return {
+              epoch: 1,
+              previousEpoch: 0,
+              restoreRevisionId: '77777777-7777-4777-8777-777777777777',
+              canonicalHash: 'd'.repeat(64),
+              previousHeadRevisionId: null,
+              created: true,
+            };
+          },
+        },
+      });
+      try {
+        restoreScreenplayResult = { id: screenplayId, title: 'Draft' };
+        const undelete = await app.inject({
+          method: 'POST',
+          url: `/api/screenplays/${screenplayId}/restore`,
+          headers,
+        });
+        expect(undelete.statusCode).toBe(200);
+        expect(undelete.json()).toEqual({ id: screenplayId, title: 'Draft' });
+        // The soft-delete undo never touches the restore store.
+        expect(restoreRevisionCalls).toBe(0);
+
+        const cutover = await app.inject({
+          method: 'POST',
+          url: `/api/screenplays/${screenplayId}/revisions/${revisionId}/restore`,
+          headers,
+          payload: {
+            expectedEpoch: 0,
+            restoreRequestId: '88888888-8888-4888-8888-888888888888',
+          },
+        });
+        expect(cutover.statusCode).toBe(200);
+        expect(cutover.json().epoch).toBe(1);
+        expect(restoreRevisionCalls).toBe(1);
       } finally {
         restoreScreenplayResult = { id: screenplayId, title: 'Draft' };
         await app.close();

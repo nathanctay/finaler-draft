@@ -40,6 +40,7 @@ describe('API client', () => {
           projectId,
           screenplay: screenplayFixture,
           title: 'Draft',
+          currentEpoch: 0,
         }),
       )
       .mockResolvedValueOnce(response({ id: projectId }))

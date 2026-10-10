@@ -27,6 +27,12 @@ const screenplayResponseSchema = z.object({
   projectId: z.string().uuid(),
   screenplay: screenplaySchema,
   title: z.string(),
+  // Collaboration slice 5: which collaboration epoch this screenplay is currently on
+  // (`screenplays.current_epoch`). Not cosmetic -- `App.tsx` names the Hocuspocus document
+  // `<screenplayId>:<epoch>` from it (`@finaler-draft/config`'s `formatCollabDocumentName`) and keys
+  // its own `y-indexeddb` database on the same string, which is what keeps a pre-restore document's
+  // offline work from merging into the restored one. Every epoch-gated write below also sends it.
+  currentEpoch: z.number().int().min(0),
 });
 // Better Auth's `/sign-up/email` and `/sign-in/email` both return `{token, user}` (installed
 // `api/routes/sign-up.mjs`/`sign-in.mjs`). Only `signUp` below reads `token`: now that
@@ -61,7 +67,16 @@ const deletedResponseSchema = z.object({
 // display convenience this app never branches its own correctness on.
 const revisionListItemSchema = z.object({
   id: z.string().uuid(),
-  kind: z.enum(['named', 'idle_session', 'structural_change', 'export']),
+  kind: z.enum([
+    'named',
+    'idle_session',
+    'structural_change',
+    'export',
+    // Collaboration slice 5. A restore and the head it replaced are entries in a screenplay's
+    // history like any other, so they appear in the same list rather than a parallel audit view.
+    'restore',
+    'pre_restore',
+  ]),
   label: z.string().nullable(),
   authoredBy: z.string().nullable(),
   createdAt: z.string(),
@@ -70,6 +85,14 @@ const revisionListItemSchema = z.object({
 const revisionDetailSchema = revisionListItemSchema.extend({
   screenplayId: z.string().uuid(),
   screenplay: screenplaySchema,
+});
+const restoreRevisionResponseSchema = z.object({
+  epoch: z.number().int().min(0),
+  previousEpoch: z.number().int().min(0),
+  restoreRevisionId: z.string().uuid(),
+  canonicalHash: z.string(),
+  previousHeadRevisionId: z.string().uuid().nullable(),
+  created: z.boolean(),
 });
 const createRevisionResponseSchema = revisionListItemSchema.extend({ created: z.boolean() });
 
@@ -503,20 +526,39 @@ export const api = {
   // `jsonWithServerMessage`, matching `switchEditableScreenplay`/`createScreenplay` above: a
   // refusal here (403, not owner/editor) carries the server's own explanation, shown inline by the
   // caller rather than a bare "Request failed (403)".
-  createNamedRevision: (screenplayId: string, label: string) =>
+  createNamedRevision: (screenplayId: string, label: string, epoch: number) =>
     jsonWithServerMessage(
       `/api/screenplays/${screenplayId}/revisions`,
       createRevisionResponseSchema,
-      { body: JSON.stringify({ kind: 'named', label }), method: 'POST' },
+      { body: JSON.stringify({ epoch, kind: 'named', label }), method: 'POST' },
     ),
   // Fired best-effort alongside an FDX/DOCX/PDF download (App.tsx's `runExport`) -- never blocks
   // or fails the download itself; the plain `json` helper is enough since the caller only ever
   // logs a failure here, it never shows one to the writer.
-  createExportRevision: (screenplayId: string, format: 'docx' | 'fdx' | 'pdf') =>
+  createExportRevision: (screenplayId: string, format: 'docx' | 'fdx' | 'pdf', epoch: number) =>
     json(`/api/screenplays/${screenplayId}/revisions`, createRevisionResponseSchema, {
-      body: JSON.stringify({ kind: 'export', format }),
+      body: JSON.stringify({ epoch, format, kind: 'export' }),
       method: 'POST',
     }),
+  // Collaboration slice 5's one write: the epoch cutover itself (plan.md's "Restore as current").
+  // `jsonWithServerMessage`, matching `createNamedRevision`: every refusal here (403 not an editor,
+  // 402 outside the editable slot, 409 the document moved on, 422 the revision cannot be opened)
+  // carries a specific server explanation the confirmation dialog shows verbatim rather than
+  // paraphrasing a status code.
+  //
+  // `restoreRequestId` is the idempotency key and must be generated *once* per confirmation, not per
+  // attempt -- see `restoreRevisionDialog.tsx`, which generates it when the dialog opens so a retried
+  // confirmation reuses it.
+  restoreRevision: (
+    screenplayId: string,
+    revisionId: string,
+    body: { expectedEpoch: number; restoreRequestId: string },
+  ) =>
+    jsonWithServerMessage(
+      `/api/screenplays/${screenplayId}/revisions/${revisionId}/restore`,
+      restoreRevisionResponseSchema,
+      { body: JSON.stringify(body), method: 'POST' },
+    ),
   createCheckoutSession: (plan: BillingPlan) =>
     json('/api/billing/checkout-session', billingSessionResponseSchema, {
       body: JSON.stringify({ plan }),
@@ -542,8 +584,11 @@ export type PersistedScreenplay = {
   projectId: string;
   screenplay: Screenplay;
   title: string;
+  /** The collaboration epoch this screenplay is currently on -- see `screenplayResponseSchema`. */
+  currentEpoch: number;
 };
 export type RevisionListItem = z.infer<typeof revisionListItemSchema>;
+export type RestoreRevisionResult = z.infer<typeof restoreRevisionResponseSchema>;
 export type RevisionDetail = z.infer<typeof revisionDetailSchema>;
 export type ScreenplayDiff = z.infer<typeof screenplayDiffSchema>;
 export type ScreenplayBlockDiffEntry = z.infer<typeof screenplayBlockDiffEntrySchema>;

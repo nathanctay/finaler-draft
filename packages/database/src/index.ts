@@ -21,6 +21,19 @@ export {
   type RevisionWithScreenplay,
 } from './revisions.js';
 
+// Collaboration slice 5: the restore-as-current epoch cutover (plan.md's "Restore as current").
+// `apps/api` performs it; `apps/collab` imports the notify channel so a committed restore reaches
+// the process that holds the live connections. See `restore.ts`'s own module comment.
+export {
+  currentEpoch,
+  restoreRevisionAsCurrent,
+  SCREENPLAY_RESTORED_NOTIFY_CHANNEL,
+  type DeriveRevisionFields,
+  type RestoredResult,
+  type RestoreRevisionAsCurrentParams,
+  type RestoreRevisionAsCurrentResult,
+} from './restore.js';
+
 export function createDatabase(connectionString: string) {
   const pool = new Pool({
     connectionString,
