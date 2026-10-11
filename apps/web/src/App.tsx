@@ -298,12 +298,18 @@ export interface HistoricalRevisionInfo {
    * `kind`/`label`/`createdAt`; `App` itself has no notion of revision metadata beyond this string. */
   label: string;
   /**
-   * Navigates back to the live document. Supplied by the route, not performed here, for the same
-   * reason `onOpenRevisionHistory` is a callback: this component never navigates on its own.
-   * Optional so a test (or any caller with nowhere to go back to) can render the banner without
-   * inventing a destination; the button simply does not appear.
+   * Navigates back to the revision history this revision was opened from. Supplied by the route,
+   * not performed here, for the same reason `onOpenRevisionHistory` is a callback: this component
+   * never navigates on its own. Optional so a test (or any caller with nowhere to go back to) can
+   * render the banner without inventing a destination; the button simply does not appear.
+   *
+   * It used to go to the live document, and was renamed with its destination: a writer reading a
+   * revision is reading *history*, and sending them to the live editor made the one step back the
+   * one step that left. History is where the other revisions are, and the history page links on to
+   * the live editor itself ("Back to screenplay"), so nothing became unreachable -- viewer →
+   * revisions → editor.
    */
-  onBackToLiveDocument?: (() => void) | undefined;
+  onBackToRevisions?: (() => void) | undefined;
   /**
    * Collaboration slice 5's step 1 entry point: "an authorized owner/editor previews ... and confirms
    * the target revision." Supplied only by the historical-preview route, and only for an
@@ -1869,17 +1875,18 @@ export function App({
             {/* Two actions in one banner, grouped by `.readonly-banner-actions` (styles.css) so
                 `.readonly-banner`'s own `justify-content: space-between` does not spread them apart
                 from each other -- the class main already added for the comparison banner's own pair.
-                "Back to live document" exists because the preview previously had no way out at all;
-                "Restore this revision..." is slice 5's step 1 entry point, and appears only for an
-                account the route could confirm may edit. */}
+                "Back to revisions" exists because the preview previously had no way out at all, and
+                goes one step back rather than all the way out (see `onBackToRevisions`), matching
+                the comparison view's own back link; "Restore this revision..." is slice 5's step 1
+                entry point, and appears only for an account the route could confirm may edit. */}
             <div className="readonly-banner-actions">
-              {historicalRevision.onBackToLiveDocument && (
+              {historicalRevision.onBackToRevisions && (
                 <button
                   className="primary-button"
-                  onClick={historicalRevision.onBackToLiveDocument}
+                  onClick={historicalRevision.onBackToRevisions}
                   type="button"
                 >
-                  Back to live document
+                  Back to revisions
                 </button>
               )}
               {historicalRevision.onRestore && (

@@ -8,6 +8,7 @@ import {
 } from '@tiptap/core';
 import { Plugin, TextSelection, type Transaction } from '@tiptap/pm/state';
 import { Fragment, Slice, type Node as ProseMirrorNode, type ResolvedPos } from '@tiptap/pm/model';
+import { Mapping } from '@tiptap/pm/transform';
 import type * as Y from 'yjs';
 import {
   redoCommand,
@@ -325,14 +326,36 @@ function splitScreenplayBlock(
   const suffix = endBlock.text.slice(selectionEndOffset);
   const element =
     selectionEndOffset === endBlock.text.length ? elementWhenSplittingAtEnd : endBlock.element;
+  // Which half keeps `activeBlock.id` is decided by which half keeps the *content* that id was
+  // issued for, not by which half comes first -- the same rule `reconcileBlockIds` applies to a
+  // paste, and for the same reason: plan.md's stable ids exist to support "comments, scene
+  // navigation, revision diffs, imports/exports, and future storyboard links even when content is
+  // reordered", so an id has to follow the writer's text.
+  //
+  // The case this exists for is `Enter` with the caret at the very start of a line, which is how a
+  // writer makes room above the line they are on. There `prefix` is empty and `suffix` is the whole
+  // of the original text, so giving the id to the prefix left the writer's line carrying a brand-new
+  // id -- and a revision diff then reported that line as deleted and re-added when it had only been
+  // pushed down one position. Reported from real use; the editor's own split tests all split
+  // mid-text, where the prefix genuinely is the original line and the behaviour below is unchanged.
+  //
+  // Deliberately narrow. The id only moves when this is a single-block split
+  // (`activeBlock.position === endBlock.position`): across a multi-block selection the suffix comes
+  // from `endBlock`, which has an id of its own, and moving `activeBlock`'s id onto another block's
+  // text would be a second identity bug rather than a fix for this one.
+  const splitsOneBlock = activeBlock.position === endBlock.position;
+  const originalIdBelongsToSuffix = splitsOneBlock && prefix === '' && suffix !== '';
   const preservedBlock = existingNode.type.create(
-    { element: activeBlock.element, id: activeBlock.id },
+    {
+      element: activeBlock.element,
+      id: originalIdBelongsToSuffix ? createStableId() : activeBlock.id,
+    },
     prefix === '' ? undefined : editor.schema.text(prefix),
   );
   const newBlock = editor.schema.nodes.screenplayBlock?.create(
     {
       element,
-      id: createStableId(),
+      id: originalIdBelongsToSuffix ? activeBlock.id : createStableId(),
     },
     suffix === '' ? undefined : editor.schema.text(suffix),
   );
@@ -790,6 +813,98 @@ function regeneratePastedIds(fragment: Fragment): Fragment {
 }
 
 /**
+ * The first position in `[from, to]` whose following character survived `mapping`, and the last
+ * whose preceding character did. Together they bound the part of a block's content that this
+ * transaction left intact; `from >= to` on the way back out means none of it did.
+ *
+ * Scanning rather than reading the replaced range off the mapping, because a `Mapping` composed
+ * over a whole round of transactions has no single replaced range to read -- a drag-and-drop that
+ * moves content deletes in one step and inserts in another. The scans stop at the first survivor
+ * from each end, so the work is bounded by how much of the block the transaction actually deleted,
+ * not by the block's length: an ordinary paste exits both loops immediately.
+ */
+function survivingContentStart(mapping: Mapping, from: number, to: number): number {
+  let position = from;
+  while (position < to && mapping.mapResult(position, 1).deletedAfter) {
+    position += 1;
+  }
+  return position;
+}
+
+function survivingContentEnd(mapping: Mapping, from: number, to: number): number {
+  let position = to;
+  while (position > from && mapping.mapResult(position, -1).deletedBefore) {
+    position -= 1;
+  }
+  return position;
+}
+
+function containingBlockPosition(doc: ProseMirrorNode, position: number): number {
+  const resolved = doc.resolve(position);
+  // `-1` is not a position any block can occupy, so a boundary that mapped to the document's own
+  // top level rather than into a block can never be mistaken for agreement with another boundary.
+  return resolved.depth === 0 ? -1 : resolved.before(1);
+}
+
+/**
+ * Each position in `doc` that holds a `previousDoc` block's content whole, paired with that block's
+ * id -- the id it should still be carrying once the paste settles. Blocks whose content was
+ * divided, deleted, or never there are absent, and so keep whatever the transaction left them with.
+ *
+ * The two boundaries are mapped with opposite association, deliberately. The leading one
+ * (immediately before the first surviving character) is mapped with `assoc` 1 so that content
+ * inserted at exactly that spot pushes the boundary *past* the insertion, letting it follow the
+ * writer's text instead of staying in front of the pasted text; the trailing one (immediately
+ * after the last surviving character) is mapped with `assoc` -1 for the mirror-image reason.
+ * Mapped the same way, a paste at offset 0 of a line and a paste at the end of one would be
+ * indistinguishable here, and only one of them should move an id.
+ *
+ * The boundaries mapped are the ones bounding the content that *survived*, not the block's extreme
+ * content boundaries, and the difference is load-bearing in both directions. A paste that replaces
+ * the first word of a line has deleted that line's first character, and a line is not a different
+ * line for having lost its first word -- reading the extreme boundary there would retire the id of
+ * a line the writer barely touched. A paste that replaces a line outright has deleted all of it,
+ * and reading the extreme boundaries there would map both ends of a line that no longer exists to
+ * the junction its removal left behind, resurrecting its id onto whatever content now occupies
+ * that spot. `survivingContentStart`/`survivingContentEnd` answer both at once: a block with no
+ * surviving content has no heir, and a block with some has its heir decided by where that content
+ * went rather than by where its deleted ends would have landed.
+ *
+ * Two pre-paste blocks can both claim one new block -- a paste over a selection spanning from one
+ * line into another leaves a single joined block holding the first line's prefix and the second's
+ * suffix. The earlier block in `previousDoc` wins, which is the id ProseMirror's own join already
+ * left on that node, so the common case costs nothing and the loser's id simply retires with the
+ * block that stopped existing.
+ */
+function contentHeirPositions(
+  previousDoc: ProseMirrorNode,
+  doc: ProseMirrorNode,
+  mapping: Mapping,
+): Map<number, string> {
+  const heirs = new Map<number, string>();
+  previousDoc.forEach((node, offset) => {
+    const { id } = node.attrs;
+    if (node.type.name !== 'screenplayBlock' || typeof id !== 'string') {
+      return;
+    }
+    const contentStart = offset + 1;
+    const contentEnd = offset + node.nodeSize - 1;
+    const survivingStart = survivingContentStart(mapping, contentStart, contentEnd);
+    const survivingEnd = survivingContentEnd(mapping, contentStart, contentEnd);
+    if (survivingStart >= survivingEnd) {
+      return;
+    }
+    const startBlock = containingBlockPosition(doc, mapping.map(survivingStart, 1));
+    const endBlock = containingBlockPosition(doc, mapping.map(survivingEnd, -1));
+    if (startBlock !== endBlock || heirs.has(startBlock)) {
+      return;
+    }
+    heirs.set(startBlock, id);
+  });
+  return heirs;
+}
+
+/**
  * The paste side of `progress/paste-sanitization.md`. There is otherwise no paste handling in
  * this editor at all -- no `transformPasted`, no `handlePaste` -- so ProseMirror's default
  * clipboard parsing runs unmodified: it parses whatever HTML (or, absent HTML, line-split plain
@@ -830,57 +945,109 @@ function regeneratePastedIds(fragment: Fragment): Fragment {
 /**
  * The second half of the same guarantee, and it cannot be done in `transformPasted`.
  *
- * `regeneratePastedIds` above makes every id *arriving in the slice* new. That is not the only way
- * a paste can produce two blocks with one id: dropping a block-shaped slice at a position *inside*
- * an existing block splits it, and ProseMirror's `replace` gives both halves that block's attrs --
- * including its `id`. Neither half came from the clipboard, so nothing in the slice could have been
- * rewritten to prevent it. The result is the exact failure `progress/paste-sanitization.md` exists
- * to close: `screenplayIdSchema`'s uniqueness rule rejects the document, the status bar reads
- * "Not saving · Stable id ... must be globally unique within a screenplay", and the writer's edits
- * stop reaching the server.
+ * `regeneratePastedIds` above makes every id *arriving in the slice* new. That is necessary and it
+ * is not sufficient, for two separate reasons, both of which show up when a block-shaped slice
+ * lands at a position *inside* an existing block rather than at a boundary between blocks.
  *
- * Reachable by an ordinary action -- put the caret at the start of a line and paste two or more
- * lines copied from the manuscript -- and unrelated to what is on the clipboard, so it survived
- * both the slice-level fix and its tests, which all paste at a block boundary (`position` 0) where
- * no split happens. It surfaced when the element menu stopped `Enter` from leaving a stray empty
- * block at the top of a new screenplay, which is what had been absorbing the paste in the one test
- * that came near it.
+ * **A duplicate neither half came from the clipboard.** A fully closed slice (`openStart` and
+ * `openEnd` both 0) dropped inside a block splits it, and ProseMirror's `replace` gives both halves
+ * that block's attrs -- including its `id`. Nothing in the slice could have been rewritten to
+ * prevent it. The result is the failure `progress/paste-sanitization.md` exists to close:
+ * `screenplayIdSchema`'s uniqueness rule rejects the document, the status bar reads "Not saving ·
+ * Stable id ... must be globally unique within a screenplay", and the writer's edits stop reaching
+ * the server.
+ *
+ * **An id left labelling content that is not the content it was issued for.** This is the defect
+ * the owner found in real use (`progress/paste-split-block-identity.md`), and it is the common
+ * case, not the exotic one: a genuine cut or copy of whole lines never produces a closed slice.
+ * `EditorView.serializeForClipboard` records the copied selection's openness in `data-pm-slice`,
+ * and cutting one line -- its trailing line break included, which is what selecting a line does --
+ * serialises as `openStart` 1, `openEnd` 1 with two children. Pasted at offset 0 of a line,
+ * ProseMirror merges the slice's open first block into the target block and merges the target
+ * block's own text into the slice's open *last* block. So the writer's line keeps its id while
+ * holding pasted text, and the writer's text moves into a pasted node holding a brand-new id. No
+ * duplicate is ever created, which is why the duplicate sweep never saw this: the revision diff
+ * reported a line that had merely been pushed down one position as removed and re-added, because
+ * by id that is exactly what had happened to it.
+ *
+ * So this pass is not a duplicate sweep with a tie-break. It reconciles identity with content:
+ * **a block id belongs to the text it was issued for, and follows that text wherever the paste
+ * moves it.** plan.md states the property directly -- "Stable scene and block IDs support comments,
+ * scene navigation, revision diffs, imports/exports, and future storyboard links **even when
+ * content is reordered**" -- and the previous reasoning here, that the first block carrying an id
+ * keeps it because "there is no sense in which one half of a split is more the original block than
+ * the other", was simply false. There is a sense, plan.md names it, and position is the one thing
+ * about a block that a paste is entitled to change.
+ *
+ * `contentHeirPositions` works out where each pre-paste block's content went, by mapping the
+ * boundaries of that block's own surviving content through the transaction rather than by comparing
+ * text -- pasted text can be a character-for-character copy of the text it lands beside (it usually
+ * is; the clipboard came from this document), so no string match could tell the two apart. A block
+ * whose surviving content lands entirely inside one new block was carried there whole, and that
+ * block inherits its id. A block whose content was genuinely divided between two new blocks (a
+ * paste into the middle of a line) gets no heir, and there document order is the honest answer,
+ * because neither half is the line the writer typed.
+ *
+ * Copy-and-paste still mints fresh ids for everything it brings in, which it must -- the editor
+ * cannot tell a cut from a copy at paste time, so pasting a line you copied rather than cut must
+ * never produce two blocks sharing an id. Nothing here weakens that: an id is only ever moved onto
+ * the block that inherited the content it already labelled, never onto content that arrived from
+ * the clipboard, and any block left without an id of its own gets a freshly minted one. The
+ * corollary, accepted deliberately: a cut-and-pasted line really is a new block and a revision diff
+ * reports it as removed and added rather than moved. That is inherent to minting fresh ids on
+ * paste, not a gap left for later.
  *
  * The scan is a whole-document pass, so it is gated on the transaction that can actually cause the
  * problem rather than run on every keystroke -- the same discipline `paginationExtension.ts` and
  * `smartTypeGhost.ts` apply to their own document-wide passes. `prosemirror-view` marks both the
- * paste and drop paths with a `uiEvent` meta, and no other edit in this editor copies a block's
- * attrs onto a second node: `splitScreenplayBlock` mints a fresh id for the half it creates, and
- * `convertActiveScreenplayBlock` changes one node in place.
+ * paste and drop paths with a `uiEvent` meta, and no other edit in this editor moves a block's
+ * content into a different node or copies its attrs onto a second one: `splitScreenplayBlock` mints
+ * a fresh id for the half it creates, and `convertActiveScreenplayBlock` changes one node in place.
  *
  * That "no other edit" claim used to have a hole: `@tiptap/core`'s own built-in Enter fallback
  * (bundled unconditionally with every `Editor`) is not code in this file, but it ran *as* an edit
  * in this editor whenever `ScreenplayBlockNode`'s own `Enter` entry declined -- which it did for a
- * selection spanning two blocks -- and it copied attrs the same way a mid-block paste split used
- * to. `splitScreenplayBlock`'s own comment has the mechanism and the fix: that entry now claims
+ * selection spanning two blocks -- and it copied attrs the same way a closed-slice paste split
+ * does. `splitScreenplayBlock`'s own comment has the mechanism and the fix: that entry now claims
  * every selection shape reachable from an active block, so this gate never needs widening for
  * Enter specifically (see `progress/enter-duplicate-ids.md`).
- *
- * The first block carrying a given id keeps it and every later one is reissued, which is document
- * order and nothing more -- there is no sense in which one half of a split is more the original
- * block than the other, and inventing a rule (prefer the half with text, prefer the longer one)
- * would be a preference dressed up as a principle.
  */
-function regenerateDuplicateBlockIds(doc: ProseMirrorNode, transaction: Transaction): boolean {
-  const seen = new Set<string>();
+/**
+ * Gives every block in `doc` the id that belongs to the content it holds: an inherited one where
+ * `contentHeirPositions` found an heir, otherwise the id the block already has, and a freshly
+ * minted one wherever that would collide. The collision set starts out holding every inherited id,
+ * so a block whose id has moved to its content's new home cannot keep a stale copy of it, and
+ * grows as the pass goes, so two blocks can never leave this function sharing one id.
+ *
+ * Returns whether anything changed, so the caller can skip appending an empty transaction.
+ */
+function reconcileBlockIds(
+  previousDoc: ProseMirrorNode,
+  doc: ProseMirrorNode,
+  mapping: Mapping,
+  transaction: Transaction,
+): boolean {
+  const heirs = contentHeirPositions(previousDoc, doc, mapping);
+  const used = new Set<string>(heirs.values());
   let changed = false;
   doc.forEach((node, offset) => {
     if (node.type.name !== 'screenplayBlock') {
       return;
     }
     const { id } = node.attrs;
-    if (typeof id === 'string' && !seen.has(id)) {
-      seen.add(id);
+    const inherited = heirs.get(offset);
+    if (inherited === undefined && typeof id === 'string' && !used.has(id)) {
+      used.add(id);
+      return;
+    }
+    const next = inherited ?? createStableId();
+    used.add(next);
+    if (next === id) {
       return;
     }
     // `setNodeMarkup` never changes a node's size, so every offset this loop still has to visit
     // stays valid as it goes.
-    transaction.setNodeMarkup(offset, undefined, { ...node.attrs, id: createStableId() });
+    transaction.setNodeMarkup(offset, undefined, { ...node.attrs, id: next });
     changed = true;
   });
   return changed;
@@ -890,7 +1057,7 @@ const ScreenplayPasteSanitizer = Extension.create({
   addProseMirrorPlugins() {
     return [
       new Plugin({
-        appendTransaction(transactions, _oldState, newState) {
+        appendTransaction(transactions, oldState, newState) {
           const pasted = transactions.some((transaction) => {
             const uiEvent = transaction.getMeta('uiEvent');
             return transaction.docChanged && (uiEvent === 'paste' || uiEvent === 'drop');
@@ -898,8 +1065,18 @@ const ScreenplayPasteSanitizer = Extension.create({
           if (!pasted) {
             return null;
           }
+          // The whole round's position mapping, composed, not just the paste transaction's own:
+          // `oldState` is the state before *all* of `transactions`, so a mapping that covered only
+          // one of them would answer in the wrong coordinate space for every block in the
+          // document. One transaction is the ordinary case and composing one mapping is free.
+          const mapping = new Mapping();
+          for (const transaction of transactions) {
+            mapping.appendMapping(transaction.mapping);
+          }
           const transaction = newState.tr;
-          return regenerateDuplicateBlockIds(newState.doc, transaction) ? transaction : null;
+          return reconcileBlockIds(oldState.doc, newState.doc, mapping, transaction)
+            ? transaction
+            : null;
         },
         props: {
           transformPasted: (slice) =>

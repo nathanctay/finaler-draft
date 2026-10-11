@@ -187,7 +187,11 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
         message: string;
         onMakeEditable?: () => Promise<void>;
       };
-      historicalRevision?: { label: string; onRestore?: () => void };
+      historicalRevision?: {
+        label: string;
+        onBackToRevisions?: () => void;
+        onRestore?: () => void;
+      };
       initial: { title: string };
       onOpenRevisionHistory?: () => void;
       onReloadRestoredDocument?: () => void;
@@ -224,12 +228,18 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
           {historicalRevision && (
             <p data-testid="historical-revision">{historicalRevision.label}</p>
           )}
-          {/* Collaboration slice 5. Both of these are callbacks the *route* owns (see
+          {/* Three callbacks the *route* owns (see `HistoricalRevisionInfo.onBackToRevisions`,
               `HistoricalRevisionInfo.onRestore` and `onReloadRestoredDocument` in App.tsx): the
-              preview route decides whether a restore may even be offered, and the live route owns
-              what "reload the new epoch" means. Exposed here as real buttons so a route test can
-              prove both the decision and the click-through without the Tiptap-backed `App`;
-              `App.restore.test.tsx` owns how the real component renders them. */}
+              preview route decides where "back" goes and whether a restore may even be offered, and
+              the live route owns what "reload the new epoch" means. Exposed here as real buttons so
+              a route test can prove each decision and click-through without the Tiptap-backed
+              `App`; `App.historicalRevision.test.tsx` and `App.restore.test.tsx` own how the real
+              component renders them. */}
+          {historicalRevision?.onBackToRevisions && (
+            <button onClick={historicalRevision.onBackToRevisions} type="button">
+              Back to revisions
+            </button>
+          )}
           {historicalRevision?.onRestore && (
             <button onClick={historicalRevision.onRestore} type="button">
               Restore this revision…

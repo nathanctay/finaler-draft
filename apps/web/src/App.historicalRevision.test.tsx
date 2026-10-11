@@ -94,27 +94,29 @@ describe('historical revision preview', () => {
     ).toBeVisible();
   });
 
-  it('offers a way back to the live document, and calls the route rather than navigating itself', async () => {
-    const onBackToLiveDocument = vi.fn();
+  it('offers a way back to the revision history, and calls the route rather than navigating itself', async () => {
+    const onBackToRevisions = vi.fn();
     render(
       <App
         historicalRevision={{
           label: 'Historical revision from March 4, 2026, 3:04 PM',
-          onBackToLiveDocument,
+          onBackToRevisions,
         }}
         initial={historicalPersistedScreenplay()}
       />,
     );
     await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
 
-    // Before this existed, a writer who opened a revision could only reach the live document
-    // through the browser's back button or by editing the URL.
-    const back = screen.getByRole('button', { name: 'Back to live document' });
+    // Before this existed, a writer who opened a revision could only leave it through the
+    // browser's back button or by editing the URL. It goes one step back, to the history this
+    // revision came from, rather than all the way out to the live document -- see
+    // `HistoricalRevisionInfo.onBackToRevisions`.
+    const back = screen.getByRole('button', { name: 'Back to revisions' });
     expect(back).toBeVisible();
     await userEvent.click(back);
     // `App` never navigates on its own -- the route owns the destination, the same contract
     // `onOpenRevisionHistory` already follows.
-    expect(onBackToLiveDocument).toHaveBeenCalledTimes(1);
+    expect(onBackToRevisions).toHaveBeenCalledTimes(1);
   });
 
   it('omits the button entirely when the caller supplies nowhere to go back to', async () => {
@@ -126,7 +128,7 @@ describe('historical revision preview', () => {
     );
     await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
 
-    expect(screen.queryByRole('button', { name: 'Back to live document' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Back to revisions' })).toBeNull();
   });
 
   it('shows a banner unmistakably distinct from the live editor, carrying the revision label and no promote-to-editable action', async () => {
