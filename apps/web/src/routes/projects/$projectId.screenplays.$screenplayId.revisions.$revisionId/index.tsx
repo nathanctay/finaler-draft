@@ -105,13 +105,15 @@ function RevisionPreviewPage() {
   };
   const label = `${humanizeRevisionKind(data)} — ${formatRevisionCreatedAt(data.createdAt)}`;
   // The banner's own way out, supplied here rather than performed inside `App` -- see
-  // `HistoricalRevisionInfo.onBackToLiveDocument`. The live editor route, not this route's parent:
-  // a writer leaving a historical revision wants the document, not the revision list they may not
-  // have come through.
-  const backToLiveDocument = () => {
+  // `HistoricalRevisionInfo.onBackToRevisions`. This route's parent, the revision history, not the
+  // live editor: a writer reading one revision is reading history, and the other revisions are the
+  // likely next thing they want. The live document is one further step, which history itself
+  // offers ("Back to screenplay"), and this is the same destination the comparison view's own
+  // "Back to revisions" link already uses.
+  const backToRevisions = () => {
     void navigate({
       params: { projectId, screenplayId },
-      to: '/projects/$projectId/screenplays/$screenplayId',
+      to: '/projects/$projectId/screenplays/$screenplayId/revisions',
     });
   };
 
@@ -120,7 +122,7 @@ function RevisionPreviewPage() {
       <EditorWorkspace
         historicalRevision={{
           label,
-          onBackToLiveDocument: backToLiveDocument,
+          onBackToRevisions: backToRevisions,
           onRestore: mayRestore ? () => setRestoreDialogOpen(true) : undefined,
         }}
         initial={initial}

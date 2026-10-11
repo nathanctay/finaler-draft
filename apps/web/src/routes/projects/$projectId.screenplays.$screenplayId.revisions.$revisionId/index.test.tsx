@@ -101,6 +101,25 @@ describe('revision preview page', () => {
     expect(screen.queryByRole('button', { name: 'Revision history…' })).not.toBeInTheDocument();
   });
 
+  /**
+   * The banner's way back, and the destination is the point of the test, not the label: it goes to
+   * this route's parent -- the revision history -- not to the live editor it used to go to. The
+   * writer's path out is viewer → revisions → editor, with the history page's own "Back to
+   * screenplay" link as the last step, so the live document is still two clicks away rather than
+   * unreachable. See `HistoricalRevisionInfo.onBackToRevisions` in App.tsx.
+   */
+  it('sends the banner’s way back to the revision history, not to the live editor', async () => {
+    routeState.query = { data: revisionDetail, isError: false, isLoading: false };
+    render(<RevisionPreviewPage />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Back to revisions' }));
+
+    expect(routeState.navigate).toHaveBeenCalledWith({
+      params: { projectId, screenplayId },
+      to: '/projects/$projectId/screenplays/$screenplayId/revisions',
+    });
+  });
+
   it('labels an automatic revision by its kind, not a blank label', async () => {
     routeState.query = {
       data: { ...revisionDetail, kind: 'idle_session', label: null },

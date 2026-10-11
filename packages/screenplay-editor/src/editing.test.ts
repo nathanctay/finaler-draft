@@ -477,6 +477,11 @@ describe('projectDocumentScreenplay', () => {
 describe('paste sanitisation', () => {
   const originalId = '00000000-0000-4000-8000-000000000401';
   const secondId = '00000000-0000-4000-8000-000000000402';
+  const thirdId = '00000000-0000-4000-8000-000000000403';
+  // Ids carried *by the clipboard*, as a same-document copy's serialised HTML does. No block the
+  // paste produces may end up holding one of these: a pasted block is a new block.
+  const pastedFirstId = '00000000-0000-4000-8000-000000000501';
+  const pastedSecondId = '00000000-0000-4000-8000-000000000502';
 
   function buildPasteEditor(
     blocks: ReadonlyArray<{ element: ScreenplayElementType; id: string; text: string }>,
@@ -703,6 +708,451 @@ describe('paste sanitisation', () => {
       'INT. HOUSE - DAY',
       'MARA enters the room.',
     ]);
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * `progress/paste-split-block-identity.md`, and the defect the owner found in real use: he cut a
+   * line from the bottom of a page and pasted it at the top, and the revision diff reported the
+   * line that had merely been *pushed down one position* as removed and re-added. Nothing about
+   * that line had changed; its id had moved off it.
+   *
+   * The tests from here to the end of this describe pin the whole rule, which is one sentence -- a
+   * block id belongs to the text it was issued for and follows that text wherever the paste moves
+   * it. They are deliberately every paste shape the rule has to answer differently, not only the
+   * one that was reported: the bare caret at a line's start and at its end, a selection over a
+   * line's first character, a selection over a whole line, a selection spanning two lines, a
+   * single-block paste, a copy rather than a cut, and the real clipboard shape. The rule is only
+   * right if it answers all of them, and several of them exist to catch the plausible *wrong*
+   * fixes rather than the original defect -- a rule that always handed the id to the second block
+   * would pass the first test here and corrupt the third.
+   *
+   * The duplicate-id guard tested above is a related but distinct property with a different cause
+   * (`replace` copying one block's attrs onto two nodes), and it is still asserted where it
+   * belongs. Restoring the old document-order tie-break leaves every test above this comment green
+   * and fails five below it, which is why they are kept apart. See `reconcileBlockIds`'s own
+   * comment for why the owner's case never produced a duplicate at all.
+   */
+  it("keeps a line's id with that line's own text when a multi-block paste lands at its start", () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'action', id: originalId, text: 'FIRST LINE' },
+      { element: 'action', id: secondId, text: 'SECOND LINE' },
+    ]);
+    // Offset 0 of the first line's own text: the caret position a writer is at after pressing
+    // Home, and where pasting a cut line puts it above the line they were on.
+    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 1)));
+
+    pasteHTML(
+      editor,
+      [
+        `<div data-screenplay-block data-screenplay-element="action" data-block-id="${pastedFirstId}">CUT ONE</div>`,
+        `<div data-screenplay-block data-screenplay-element="action" data-block-id="${pastedSecondId}">CUT TWO</div>`,
+      ].join(''),
+    );
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    const blocks = projection.screenplay.blocks.map((block) => ({
+      id: block.id,
+      text: 'text' in block ? block.text : '',
+    }));
+    // ProseMirror merges the open slice's first block into the target block and the target block's
+    // own text into the slice's last block; the structure here is its doing, not this slice's.
+    expect(blocks.map((block) => block.text)).toEqual([
+      'CUT ONE',
+      'CUT TWOFIRST LINE',
+      'SECOND LINE',
+    ]);
+    // The writer's line keeps its identity even though it moved down a position and gained pasted
+    // text at its front. This is the assertion the defect failed.
+    expect(blocks[1]?.id).toBe(originalId);
+    // And the block now holding only pasted text does not get to keep it, nor does it keep the id
+    // the clipboard carried.
+    expect(blocks[0]?.id).not.toBe(originalId);
+    expect(blocks[0]?.id).not.toBe(pastedFirstId);
+    expect(blocks[0]?.id).not.toBe(pastedSecondId);
+    expect(blocks[2]?.id).toBe(secondId);
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * The same paste, through the clipboard shape a genuine cut actually produces rather than
+   * hand-authored HTML -- the gap between the test above and the owner's real action. Selecting a
+   * line includes its trailing line break, so `serializeForClipboard` records `openStart` 1,
+   * `openEnd` 1 over two children (the second one empty) in `data-pm-slice`, and `parseFromClipboard`
+   * takes its own branch for that. It is the openness that causes the defect: a *closed* slice
+   * splits the target block and makes a duplicate, which the sweep above catches, while an open one
+   * quietly moves the writer's text into a pasted node and makes no duplicate at all.
+   */
+  it("keeps a line's id with its text for the clipboard shape a real one-line cut produces", () => {
+    const source = buildPasteEditor([
+      { element: 'action', id: originalId, text: 'FIRST LINE' },
+      { element: 'action', id: secondId, text: 'CUT ONE' },
+      { element: 'action', id: thirdId, text: 'LAST LINE' },
+    ]);
+    // From the start of "CUT ONE" to the start of "LAST LINE" -- the whole line and its break,
+    // which is what selecting a line and cutting it puts on the clipboard.
+    const cutStart = 13;
+    const { dom } = source.editor.view.serializeForClipboard(
+      TextSelection.create(
+        source.editor.state.doc,
+        cutStart,
+        cutStart + 'CUT ONE'.length + 2,
+      ).content(),
+    );
+    const cutHTML = dom.innerHTML;
+    expect(cutHTML).toContain('data-pm-slice="1 1 []"');
+    source.editor.destroy();
+    source.mount.remove();
+
+    const { editor, mount } = buildPasteEditor([
+      { element: 'action', id: originalId, text: 'FIRST LINE' },
+      { element: 'action', id: secondId, text: 'SECOND LINE' },
+    ]);
+    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 1)));
+
+    pasteHTML(editor, cutHTML);
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    const blocks = projection.screenplay.blocks.map((block) => ({
+      id: block.id,
+      text: 'text' in block ? block.text : '',
+    }));
+    expect(blocks.map((block) => block.text)).toEqual(['CUT ONE', 'FIRST LINE', 'SECOND LINE']);
+    expect(blocks[1]?.id).toBe(originalId);
+    // The relocated line is genuinely a new block, and a revision diff reporting it as removed and
+    // added is correct: the editor cannot tell a cut from a copy at paste time, so a pasted line
+    // must always be given a fresh id (see `reconcileBlockIds`). What must not happen -- and is
+    // what this test exists for -- is the *other* line losing its identity to it.
+    expect(blocks[0]?.id).not.toBe(originalId);
+    expect(blocks[0]?.id).not.toBe(secondId);
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * The mirror image, and the case that rules out "give the id to the second half" as a fix: the
+   * same two-block paste at the *end* of a line leaves all of the writer's text in the first block,
+   * so that is where its id must stay. A tail-preferring rule would hand this line's id to a block
+   * holding nothing but pasted text -- the identical defect, just at the other end of the line.
+   */
+  it("keeps a line's id with its text when the same paste lands at the end of the line instead", () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'action', id: originalId, text: 'FIRST LINE' },
+      { element: 'action', id: secondId, text: 'SECOND LINE' },
+    ]);
+    // Offset 10 -- immediately after the last character of "FIRST LINE".
+    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 11)));
+
+    pasteHTML(
+      editor,
+      [
+        `<div data-screenplay-block data-screenplay-element="action" data-block-id="${pastedFirstId}">CUT ONE</div>`,
+        `<div data-screenplay-block data-screenplay-element="action" data-block-id="${pastedSecondId}">CUT TWO</div>`,
+      ].join(''),
+    );
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    const blocks = projection.screenplay.blocks.map((block) => ({
+      id: block.id,
+      text: 'text' in block ? block.text : '',
+    }));
+    expect(blocks.map((block) => block.text)).toEqual([
+      'FIRST LINECUT ONE',
+      'CUT TWO',
+      'SECOND LINE',
+    ]);
+    expect(blocks[0]?.id).toBe(originalId);
+    expect(blocks[1]?.id).not.toBe(originalId);
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * The one case with no right answer, recorded as such. A paste into the middle of a line divides
+   * the writer's text between two blocks, and neither half is the line they typed -- so document
+   * order decides, which is what the whole pass used to do unconditionally. The point of pinning it
+   * is that the fallback is deliberate and narrow: it applies where the content was genuinely
+   * divided, and nowhere else.
+   */
+  it('falls back to document order only when a paste divides a line between two blocks', () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'action', id: originalId, text: 'FIRST LINE' },
+      { element: 'action', id: secondId, text: 'SECOND LINE' },
+    ]);
+    // Offset 5, between "FIRST" and " LINE".
+    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 6)));
+
+    pasteHTML(
+      editor,
+      [
+        `<div data-screenplay-block data-screenplay-element="action" data-block-id="${pastedFirstId}">CUT ONE</div>`,
+        `<div data-screenplay-block data-screenplay-element="action" data-block-id="${pastedSecondId}">CUT TWO</div>`,
+      ].join(''),
+    );
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    const blocks = projection.screenplay.blocks.map((block) => ({
+      id: block.id,
+      text: 'text' in block ? block.text : '',
+    }));
+    expect(blocks.map((block) => block.text)).toEqual([
+      'FIRSTCUT ONE',
+      'CUT TWO LINE',
+      'SECOND LINE',
+    ]);
+    expect(blocks[0]?.id).toBe(originalId);
+    const ids = blocks.map((block) => block.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * A single-block paste at the start of a line merges into that line outright -- no second block,
+   * no split, nothing for identity to follow anywhere. Worth pinning because it is the case the
+   * fix must leave completely alone: the line gains text at its front and keeps its id, which is
+   * what typing at the start of a line does too.
+   */
+  it('merges a single-block paste at the start of a line into that line, id unchanged', () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'action', id: originalId, text: 'FIRST LINE' },
+      { element: 'action', id: secondId, text: 'SECOND LINE' },
+    ]);
+    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 1)));
+
+    pasteHTML(
+      editor,
+      `<div data-screenplay-block data-screenplay-element="action" data-block-id="${pastedFirstId}">CUT ONE</div>`,
+    );
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    expect(projection.screenplay.blocks).toHaveLength(2);
+    expect(projection.screenplay.blocks[0]).toMatchObject({
+      id: originalId,
+      text: 'CUT ONEFIRST LINE',
+    });
+    expect(projection.screenplay.blocks[1]?.id).toBe(secondId);
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * The constraint the fix must not break, stated as its own test: the editor cannot tell a cut
+   * from a copy at paste time, so a *copied* line pasted at the start of another line must leave
+   * the line it was copied from holding its own id, and must not take that id for itself. The
+   * projection is asserted valid as well as id-unique, which is the check that actually matters in
+   * production -- a duplicate makes `screenplayIdSchema` reject the document and the status bar
+   * read "Not saving".
+   */
+  it('still mints a fresh id for a copied line pasted at the start of another, leaving the original where it was', () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'action', id: originalId, text: 'FIRST LINE' },
+      { element: 'action', id: secondId, text: 'COPY ME' },
+      { element: 'action', id: thirdId, text: 'LAST LINE' },
+    ]);
+    // Copied, not cut: the source line stays in the document, so an id-preserving paste would
+    // leave two blocks claiming `secondId`.
+    const copyStart = 13;
+    const { dom } = editor.view.serializeForClipboard(
+      TextSelection.create(editor.state.doc, copyStart, copyStart + 'COPY ME'.length + 2).content(),
+    );
+    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 1)));
+
+    pasteHTML(editor, dom.innerHTML);
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    const blocks = projection.screenplay.blocks.map((block) => ({
+      id: block.id,
+      text: 'text' in block ? block.text : '',
+    }));
+    expect(blocks.map((block) => block.text)).toEqual([
+      'COPY ME',
+      'FIRST LINE',
+      'COPY ME',
+      'LAST LINE',
+    ]);
+    const ids = blocks.map((block) => block.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // Every line that was already in the document keeps the id it had.
+    expect(blocks[1]?.id).toBe(originalId);
+    expect(blocks[2]?.id).toBe(secondId);
+    expect(blocks[3]?.id).toBe(thirdId);
+    // The pasted copy is a new block, with an id belonging to neither the clipboard nor any line
+    // already here.
+    expect(ids).not.toContain(pastedFirstId);
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * Identity follows the content that *survived*, which is not the same as following the block's
+   * outermost content boundaries -- and this is the case that proves the difference. A paste over
+   * the first character of a line has deleted that line's first character; a line is not a
+   * different line for having lost its first letter. Reading the outermost boundary here would see
+   * a deleted first character, give up, and leave the id where document order put it: on the block
+   * holding nothing but pasted text. Which is the original defect, reached by a selection instead
+   * of a bare caret.
+   */
+  it("keeps a line's id with its text when the paste replaces the line's first character", () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'action', id: originalId, text: 'FIRST LINE' },
+      { element: 'action', id: secondId, text: 'SECOND LINE' },
+    ]);
+    // Just the "F": offsets 0 to 1 of the first line's text.
+    editor.view.dispatch(
+      editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 1, 2)),
+    );
+
+    pasteHTML(
+      editor,
+      [
+        `<div data-screenplay-block data-screenplay-element="action" data-block-id="${pastedFirstId}" data-pm-slice="1 1 []">CUT ONE</div>`,
+        `<div data-screenplay-block data-screenplay-element="action" data-block-id="${pastedSecondId}"></div>`,
+      ].join(''),
+    );
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    const blocks = projection.screenplay.blocks.map((block) => ({
+      id: block.id,
+      text: 'text' in block ? block.text : '',
+    }));
+    expect(blocks.map((block) => block.text)).toEqual(['CUT ONE', 'IRST LINE', 'SECOND LINE']);
+    expect(blocks[1]?.id).toBe(originalId);
+    expect(blocks[0]?.id).not.toBe(originalId);
+    expect(blocks[2]?.id).toBe(secondId);
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * The other direction, and the reason a block with *no* surviving content is given no heir at
+   * all. A paste over a range running from the start of one line into the next replaces the first
+   * line entirely and merges what is left into one block. The first line's content went nowhere --
+   * but both of its content boundaries still map to the junction its removal left behind, which is
+   * inside that surviving block. Treating that as "its content was carried there whole" would
+   * stamp a deleted line's id onto the second line's text, and it would win the tie because it
+   * comes first in the document. The surviving line keeps its own id instead, which is the whole
+   * claim of this slice applied across a merge rather than a split.
+   */
+  it('gives a block no heir when none of its content survived, so the surviving line keeps its own id', () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'action', id: originalId, text: 'FIRST LINE' },
+      { element: 'action', id: secondId, text: 'SECOND LINE' },
+    ]);
+    // From the start of the first line's text through to the start of the second line's: the whole
+    // of the first line, and the break after it.
+    editor.view.dispatch(
+      editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 1, 13)),
+    );
+
+    pasteHTML(
+      editor,
+      `<div data-screenplay-block data-screenplay-element="action" data-block-id="${pastedFirstId}">PASTED</div>`,
+    );
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    expect(projection.screenplay.blocks).toHaveLength(1);
+    expect(projection.screenplay.blocks[0]).toMatchObject({
+      id: secondId,
+      text: 'PASTEDSECOND LINE',
+    });
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * Two lines can both have content in the one block a paste leaves behind -- a selection running
+   * from the middle of one line into the next merges them -- and then two pre-paste ids have an
+   * equally good claim on it. The earlier line in the document wins, which is also the id
+   * ProseMirror's own join already left on that node, so the common case costs nothing and the
+   * other id retires with the line that stopped existing. The alternative, letting the later
+   * claimant overwrite, would rename a line the writer only edited the end of.
+   */
+  it('gives a block merged out of two lines the earlier line’s id, and retires the other', () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'action', id: originalId, text: 'FIRST LINE' },
+      { element: 'action', id: secondId, text: 'SECOND LINE' },
+    ]);
+    // From offset 5 of the first line ("FIRST| LINE") through to the start of the second line's
+    // text: the end of one line, the break, and nothing of the other.
+    editor.view.dispatch(
+      editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 6, 13)),
+    );
+
+    pasteHTML(
+      editor,
+      `<div data-screenplay-block data-screenplay-element="action" data-block-id="${pastedFirstId}">PASTED</div>`,
+    );
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    expect(projection.screenplay.blocks).toHaveLength(1);
+    expect(projection.screenplay.blocks[0]).toMatchObject({
+      id: originalId,
+      text: 'FIRSTPASTEDSECOND LINE',
+    });
+    editor.destroy();
+    mount.remove();
+  });
+
+  /**
+   * A block already in the document with no id at all is not hypothetical: `addAttributes()`
+   * defaults `id` to `null`, and both defects this extension exists to close produced exactly that
+   * -- foreign HTML parsed through ProseMirror\u2019s default wrapping, and `@tiptap/core`\u2019s Enter
+   * fallback inserting a block with none of this node\u2019s attribute defaults overridden
+   * (`progress/enter-duplicate-ids.md`). `mapBlock` requires a string id, so such a document does
+   * not save at all. The next paste anywhere in it repairs the block rather than stepping around
+   * it, and does not mistake the absent id for something another block could inherit.
+   */
+  it('gives a real id to a block that was already in the document without one', () => {
+    const { editor, mount } = buildPasteEditor([
+      { element: 'action', id: originalId, text: 'FIRST LINE' },
+      { element: 'action', id: secondId, text: 'SECOND LINE' },
+    ]);
+    const unidentified = findScreenplayBlockPosition(editor, secondId);
+    if (unidentified === undefined) throw new Error('expected the seeded second block');
+    editor.view.dispatch(
+      editor.state.tr.setNodeMarkup(unidentified, undefined, { element: 'action', id: null }),
+    );
+    expect(projectDocumentScreenplay(editor.state.doc).valid).toBe(false);
+
+    // A paste that lands nowhere near the damaged block.
+    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.create(editor.state.doc, 1)));
+    pasteHTML(
+      editor,
+      `<div data-screenplay-block data-screenplay-element="action" data-block-id="${pastedFirstId}">CUT ONE</div>`,
+    );
+
+    const projection = projectDocumentScreenplay(editor.state.doc);
+    expect(projection.valid).toBe(true);
+    if (!projection.valid) return;
+    const blocks = projection.screenplay.blocks.map((block) => ({
+      id: block.id,
+      text: 'text' in block ? block.text : '',
+    }));
+    expect(blocks.map((block) => block.text)).toEqual(['CUT ONEFIRST LINE', 'SECOND LINE']);
+    expect(blocks[0]?.id).toBe(originalId);
+    expect(blocks[1]?.id).toEqual(expect.any(String));
+    expect(blocks[1]?.id).not.toBe(originalId);
     editor.destroy();
     mount.remove();
   });
@@ -1270,6 +1720,104 @@ describe('findScreenplayBlockPosition', () => {
     expect(findScreenplayBlockPosition(editor, secondId)).toBe(editor.state.doc.child(0).nodeSize);
     expect(findScreenplayBlockPosition(editor, 'not-a-real-id')).toBeUndefined();
 
+    editor.destroy();
+    mount.remove();
+  });
+});
+
+/**
+ * A block id belongs to the text it was issued for, and a split must not hand it to the other half.
+ * The companion to `paste sanitisation`'s `reconcileBlockIds` tests above: that pass is gated on the
+ * `paste`/`drop` transactions and never sees an `Enter`, so the split path needs its own proof of
+ * the same rule.
+ *
+ * Reported from real use. A writer put the caret at the start of a line and pressed Enter to make
+ * room above it, then pasted a line cut from elsewhere. The revision diff reported the line that had
+ * merely been pushed down as deleted and re-added, because the empty block the Enter created kept
+ * the original id and the writer's own text was reissued a fresh one. plan.md's reason for stable
+ * ids -- "comments, scene navigation, revision diffs, imports/exports, and future storyboard links
+ * even when content is reordered" -- is exactly what that breaks.
+ */
+describe('split identity follows content, not position', () => {
+  function idsAndText(editor: Editor): Array<{ id: unknown; text: string }> {
+    const result: Array<{ id: unknown; text: string }> = [];
+    editor.state.doc.forEach((node) => result.push({ id: node.attrs.id, text: node.textContent }));
+    return result;
+  }
+
+  function idOfTextIn(editor: Editor, text: string): unknown {
+    return idsAndText(editor).find((block) => block.text === text)?.id;
+  }
+
+  function everyIdUnique(editor: Editor): boolean {
+    const ids = idsAndText(editor).map((block) => String(block.id));
+    return new Set(ids).size === ids.length;
+  }
+
+  it('leaves a line its own id when Enter at its very start pushes it down', () => {
+    const { editor, mount } = buildEditor([
+      { element: 'action', text: 'TOP LINE' },
+      { element: 'action', text: 'SECOND LINE' },
+    ]);
+    const originalId = editor.state.doc.firstChild?.attrs.id;
+
+    pressEnterAt(editor, 0);
+
+    // The writer's text keeps the identity; the empty line they just created is what is new.
+    expect(idOfTextIn(editor, 'TOP LINE')).toBe(originalId);
+    expect(idOfTextIn(editor, '')).not.toBe(originalId);
+    expect(everyIdUnique(editor)).toBe(true);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('leaves the id on the first half when Enter splits mid-text, which is unchanged', () => {
+    const { editor, mount } = buildEditor([{ element: 'action', text: 'TOPLINE' }]);
+    const originalId = editor.state.doc.firstChild?.attrs.id;
+
+    pressEnterAt(editor, 3);
+
+    // Here the first half genuinely is the original line continuing, and the second half is new
+    // material -- the opposite of the case above, and the reason this is a content rule rather than
+    // a blanket "the later half wins".
+    expect(idOfTextIn(editor, 'TOP')).toBe(originalId);
+    expect(idOfTextIn(editor, 'LINE')).not.toBe(originalId);
+    expect(everyIdUnique(editor)).toBe(true);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('leaves the id on the text when Enter at the end opens a new line below', () => {
+    const { editor, mount } = buildEditor([{ element: 'action', text: 'TOP LINE' }]);
+    const originalId = editor.state.doc.firstChild?.attrs.id;
+
+    pressEnterAt(editor, 'TOP LINE'.length);
+
+    expect(idOfTextIn(editor, 'TOP LINE')).toBe(originalId);
+    expect(idOfTextIn(editor, '')).not.toBe(originalId);
+    expect(everyIdUnique(editor)).toBe(true);
+    editor.destroy();
+    mount.remove();
+  });
+
+  it('never moves one block id onto another block surviving text across a two-block selection', () => {
+    const { editor, mount } = buildEditor([
+      { element: 'action', text: 'FIRST' },
+      { element: 'action', text: 'SECOND' },
+    ]);
+    const firstId = editor.state.doc.firstChild?.attrs.id;
+
+    // From the very start of the first block through the middle of the second: the prefix is empty,
+    // which is the condition the start-of-line case keys on, but the surviving suffix belongs to a
+    // *different* block. Moving the first block's id onto it would be a second identity bug.
+    const selection = TextSelection.create(editor.state.doc, 1, editor.state.doc.content.size - 3);
+    editor.view.dispatch(editor.state.tr.setSelection(selection));
+    editor.view.someProp('handleKeyDown', (handler) =>
+      handler(editor.view, new KeyboardEvent('keydown', { key: 'Enter' })),
+    );
+
+    expect(idOfTextIn(editor, 'ND')).not.toBe(firstId);
+    expect(everyIdUnique(editor)).toBe(true);
     editor.destroy();
     mount.remove();
   });
