@@ -192,6 +192,7 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
       onOpenRevisionHistory,
       onOpenSharing,
       onReloadRestoredDocument,
+      viewerRole,
     }: {
       entitlementReadOnly?: {
         cooldownUntil?: string;
@@ -207,11 +208,19 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
       onOpenRevisionHistory?: () => void;
       onOpenSharing?: () => void;
       onReloadRestoredDocument?: () => void;
+      viewerRole?: 'owner' | 'editor' | 'reviewer';
     }) => {
       const [mountId] = react.useState(() => ++routeState.editorMounts);
       return (
         <div data-testid="editor-instance">
           <span>{`${mountId}:${initial.title}`}</span>
+          {/* The screenplay-invitations slice's read-only fix: the route hands the editor the
+              viewer's own effective role, and `App` ranks `'reviewer'` ahead of entitlement as a
+              read-only reason (App.tsx's `viewerRole` and `readOnlyReason`). Surfaced here so a
+              route test can prove the route actually threads it -- deleting that one prop would
+              otherwise leave every App-level assertion green. `App.test.tsx` owns what the real
+              component does with it. */}
+          {viewerRole !== undefined && <span data-testid="viewer-role">{viewerRole}</span>}
           {entitlementReadOnly && (
             <div data-testid="entitlement-readonly">
               <p>{entitlementReadOnly.message}</p>

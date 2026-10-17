@@ -712,3 +712,169 @@ Mutation-tested: restoring the separate section fails exactly that new test and 
 
 **Gates after the change:** lint 0, format:check 0, typecheck 0, `pnpm test` 0 (web 920, api 317),
 `test:system:persistence` 36/36, `test:system` 40/40.
+
+## Three defects from the owner's own testing of this branch
+
+Found by the owner running the branch with a second account. Three logically separate fixes, kept
+separable for separate commits: the two editor ones share `App.tsx`, and the menu one touches
+nothing either of them does.
+
+### Fix 1 — a reviewer could type into a screenplay they may only read
+
+The owner, with a pro subscription and view-only access: "it still seems to let them try to make
+changes, but just doesn't sync and gives the error 'Unsupported local editor node: invalid screenplay
+block.'"
+
+`App.tsx`'s `editingAllowed` combined four reasons -- schema support, entitlement, historical
+revision, restored epoch -- and a fifth from the sync gate, and **never consulted the viewer's role
+at all**. The role was enforced in exactly one place: the collaboration socket, where
+`resolveConnectionAuthorization` (`apps/collab/src/authenticate.ts`) answers `readOnly: true` for a
+reviewer and the server refuses their updates. So a reviewer typed, every write was refused, the local
+document drifted away from the shared one, and the projection eventually reported an unmappable node.
+The server authority held; the editor simply never asked it anything.
+
+**Refusing the keystroke is the fix.** The route already had the fact needed: this slice put the
+viewer's effective role on `GET /api/screenplays/:id` for the File menu's "Share…", and the live
+screenplay route now also hands it to the editor as `viewerRole`. `App` derives `roleReadOnly` from
+it and lists it _first_ in `editingAllowed`, which is the one flag that sets ProseMirror's `editable`,
+disables the element selector and undo/redo, and drops `contentEditable` from the title page's
+fields. The two independent guards behind the DOM -- `changeElement` and `updateTitlePageState`, both
+of which dispatch without consulting any `disabled` attribute -- are gated on the same flag and so
+pick the role up for free.
+
+**The role is passed as the role, not as a precomputed read-only decision.** The route could have
+folded a reviewer into `entitlementReadOnly` and changed nothing in `App`. That shape makes the
+component that actually gates editing depend on a route remembering to supply a message: a route that
+forgot would produce an editable editor for a reviewer, which is the defect again. Ranking the two
+reasons inside `App` means the editor cannot be editable for a reviewer for any reason.
+
+**On the projection error itself: not separately investigated, as scoped.** What can be stated is
+that every path by which a reviewer's _own_ input reached the local document is now closed --
+Tiptap's `editable: false` (set at construction and by the `setEditable` effect on any later flip),
+the disabled selector plus `changeElement`'s guard, disabled undo/redo, and the title page's
+`readOnly`. What is **not** claimed is that the message is unreachable in general: the projection runs
+over the shared document's contents whatever their origin, so a remotely-authored block this editor
+cannot map would still produce it, for a reviewer and an owner alike. That path is pre-existing, is
+not role-specific, and this fix does not touch it.
+
+### Fix 2 — the read-only banner named the wrong reason
+
+The owner, on a free account with view-only access, was shown "Your subscription has ended and a
+different screenplay is currently your account's editable one. You can still read and export this
+one," beside a "Make this one editable" button. His note: "that is not necessarily accurate."
+
+He is right, and the interesting part is that the sentence was _true_ -- a free account's single
+editable slot genuinely was elsewhere -- while still being the wrong answer to "why can't I edit
+this?". He is a reviewer. He could not edit this screenplay on any subscription, so no entitlement
+state explains it and the remedy offered cannot help: spending the account's editable slot here would
+leave him exactly as read-only as before.
+
+**The reasons are now ranked, not additive.** Role-based read-only outranks entitlement-based,
+because it holds whatever the subscription does. `readOnlyReason` is that ranking in one expression,
+and the banner and the status bar both read it instead of reading `entitlementReadOnly` directly.
+
+**No fourth banner.** The lapse-chooser slice's `.readonly-banner` already renders a message with an
+_optional_ action, and a reviewer's reason is exactly that minus the action -- so the reviewer reason
+is expressed in `EntitlementReadOnly`'s own shape, carrying only a `message`. The existing markup
+then offers no make-editable button for precisely the reason it already omits one for a
+non-candidate screenplay, and the established `role="status"` pattern is reused unchanged. An owner
+or editor whose entitlement has lapsed is untouched: `roleReadOnly` is `false` for them, and they
+keep the message, the action and the cooldown notice they already had.
+
+**The entitlement sentence is suppressed, not merely demoted below the role's.** Two reasons on
+screen at once would leave the reviewer guessing which to act on, and only one of them is why --
+the same rule `documentRestored` already applies to every other banner.
+
+**One thing was fixed beyond the banner**: the status bar said "Read-only · make this screenplay
+editable to save changes here", which is the misleading remedy in miniature. A reviewer now gets
+"Read-only · you have view-only access to this screenplay". The three sync-gate banner conditions
+were also switched from `entitlementReadOnly === undefined` to `readOnlyReason === undefined`, which
+is what keeps "exactly one banner is ever true" -- the invariant that expression's own comment
+asserts -- true for a reviewer as well.
+
+### Fix 3 — every dropdown in the application was dead in Safari (pre-existing)
+
+**Not caused by the invitations work.** This is in this slice only because the owner found it here:
+"On safari it seems like there are bigger issues. None of the dropdown buttons seem to work, whether
+its the 'manage subscriptions' link or the delete or share buttons on the project."
+
+`OverflowMenu` closed on blur, treating `relatedTarget` not being inside the wrapper as "focus left
+the menu". **WebKit does not focus a `<button>` that is pressed with a mouse.** So pressing any item
+blurred whatever had focus with `relatedTarget === null`, `contains(null)` answered `false`, the menu
+closed on `focusout`, and the item unmounted before its `click` was ever dispatched. Every item of
+every `OverflowMenu` in the application was therefore inert in Safari, across menus with nothing to
+do with each other -- which is exactly the symptom reported.
+
+**Focus is the wrong signal.** "Where did focus go" has a browser-specific answer, and on one major
+engine the answer for a click on a menu item is "nowhere". Two document-level listeners replace the
+blur handler, neither of which asks:
+
+- **`pointerdown` outside the wrapper closes it.** This is the signal that actually means "the writer
+  is interacting with something else", it is identical in every engine, and it fires before `click`,
+  so a press on another menu's trigger dismisses this one before that trigger's own handler opens it.
+  A press inside the wrapper -- the trigger included -- is left alone, which keeps the trigger's own
+  `onClick` the single thing that toggles it shut rather than a close-then-reopen race.
+- **`focusin` on a control outside it closes it**, which is what keeps Tab-ing out of the menu
+  dismissing it: the one behaviour worth keeping from the blur handler. Focus landing on
+  `document.body` is excluded, because that means focus went _nowhere_ -- which is what WebKit does
+  to a pressed button, i.e. the same defect wearing a different event name. An outside press is what
+  dismisses the menu in that case.
+
+Both are registered in the capture phase, so a descendant calling `stopPropagation` cannot leave a
+menu stuck open, and only while the menu is open.
+
+**The keyboard behaviour is untouched.** The disabled-first-item opening focus, the arrow keys
+skipping disabled items, and Escape on both the list and the trigger are all unchanged, and their
+tests pass unmodified.
+
+### Tests
+
+**Fix 1** -- `App.test.tsx`'s new `role-driven read-only` suite, asserting through the same mechanism
+every other read-only reason here is asserted through: ProseMirror's own `contenteditable`, which is
+what `editable: editingAllowed` sets. Deliberately not through anything about the projection, which
+is a symptom rather than the thing being fixed. A reviewer with **no** `entitlementReadOnly` at all
+is read-only (so the role is the only thing that can be doing it); an editor and an owner stay
+editable (so the gate names reviewers and not everyone); and `fireEvent.change` on the element
+selector proves `changeElement`'s guard is load-bearing past the `disabled` attribute.
+
+**Fix 2** -- in the same suite, the owner's exact state: reviewer role _and_ a lapsed entitlement
+carrying a live `onMakeEditable`. The banner states view-only access, is the same `.readonly-banner`
+with `role="status"`, the lapse sentence is absent, no "Make this one editable" button exists, and
+the status bar carries the role's line rather than the entitlement's. Its companion asserts the
+lapsed **owner** is unchanged -- same sentence, same status line, button present, enabled, and
+calling through on click.
+
+**The route wiring** has its own test (`hands the viewer's role to the editor, for every role`).
+Without it, deleting `viewerRole={fetched.role}` from the route would leave every assertion in
+`App.test.tsx` green, since that suite supplies the prop itself.
+
+**Fix 3** -- `OverflowMenu.test.tsx` gained three. The central one dispatches the sequence Safari
+dispatches, by hand: pointer and mouse events on the item, a `focusout` carrying `relatedTarget:
+null` from the element that _was_ focused, a `focusin` on `document.body` for the WebKit variant that
+surfaces the cleared focus that way, and only then `click` -- with the clicked button deliberately
+never focused. `userEvent.click` cannot express this, because jsdom's and user-event's model of a
+click _does_ focus the button, which is precisely the behaviour Safari lacks; that is why all
+eighteen existing tests in that file passed with the bug present. The other two cover the two halves
+of the replacement: an outside pointer press that moves no focus still dismisses, and Tab-ing out of
+the menu still dismisses.
+
+**Mutation-tested, each against the suite that owns the property.**
+
+- Deleting `!roleReadOnly &&` from `editingAllowed`: `App.test.tsx` 2 failed / 91 passed -- the two
+  reviewer read-only tests. The banner test stayed green, which is the point: the two properties are
+  asserted independently rather than one assertion standing in for both.
+- Restoring the blur-based close in `OverflowMenu`: `OverflowMenu.test.tsx` 1 failed / 20 passed --
+  the Safari-shape test, failing on `onSelect` never having been called, because the menu is already
+  gone by the time `click` arrives. It was written against the unfixed component and observed to fail
+  there first, so it demonstrably would have caught the original.
+
+**Not proven: Safari itself.** The browser suites run Chromium (`test:system` and
+`test:system:persistence`, including the real-browser delete-from-overflow-menu test, all pass with
+the new listeners). The WebKit behaviour is reproduced in jsdom from its documented event sequence,
+not observed in Safari by this work. The owner has a Safari to confirm it in; nothing here can.
+
+**Gates:** lint 0, format:check 0, typecheck 0, `pnpm test` 0 (web 929 -- 920 + 9 new, api 317,
+collab 139, database 52, screenplay 172, screenplay-editor 113), `test:coverage` 0,
+`check:bundle-budget` 0 (entry 111.95 kB, lazy editor 144.92 kB), `test:integration` 0 (11 + 76 +
+32), `test:system:persistence` 36/36 first run (no re-run needed -- neither known flake failed),
+`test:system` 40/40.

@@ -2756,3 +2756,160 @@ describe('entitlement-driven read-only', () => {
     expect(screen.queryByRole('button', { name: 'Add author line' })).not.toBeInTheDocument();
   });
 });
+
+/**
+ * The screenplay-invitations slice (`progress/screenplay-invitations.md`). Until this, the viewer's
+ * membership role was consulted only at the collaboration socket --
+ * `resolveConnectionAuthorization` (apps/collab/src/authenticate.ts) answers `readOnly: true` for a
+ * reviewer and the server refuses their updates -- while this editor accepted their keystrokes
+ * regardless. The owner reproduced the consequence directly: "it still seems to let them try to
+ * make changes, but just doesn't sync and gives the error 'Unsupported local editor node: invalid
+ * screenplay block.'"
+ *
+ * These assert the role through the same mechanism every other read-only reason here is asserted
+ * through -- ProseMirror's own `contenteditable`, which is what `editable: editingAllowed` sets --
+ * rather than through anything about the projection, which is a symptom of the divergence and not
+ * the thing being fixed.
+ */
+describe('role-driven read-only', () => {
+  const script = persistedScreenplay(
+    '7777aaaa-0000-4000-8000-000000000007',
+    'A Shared Draft',
+    'INT. APARTMENT - MORNING',
+  );
+  const scriptBlockId = '7777aaaa-8d05-4e6e-bac7-e471e8df33a1';
+
+  it('renders visibly read-only for a reviewer with no entitlement objection at all', async () => {
+    render(<App initial={script} viewerRole="reviewer" />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    // No `entitlementReadOnly` is passed, so the role is the only thing that can make this
+    // read-only: deleting `!roleReadOnly` from `editingAllowed` (App.tsx) turns this
+    // `contenteditable` back on, which is the exact divergence the owner hit.
+    expect(screen.getByRole('textbox', { name: 'Screenplay editing canvas' })).not.toHaveAttribute(
+      'contenteditable',
+      'true',
+    );
+    // Visibly read-only, not blank or broken: the manuscript stays fully present and legible, the
+    // same bar the entitlement case clears.
+    expect(
+      within(screen.getByRole('textbox', { name: 'Screenplay editing canvas' })).getByText(
+        'INT. APARTMENT - MORNING',
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText('Read-only · you have view-only access to this screenplay'),
+    ).toBeVisible();
+  });
+
+  it('leaves an editor and an owner editable, so the role gate names reviewers and not everyone', async () => {
+    const { rerender } = render(<App initial={script} viewerRole="editor" />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    expect(screen.getByRole('textbox', { name: 'Screenplay editing canvas' })).toHaveAttribute(
+      'contenteditable',
+      'true',
+    );
+
+    rerender(<App initial={script} viewerRole="owner" />);
+    expect(screen.getByRole('textbox', { name: 'Screenplay editing canvas' })).toHaveAttribute(
+      'contenteditable',
+      'true',
+    );
+  });
+
+  it('refuses a reviewer the element-conversion path that bypasses the disabled attribute', async () => {
+    // The companion to the entitlement suite's own version of this: `changeElement`'s
+    // `!editingAllowed` guard, not the `<select disabled>`, is what actually stops a ProseMirror
+    // transaction being dispatched, and `fireEvent.change` is what reaches past the attribute.
+    render(<App initial={script} viewerRole="reviewer" />);
+    const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Active screenplay element' }), {
+      target: { value: 'shot' },
+    });
+
+    expect(getBlock(canvas, scriptBlockId)).toHaveAttribute(
+      'data-screenplay-element',
+      'scene_heading',
+    );
+  });
+
+  /**
+   * The owner's second defect, in exactly the state he was in: a free account (so the entitlement
+   * reason is genuinely true as well) holding reviewer access to this screenplay, with the account's
+   * single editable slot pointing somewhere else. He was told "Your subscription has ended and a
+   * different screenplay is currently your account's editable one" and offered "Make this one
+   * editable" -- "that is not necessarily accurate". It is not why this screenplay is read-only, and
+   * the action cannot help: a reviewer who spent their editable slot here would still be a reviewer.
+   */
+  it('tells a reviewer they have view-only access, and offers no make-editable action, even when the account is also lapsed and this screenplay is a candidate', async () => {
+    const onMakeEditable = vi.fn().mockResolvedValue(undefined);
+    render(
+      <App
+        entitlementReadOnly={{
+          message:
+            'Your subscription has ended and a different screenplay is currently your account’s editable one. You can still read and export this one.',
+          onMakeEditable,
+        }}
+        initial={script}
+        viewerRole="reviewer"
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    // Reuses the lapse-chooser slice's established banner mechanics rather than inventing a fourth
+    // banner: the same `.readonly-banner` element, the same `role="status"`.
+    const banner = screen
+      .getByText(/You have view-only access to this screenplay/)
+      .closest('.readonly-banner');
+    expect(banner).not.toBeNull();
+    expect(banner).toHaveAttribute('role', 'status');
+    // The entitlement sentence is suppressed, not merely outranked in the ordering: two reasons on
+    // screen would leave the reviewer guessing which one to act on, and only one of them is why.
+    expect(screen.queryByText(/Your subscription has ended/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Make this one editable' }),
+    ).not.toBeInTheDocument();
+    expect(onMakeEditable).not.toHaveBeenCalled();
+    // The status bar carries the same correction: "make this screenplay editable" is not a remedy
+    // this viewer has.
+    expect(
+      screen.getByText('Read-only · you have view-only access to this screenplay'),
+    ).toBeVisible();
+    expect(
+      screen.queryByText('Read-only · make this screenplay editable to save changes here'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('leaves a lapsed owner’s banner, action and status line exactly as they were', async () => {
+    const onMakeEditable = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <App
+        entitlementReadOnly={{
+          message:
+            'Your subscription has ended and a different screenplay is currently your account’s editable one. You can still read and export this one.',
+          onMakeEditable,
+        }}
+        initial={script}
+        viewerRole="owner"
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    expect(
+      screen.getByText(/Your subscription has ended and a different screenplay/),
+    ).toBeVisible();
+    expect(
+      screen.getByText('Read-only · make this screenplay editable to save changes here'),
+    ).toBeVisible();
+    expect(
+      screen.queryByText(/You have view-only access to this screenplay/),
+    ).not.toBeInTheDocument();
+
+    const action = screen.getByRole('button', { name: 'Make this one editable' });
+    expect(action).toBeEnabled();
+    await user.click(action);
+    expect(onMakeEditable).toHaveBeenCalledOnce();
+  });
+});

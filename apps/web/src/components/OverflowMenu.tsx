@@ -48,16 +48,17 @@ export function OverflowMenu({
   label: string;
   /**
    * Notified on every open/close transition, from every path that changes it (the trigger toggle,
-   * ArrowDown, Escape, selecting an item, or losing focus) -- optional, and a no-op for every
-   * caller that doesn't need it. Added for the account menu (routes/projects/index.tsx), which
-   * defers fetching billing/entitlement state until the menu is actually opened once rather than
-   * on every page load: that state is only ever shown inside this menu, so there is no reason to
+   * ArrowDown, Escape, selecting an item, an outside pointer press, or focus moving to a control
+   * outside the menu) -- optional, and a no-op for every caller that doesn't need it. Added for the
+   * account menu (routes/projects/index.tsx), which defers fetching billing/entitlement state until
+   * the menu is actually opened once rather than on every page load: that state is only ever shown inside this menu, so there is no reason to
    * pay for it before a writer has expressed any interest in it.
    */
   onOpenChange?: (open: boolean) => void;
   triggerContent?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   // Guards the mount-time run of the `onOpenChange` effect below -- see that effect's own
@@ -89,6 +90,55 @@ export function OverflowMenu({
   useEffect(() => {
     if (!open) return;
     focusableItems()[0]?.focus();
+  }, [open]);
+
+  /**
+   * Dismissal by anything other than the keyboard or an item's own activation. This was an `onBlur`
+   * on the wrapper that closed whenever `relatedTarget` was not inside it, and that made every item
+   * of every `OverflowMenu` in the application inert in Safari -- the owner's "none of the dropdown
+   * buttons seem to work, whether its the 'manage subscriptions' link or the delete or share
+   * buttons". WebKit does not focus a `<button>` that is pressed with a mouse, so pressing an item
+   * blurred whatever had focus with `relatedTarget === null`, `contains(null)` answered `false`, the
+   * menu closed on `focusout`, and the item unmounted before its `click` was ever dispatched. Focus
+   * is simply the wrong signal: "where did focus go" is a browser-specific answer, and on one major
+   * engine the answer for a click on a menu item is "nowhere".
+   *
+   * Two document-level listeners replace it, neither of which asks where focus went:
+   *
+   * - `pointerdown` outside this menu closes it. This is the signal that actually means "the writer
+   *   is interacting with something else", it is identical in every engine, and it fires *before*
+   *   `click`, so a press on a different menu's trigger dismisses this one before that trigger's own
+   *   handler opens it. A press *inside* the wrapper -- including on the trigger itself -- is left
+   *   alone, so the trigger's own `onClick` stays the single thing that toggles it shut.
+   * - `focusin` on a control outside this menu closes it, which is what keeps Tab-ing out of the
+   *   menu dismissing it (the behaviour the blur handler also provided, and the one thing worth
+   *   keeping from it). Focus landing on `document.body` is excluded: that means focus went
+   *   *nowhere*, which is exactly what WebKit does to a pressed button, and is the defect above
+   *   wearing a different event name. An outside press is what dismisses the menu in that case.
+   *
+   * Both are registered in the capture phase so a descendant calling `stopPropagation` cannot leave
+   * a menu stuck open, and only while `open` -- a closed menu has nothing to listen for.
+   */
+  useEffect(() => {
+    if (!open) return;
+
+    function isInsideMenu(target: EventTarget | null): boolean {
+      return containerRef.current?.contains(target as Node | null) ?? false;
+    }
+    function handlePointerDown(event: Event) {
+      if (!isInsideMenu(event.target)) setOpen(false);
+    }
+    function handleFocusIn(event: FocusEvent) {
+      if (event.target === document.body) return;
+      if (!isInsideMenu(event.target)) setOpen(false);
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown, true);
+    document.addEventListener('focusin', handleFocusIn, true);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown, true);
+      document.removeEventListener('focusin', handleFocusIn, true);
+    };
   }, [open]);
 
   // Reports transitions, not the initial render. `onOpenChange` was previously called from
@@ -130,12 +180,7 @@ export function OverflowMenu({
   }
 
   return (
-    <div
-      className="overflow-menu"
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
-      }}
-    >
+    <div className="overflow-menu" ref={containerRef}>
       <button
         aria-expanded={open}
         aria-haspopup="menu"

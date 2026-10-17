@@ -279,6 +279,21 @@ describe('screenplay page', () => {
       expect(dialog).toHaveTextContent(/this screenplay only/i);
     });
 
+    /**
+     * The same `role` field, used for the other decision it governs: the editor's own read-only
+     * state. The route must hand it down as `viewerRole` -- without it, `App` cannot refuse a
+     * reviewer's keystrokes and every assertion in `App.test.tsx`'s own role suite still passes,
+     * because that suite supplies the prop itself.
+     */
+    it('hands the viewer’s role to the editor, for every role', async () => {
+      for (const role of ['owner', 'editor', 'reviewer'] as const) {
+        setQueries(screenplayWithRole(role));
+        const { unmount } = render(<ScreenplayPage />);
+        expect(await screen.findByTestId('viewer-role')).toHaveTextContent(role);
+        unmount();
+      }
+    });
+
     it('is offered regardless of entitlement -- a lapsed subscription is not a reason not to share', async () => {
       // Sharing is not an edit to the document. A read-only screenplay is read-only because of
       // billing state, which has nothing to say about whether its owner may invite a collaborator.

@@ -62,7 +62,7 @@ import { ApplicationShell, ApplicationTitlebar } from './applicationShell.js';
 import { ApplicationToolbar } from './applicationToolbar.js';
 import { InspectorPanel } from './inspectorPanel.js';
 import { NavigatorPanel } from './navigatorPanel.js';
-import { api, MessageApiError, type PersistedScreenplay } from './api.js';
+import { api, MessageApiError, type EffectiveRole, type PersistedScreenplay } from './api.js';
 import { COLLAB_WS_URL } from './collabConfig.js';
 import { applyPageGeometryCssVariables } from './pageGeometryCss.js';
 import { TitlePageView } from './titlePageEditor.js';
@@ -250,6 +250,15 @@ const editorProps = {
  * that actually holds the account's entitlement snapshot -- `App` has no way to know whether this
  * screenplay is even a candidate the account could choose, so it never guesses.
  */
+/**
+ * Shown verbatim in the read-only banner when the viewer's own role on this screenplay is
+ * `reviewer` (`viewerRole` below). Says what is true of the *role* and offers no remedy, because
+ * there is none a reviewer can reach: no subscription state changes this, and the account's own
+ * editable slot has nothing to do with it.
+ */
+const REVIEWER_READ_ONLY_MESSAGE =
+  'You have view-only access to this screenplay. You can read and export it, but only someone with editing access can change it.';
+
 export interface EntitlementReadOnly {
   /** Why this screenplay can't be edited right now, shown verbatim in the read-only banner. */
   message: string;
@@ -332,6 +341,7 @@ export function App({
   onOpenRevisionHistory,
   onOpenSharing,
   onReloadRestoredDocument,
+  viewerRole,
 }: {
   entitlementReadOnly?: EntitlementReadOnly | undefined;
   historicalRevision?: HistoricalRevisionInfo | undefined;
@@ -368,6 +378,26 @@ export function App({
    * a provider in place.
    */
   onReloadRestoredDocument?: () => void;
+  /**
+   * The viewer's own effective role on this screenplay, from the same
+   * `GET /api/screenplays/:id` response that authorized the read (api.ts's
+   * `screenplayResponseSchema.role`). Supplied by the live screenplay route; `undefined` for the
+   * historical-revision preview and for every test that does not pass it, which raises no objection
+   * of its own and so leaves those callers' behaviour exactly as it was.
+   *
+   * `'reviewer'` is read-only, and is read-only *more fundamentally* than `entitlementReadOnly` is:
+   * a reviewer could not edit this screenplay on any subscription, so no entitlement state and no
+   * choice of editable screenplay changes the answer. `editingAllowed` and `readOnlyReason` below
+   * are where that is actually enforced and explained, in that order of precedence.
+   *
+   * This exists because the role was previously consulted *only* at the socket --
+   * `resolveConnectionAuthorization` (apps/collab/src/authenticate.ts) returns `readOnly: true` for a
+   * reviewer and the server refuses their updates -- while nothing stopped this editor accepting
+   * their keystrokes locally. A reviewer could type, every write was refused, and the local document
+   * diverged from the shared one until the projection reported an unsupported node. Refusing the
+   * keystroke is the fix; the refusal at the socket remains the authority, not this.
+   */
+  viewerRole?: EffectiveRole | undefined;
 }) {
   const [panels, setPanels] = useState<Record<Panel, boolean>>({
     navigator: true,
@@ -565,12 +595,42 @@ export function App({
   // restore. The server already refuses this tab's writes (`apps/collab`'s stale-epoch read-only
   // forcing), so this is not what keeps the restored screenplay safe -- it is what stops the writer
   // typing into a document whose keystrokes are being set aside rather than saved.
+  //
+  // The screenplay-invitations slice adds a fifth reason, and the most fundamental of them:
+  // `roleReadOnly` means this viewer's own membership role on this screenplay is `reviewer`. It is
+  // listed before `entitlementReadOnly` because it outranks it -- a reviewer could not edit this
+  // screenplay on any subscription -- and it is a distinct term rather than something the route
+  // folds into `entitlementReadOnly` so that this component, which is the thing that actually
+  // hands ProseMirror `editable`, can never be editable for a reviewer because a route forgot to
+  // pass a message. See `viewerRole`'s own comment for the divergence this closes.
+  const roleReadOnly = viewerRole === 'reviewer';
   const editingAllowed =
     initialContent !== undefined &&
+    !roleReadOnly &&
     entitlementReadOnly === undefined &&
     historicalRevision === undefined &&
     restoredEpoch === undefined &&
     (syncState === 'synced' || syncState === 'offline');
+  /**
+   * Which read-only reason the banner and the status bar actually report, ranked rather than
+   * additive -- the owner's defect: a reviewer on a free account was told "Your subscription has
+   * ended and a different screenplay is currently your account's editable one", with a "Make this
+   * one editable" action beside it. Both halves of that were wrong as an explanation. The
+   * entitlement sentence happened to be true of the account, but it is not *why* this screenplay is
+   * read-only, and the remedy it offers cannot help: switching the account's editable slot to this
+   * screenplay would leave a reviewer exactly as read-only as before.
+   *
+   * So role wins when both hold. It is expressed in `EntitlementReadOnly`'s own shape deliberately,
+   * rather than as a fourth banner: the lapse-chooser slice's `.readonly-banner` already renders a
+   * message with an optional action, and a reviewer's reason is exactly that minus the action --
+   * `onMakeEditable` and `cooldownUntil` are both absent, so the existing markup offers no
+   * make-editable button for precisely the reason it already omits one for a non-candidate
+   * screenplay. An owner or editor whose entitlement has lapsed is untouched: `roleReadOnly` is
+   * `false` for them, and they keep the message, the action and the cooldown notice they had.
+   */
+  const readOnlyReason: EntitlementReadOnly | undefined = roleReadOnly
+    ? { message: REVIEWER_READ_ONLY_MESSAGE }
+    : entitlementReadOnly;
   const editorContent = useMemo(() => {
     if (initialContent === undefined) return initialContent;
     return nonEmptyEditorContent(initialContent);
@@ -1608,10 +1668,10 @@ export function App({
   // which is what actually makes the editor editable -- this function never flips `editingAllowed`
   // itself.
   const makeEditable = () => {
-    if (!entitlementReadOnly?.onMakeEditable) return;
+    if (!readOnlyReason?.onMakeEditable) return;
     setMakeEditableState('pending');
     setMakeEditableError(undefined);
-    entitlementReadOnly.onMakeEditable().then(
+    readOnlyReason.onMakeEditable().then(
       () => setMakeEditableState('idle'),
       (error: unknown) => {
         setMakeEditableState('error');
@@ -1749,14 +1809,14 @@ export function App({
   // initializer and the sync-reporting effect below both key off `collab.provider`'s presence,
   // and that case's `collab` never constructs a real provider).
   const awaitingFirstSync =
-    initialContent !== undefined && entitlementReadOnly === undefined && syncState === 'connecting';
+    initialContent !== undefined && readOnlyReason === undefined && syncState === 'connecting';
   // The sync gate's other two banner reasons, same mutual-exclusion rule as `awaitingFirstSync`
   // above (only one of `entitlementReadOnly`/`awaitingFirstSync`/`syncDenied`/`syncTimedOut` is
   // ever true at a time, since they all key off disjoint `syncState` values or its absence).
   const syncDenied =
-    initialContent !== undefined && entitlementReadOnly === undefined && syncState === 'denied';
+    initialContent !== undefined && readOnlyReason === undefined && syncState === 'denied';
   const syncTimedOut =
-    initialContent !== undefined && entitlementReadOnly === undefined && syncState === 'timedOut';
+    initialContent !== undefined && readOnlyReason === undefined && syncState === 'timedOut';
 
   // The banner row -- `ApplicationShell`'s `banner` slot (applicationShell.tsx). One expression,
   // not two: this used to be a `has-readonly-banner` modifier class computed here from these five
@@ -1773,7 +1833,7 @@ export function App({
   const documentRestored = restoredEpoch !== undefined;
   const banner =
     documentRestored ||
-    entitlementReadOnly ||
+    readOnlyReason ||
     historicalRevision ||
     awaitingFirstSync ||
     syncDenied ||
@@ -1825,18 +1885,23 @@ export function App({
             )}
           </div>
         )}
-        {!documentRestored && entitlementReadOnly && (
+        {!documentRestored && readOnlyReason && (
           // Persistent, not dismissible: plan.md's lapse policy means this state does not resolve
           // itself, so nothing here ever offers a way to hide it without actually addressing it.
           // Rendered above the toolbar so it is visible regardless of which panels are open or
           // closed -- the one thing on this screen every read-only visit must see.
+          //
+          // One banner for both read-only reasons, ranked by `readOnlyReason` above rather than two
+          // sets of markup: a reviewer's reason arrives here carrying only a `message`, so the
+          // action and the cooldown notice below are absent for them by construction. See
+          // `readOnlyReason`'s own comment for why the role's reason outranks the entitlement's.
           <div className="readonly-banner" role="status">
-            <p>{entitlementReadOnly.message}</p>
-            {entitlementReadOnly.onMakeEditable && (
+            <p>{readOnlyReason.message}</p>
+            {readOnlyReason.onMakeEditable && (
               <button
                 className="primary-button"
                 disabled={
-                  makeEditableState === 'pending' || entitlementReadOnly.cooldownUntil !== undefined
+                  makeEditableState === 'pending' || readOnlyReason.cooldownUntil !== undefined
                 }
                 onClick={makeEditable}
                 type="button"
@@ -1844,15 +1909,14 @@ export function App({
                 Make this one editable
               </button>
             )}
-            {entitlementReadOnly.cooldownUntil !== undefined && (
+            {readOnlyReason.cooldownUntil !== undefined && (
               // Known up front, from the same `cooldownEndsAt` GET /api/entitlement already
               // returns -- the button says so before a click, rather than inviting one that the
               // server has already told this app it will refuse. See the route's own comment for
               // why this is not a client-recomputed cooldown: it is exactly the server's own value,
               // read for display, never for enforcement.
               <p className="readonly-banner-cooldown">
-                You can switch to a different screenplay again at{' '}
-                {entitlementReadOnly.cooldownUntil}.
+                You can switch to a different screenplay again at {readOnlyReason.cooldownUntil}.
               </p>
             )}
             {/* Suppressed once `cooldownUntil` arrives: the failed click's own `onMakeEditable`
@@ -1860,7 +1924,7 @@ export function App({
                 was clickable because this app's last fetch predated the cooldown) resolves into the
                 same up-front explanation above on the very next render, rather than leaving both a
                 raw server error and a redundant cooldown notice on screen at once. */}
-            {makeEditableState === 'error' && entitlementReadOnly.cooldownUntil === undefined && (
+            {makeEditableState === 'error' && readOnlyReason.cooldownUntil === undefined && (
               <p className="field-error" role="alert">
                 {makeEditableError}
               </p>
@@ -2150,24 +2214,29 @@ export function App({
           <span className="status-center" aria-live="polite">
             {initialContent === undefined
               ? 'Text editing is unavailable for this screenplay'
-              : entitlementReadOnly
-                ? 'Read-only · make this screenplay editable to save changes here'
-                : syncState === 'connecting'
-                  ? 'Connecting…'
-                  : syncState === 'denied'
-                    ? 'Access could not be confirmed · reload to try again'
-                    : syncState === 'timedOut'
-                      ? 'Still trying to connect · reload if this continues'
-                      : syncState === 'offline'
-                        ? // Yjs keeps every local edit queued and merges it in the instant the
-                          // connection recovers -- this is a connectivity report, never a warning
-                          // that work could be lost, which is exactly what distinguishes it from
-                          // the whole-document-`PUT` save-conflict state this replaces
-                          // (progress/collaboration-slice-1.md).
-                          'Offline · reconnecting… your edits are safe and will sync automatically'
-                        : projection.valid
-                          ? `Synced · ${wordCount} words · no print pagination`
-                          : `Draft needs attention · ${projection.issues[0] ?? 'Invalid screenplay data.'}`}
+              : // Ranked exactly as the banner is, and for the same reason: "make this screenplay
+                // editable" is not a remedy a reviewer has, so telling them that is the status-bar
+                // sized version of the misleading banner this slice fixed.
+                roleReadOnly
+                ? 'Read-only · you have view-only access to this screenplay'
+                : entitlementReadOnly
+                  ? 'Read-only · make this screenplay editable to save changes here'
+                  : syncState === 'connecting'
+                    ? 'Connecting…'
+                    : syncState === 'denied'
+                      ? 'Access could not be confirmed · reload to try again'
+                      : syncState === 'timedOut'
+                        ? 'Still trying to connect · reload if this continues'
+                        : syncState === 'offline'
+                          ? // Yjs keeps every local edit queued and merges it in the instant the
+                            // connection recovers -- this is a connectivity report, never a warning
+                            // that work could be lost, which is exactly what distinguishes it from
+                            // the whole-document-`PUT` save-conflict state this replaces
+                            // (progress/collaboration-slice-1.md).
+                            'Offline · reconnecting… your edits are safe and will sync automatically'
+                          : projection.valid
+                            ? `Synced · ${wordCount} words · no print pagination`
+                            : `Draft needs attention · ${projection.issues[0] ?? 'Invalid screenplay data.'}`}
           </span>
           {initialContent !== undefined && !projection.valid && (
             // Deliberately not inside `.status-center`, which the narrow-viewport media query

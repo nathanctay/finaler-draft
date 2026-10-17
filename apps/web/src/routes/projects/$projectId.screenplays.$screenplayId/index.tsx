@@ -107,6 +107,11 @@ function ScreenplayPage() {
   // read. `onOpenSharing` is supplied only when it is `owner` or `editor` -- exactly the bar
   // `apps/api`'s sharing store enforces -- so the File menu's "Share…" is present precisely when it
   // would work, and absent rather than disabled otherwise (`App.tsx`'s `onOpenSharing` comment).
+  //
+  // The same field is also handed to the editor as `viewerRole`, which is what makes a reviewer's
+  // screenplay genuinely read-only rather than merely refused at the socket -- see `App.tsx`'s own
+  // comment on that prop. It is passed as the role, not as a precomputed read-only decision, so the
+  // ranking against `entitlementReadOnly` lives in the one component that gates editing.
   const fetched = screenplay.data as FetchedScreenplay;
   const mayShare = fetched.role === 'owner' || fetched.role === 'editor';
 
@@ -145,6 +150,7 @@ function ScreenplayPage() {
         onReloadRestoredDocument={() => {
           void queryClient.invalidateQueries({ queryKey: ['screenplay', screenplayId] });
         }}
+        viewerRole={fetched.role}
       />
     </Suspense>
   );
