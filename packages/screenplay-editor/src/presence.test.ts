@@ -11,6 +11,7 @@ import {
   PRESENCE_TYPING_GLOW_MS,
   type RemoteParticipant,
 } from './presence.js';
+import { apcaContrast, PARTICIPANT_LABEL_INK, PARTICIPANT_LABEL_PAPER } from './contrast.js';
 import {
   createLocalScreenplayEditorInit,
   createLocalScreenplayYDoc,
@@ -18,6 +19,19 @@ import {
   SCREENPLAY_YJS_FRAGMENT,
   type EditorContent,
 } from './index.js';
+
+/** jsdom (and every browser) serializes an inline `color`/`background-color` back as
+ * `rgb(r, g, b)`, so an assertion that wants to *measure* what was painted has to come back to the
+ * hex form `apcaContrast` reads. Narrow on purpose: it accepts only what an inline style set from
+ * a hex literal can produce, and throws rather than guessing at anything else. */
+function toHexColor(value: string): string {
+  const match = /^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/u.exec(value.trim());
+  if (!match) throw new Error(`Not an rgb() colour: ${value}`);
+  return `#${match
+    .slice(1, 4)
+    .map((channel) => Number(channel).toString(16).padStart(2, '0'))
+    .join('')}`;
+}
 
 const simpleContent: EditorContent = {
   type: 'screenplayDocument',
@@ -154,6 +168,37 @@ describe('buildRemoteCursorWidget', () => {
     expect(label.style.backgroundColor).toBe('rgb(255, 0, 0)');
     expect(label.textContent).toBe('Mara');
   });
+
+  /*
+   * The label's text colour, which `styles.css` used to hardcode to `#fff` beside a background this
+   * builder sets from per-participant data -- so the pair could be, and for three of the eight
+   * shipped palette colours was, below 4.5:1 with nothing checking.
+   *
+   * Asserted as the *better of the two available choices*, measured against the colour this builder
+   * actually painted behind it. Not as an expected hex, and not by calling
+   * `participantLabelTextColor` again (which would only restate itself): the property is that the
+   * widget's two inline styles always agree, for any colour at all.
+   *
+   * Ranked by `apcaContrast`, which is the metric that choice is made in -- see contrast.ts. This
+   * assertion read `contrastRatio` while the choice did, and had to move with it; measuring the
+   * agreement of the pair in a metric the painter does not use would prove nothing.
+   */
+  it.each(['#ff0000', '#015a1e', '#10a2a0', '#af79e2', '#ffffff', '#000000'])(
+    'paints the label text in whichever of paper or ink reads better on %s',
+    (color) => {
+      const label = buildRemoteCursorWidget({ name: 'Mara', color }).querySelector(
+        '.remote-cursor-label',
+      ) as HTMLElement;
+      const painted = toHexColor(label.style.color);
+      expect([PARTICIPANT_LABEL_PAPER, PARTICIPANT_LABEL_INK]).toContain(painted);
+      const rejected =
+        painted === PARTICIPANT_LABEL_PAPER ? PARTICIPANT_LABEL_INK : PARTICIPANT_LABEL_PAPER;
+      const swatch = toHexColor(label.style.backgroundColor);
+      expect(Math.abs(apcaContrast(painted, swatch))).toBeGreaterThanOrEqual(
+        Math.abs(apcaContrast(rejected, swatch)),
+      );
+    },
+  );
 
   it('falls back to a generic name/colour when the sanitized user is somehow still incomplete', () => {
     const widget = buildRemoteCursorWidget({});

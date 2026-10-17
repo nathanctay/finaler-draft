@@ -14,7 +14,11 @@
  */
 import { useEffect, useState } from 'react';
 import type { Awareness } from 'y-protocols/awareness';
-import { listPresentParticipants, type RemoteParticipant } from '@finaler-draft/screenplay-editor';
+import {
+  listPresentParticipants,
+  participantLabelTextColor,
+  type RemoteParticipant,
+} from '@finaler-draft/screenplay-editor';
 
 /** How often this polls for a participant aging out of the active window with no awareness event
  * of its own to trigger a re-render -- matches the recheck cadence `presence.ts`'s own typing-glow
@@ -44,14 +48,24 @@ function useParticipants(awareness: Awareness | undefined): readonly RemoteParti
 
 /** One coloured initial. `title` (a native tooltip) carries the full name -- the same "hover to
  * find out who this is" affordance the remote-cursor caret's own label offers, kept consistent
- * rather than inventing a second disclosure pattern for the identical information. */
+ * rather than inventing a second disclosure pattern for the identical information.
+ *
+ * The initial's own colour is chosen from the participant colour behind it, by the same rule the
+ * remote cursor's name label uses (`participantLabelTextColor`, and see contrast.ts's own
+ * top-of-file comment). It used to be a hardcoded `color: #fff` in `styles.css` paired with this
+ * inline background: the same white it resolves to today for every current palette entry, but
+ * asserted blind, where no test could tell whether the palette had drifted under it. The guarantee
+ * is the check, not the colour. */
 function ParticipantAvatar({ participant }: { participant: RemoteParticipant }) {
   const initial = participant.name.trim().charAt(0).toUpperCase() || '?';
   return (
     <span
       aria-hidden="true"
       className="participant-avatar"
-      style={{ backgroundColor: participant.color }}
+      style={{
+        backgroundColor: participant.color,
+        color: participantLabelTextColor(participant.color),
+      }}
       title={participant.name}
     >
       {initial}

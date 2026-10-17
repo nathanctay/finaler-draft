@@ -2,8 +2,26 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { Awareness } from 'y-protocols/awareness';
 import * as Y from 'yjs';
-import { PRESENCE_ACTIVE_WINDOW_MS } from '@finaler-draft/screenplay-editor';
+import {
+  apcaContrast,
+  PARTICIPANT_LABEL_INK,
+  PARTICIPANT_LABEL_MINIMUM_LC,
+  PARTICIPANT_LABEL_PAPER,
+  PRESENCE_ACTIVE_WINDOW_MS,
+} from '@finaler-draft/screenplay-editor';
 import { ParticipantIndicator } from './ParticipantIndicator.js';
+
+/** An inline `color`/`background-color` comes back out of the DOM as `rgb(r, g, b)`; this returns
+ * it to the hex form `apcaContrast` reads. Throws rather than guessing, so a style that was never
+ * set fails the test instead of silently measuring black. */
+function toHexColor(value: string): string {
+  const match = /^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/u.exec(value.trim());
+  if (!match) throw new Error(`Not an rgb() colour: ${value}`);
+  return `#${match
+    .slice(1, 4)
+    .map((channel) => Number(channel).toString(16).padStart(2, '0'))
+    .join('')}`;
+}
 
 function otherAwareness(): Awareness {
   // A second `Y.Doc`/`Awareness` pair, not the one under test: `listPresentParticipants`
@@ -40,6 +58,44 @@ describe('ParticipantIndicator', () => {
     });
     expect(screen.getByText('M')).toBeVisible();
   });
+
+  /*
+   * The initial's own colour. `styles.css` used to declare `color: #fff` for `.participant-avatar`
+   * beside the inline background this component sets from awareness data -- a contrast claim about
+   * every colour the palette might ever hold, made where nothing could check it. Measured here
+   * against the swatch the component actually painted, and compared with the alternative it
+   * rejected, so the assertion is about the pair agreeing rather than about any one colour
+   * resolving a particular way.
+   *
+   * Ranked and floored in APCA, the metric `participantLabelTextColor` decides in; contrast.ts
+   * explains why, and `apps/collab/src/participantPalette.test.ts` records what that costs against
+   * WCAG's 4.5:1 on three of these eight.
+   */
+  it.each(['#b85162', '#be865b', '#887306', '#015a1e', '#10a2a0', '#345fdf', '#af79e2', '#9e0067'])(
+    'paints the initial in whichever of paper or ink reads better on %s',
+    async (color) => {
+      const awareness = new Awareness(new Y.Doc());
+      const peer = otherAwareness();
+      awareness.states.set(peer.clientID, {
+        user: { name: 'Mara Quinn', color, lastActiveAt: Date.now() },
+      });
+      render(<ParticipantIndicator awareness={awareness} />);
+      const initial = await waitFor(() => screen.getByText('M'));
+
+      const background = toHexColor(initial.style.backgroundColor);
+      const painted = toHexColor(initial.style.color);
+      expect(background).toBe(color);
+      expect([PARTICIPANT_LABEL_PAPER, PARTICIPANT_LABEL_INK]).toContain(painted);
+      const rejected =
+        painted === PARTICIPANT_LABEL_PAPER ? PARTICIPANT_LABEL_INK : PARTICIPANT_LABEL_PAPER;
+      expect(Math.abs(apcaContrast(painted, background))).toBeGreaterThanOrEqual(
+        Math.abs(apcaContrast(rejected, background)),
+      );
+      expect(Math.abs(apcaContrast(painted, background))).toBeGreaterThanOrEqual(
+        PARTICIPANT_LABEL_MINIMUM_LC,
+      );
+    },
+  );
 
   it('never shows a participant who has aged out of the active window', async () => {
     const awareness = new Awareness(new Y.Doc());

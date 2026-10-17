@@ -14,22 +14,66 @@
  */
 import type { Queryable } from './authenticate.js';
 
-/** A small, fixed, accessible palette -- not derived from CSS custom properties, since this file
- * never touches a browser: chosen for reasonable contrast against both this app's light and dark
- * manuscript backgrounds (`apps/web/src/styles.css`'s `--surface-*`/`--text-*` tokens), the same
- * bar `packages/screenplay-editor`'s remote-cursor label already has to clear. Order matters only
- * in that it must never change once shipped -- reordering would reassign every existing writer's
- * colour on the next deploy, precisely the confusion the owner's "stable per user, not session"
- * decision (presence.ts's own comment) exists to avoid. */
-const PARTICIPANT_COLOR_PALETTE = [
-  '#e11d48', // rose
-  '#ea580c', // orange
-  '#ca8a04', // amber (darkened from the usual yellow for contrast)
-  '#16a34a', // green
-  '#0d9488', // teal
-  '#2563eb', // blue
-  '#7c3aed', // violet
-  '#db2777', // pink
+/**
+ * A small, fixed palette -- not derived from CSS custom properties, since this file never touches a
+ * browser. Order matters only in that it must never change once shipped: reordering would reassign
+ * every existing writer's colour on the next deploy, precisely the confusion the owner's "stable
+ * per user, not session" decision (`packages/screenplay-editor/src/presence.ts`'s own comment)
+ * exists to avoid.
+ *
+ * Every entry is held to four measured properties, all of them computed rather than eyeballed by
+ * `participantPalette.test.ts` (that file carries the before/after numbers, and
+ * `progress/contrast-and-participant-palette.md` the argument):
+ *
+ *  1. **The caret clears 3:1 against the white manuscript sheet** (WCAG 1.4.11; the caret is a 2px
+ *     painted stripe, so it is non-text). The palette this replaced put amber at 2.94:1 -- a cursor
+ *     that was hard for *everyone* to see, independent of any colour-vision question.
+ *  2. **The name label's text clears APCA Lc 60 against the colour itself** (the set below measures
+ *     63.3 at its worst), with the text painted in whichever of paper-white or manuscript ink reads
+ *     better by that metric (`@finaler-draft/screenplay-editor`'s `participantLabelTextColor`). It
+ *     is every entry here that is dark enough for paper-white, so every label reads white. Per-
+ *     colour choice alone does not rescue an arbitrary palette -- against the previous one, orange,
+ *     green and teal failed with *either* choice -- so this constraint is on the colours, not only
+ *     on the painter.
+ *
+ *     This row was WCAG 1.4.3's 4.5:1 when the palette was chosen, and the switch to APCA is why
+ *     the colours below are no longer the ones that rule would pick: orange, teal and violet
+ *     measure 3.11-3.16:1 with the white they are now painted in, so those three labels do not meet
+ *     1.4.3 at normal text size. Deliberate, and the reasoning is in `contrast.ts`: WCAG's ratio
+ *     mis-ranks paper against ink on exactly this kind of mid-toned saturated colour, and the dark
+ *     ink it chose for those three was visibly the less legible of the two options.
+ *  3. **Each colour stays dE2000 >= 25 from the manuscript's own ink** under normal vision (the set
+ *     below measures 30.1 at its closest). This is the constraint that rules out the obvious way to
+ *     satisfy (1) and (2) together, which is to make all eight colours very dark: a near-black caret
+ *     is legible but unreadable as *someone else's*, indistinguishable from the writer's own. It is
+ *     the one property the palette this replaced did *not* fail.
+ *  4. **Mutually distinguishable under normal vision and all three dichromacies.** The palette this
+ *     replaced collapsed here: blue and violet simulate to the same colour under deuteranopia, and
+ *     green and teal nearly do under tritanopia.
+ *
+ * (1) and (2) together were a genuine squeeze while (2) was WCAG's 4.5:1, and these eight still
+ * carry its marks: a colour light enough for ink text sat in a luminance window barely 4% wide,
+ * which is why orange, teal and violet all land within a few hundredths of 3.1:1 against the sheet,
+ * and why the set as a whole is more muted than the vivid one it replaces. Under APCA that squeeze
+ * is gone -- the constraint is only "dark enough for white", which these clear with room -- but the
+ * palette was kept exactly as it was, because the owner had already judged these colours by eye and
+ * wanted them. Retuning it now would only be to satisfy a metric no longer being used.
+ *
+ * The alternative considered and rejected -- a fixed dark label background with the participant
+ * colour as a mere accent, which would leave only (1) binding -- measured *worse*, not better: an
+ * accent must also clear 3:1 against that dark label, which squeezes every colour into a narrower
+ * luminance band than (1) and (2) do, and luminance is the one channel dichromats still have. See
+ * `progress/contrast-and-participant-palette.md` for both sets of numbers.
+ */
+export const PARTICIPANT_COLOR_PALETTE = [
+  '#b85162', // rose
+  '#be865b', // orange
+  '#887306', // amber
+  '#015a1e', // green
+  '#10a2a0', // teal
+  '#345fdf', // blue
+  '#af79e2', // violet
+  '#9e0067', // pink
 ] as const;
 
 /**
