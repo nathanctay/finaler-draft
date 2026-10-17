@@ -1,5 +1,5 @@
 import { StrictMode, useState } from 'react';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { OverflowMenu } from './OverflowMenu.js';
@@ -146,6 +146,81 @@ describe('OverflowMenu', () => {
     expect(screen.getByRole('menu')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Elsewhere' }));
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('closes when the keyboard moves focus out of the menu and trigger entirely', async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <OverflowMenu items={[{ label: 'Delete', onSelect: vi.fn() }]} label="Row actions" />
+        <button type="button">Elsewhere</button>
+      </>,
+    );
+    await user.click(screen.getByRole('button', { name: 'Row actions' }));
+    expect(screen.getByRole('menuitem', { name: 'Delete' })).toHaveFocus();
+
+    // Tab past the last item. Nothing was pressed, so only the focus listener can notice this --
+    // which is why dismissal on a real focus move has to survive the Safari fix below.
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'Elsewhere' })).toHaveFocus();
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  /**
+   * The Safari defect the owner hit: *every* item of *every* `OverflowMenu` was inert in Safari --
+   * "manage subscriptions", Delete, Share, all of them -- because this component closed on blur and
+   * treated `relatedTarget === null` as "focus left the menu". WebKit does not focus a `<button>`
+   * that is pressed with a mouse, so pressing an item blurred whatever was focused with no new focus
+   * target at all, the menu closed on `focusout`, and the item unmounted before its `click` ever
+   * arrived.
+   *
+   * `userEvent.click` cannot express this: jsdom's and user-event's model of a click *does* focus the
+   * button, which is precisely the browser behaviour Safari does not have, so every existing test in
+   * this file passed with the bug present. The sequence below is dispatched by hand instead -- pointer
+   * and mouse events on the item, a `focusout` carrying `relatedTarget: null` from the element that
+   * *was* focused, a `focusin` on `document.body` for the WebKit variant that surfaces the cleared
+   * focus that way, and only then `click`. The clicked button is deliberately never focused.
+   *
+   * Run against the blur-based close this replaces, this test fails on `onSelect` never having been
+   * called -- the menu is already gone by the time `click` is dispatched.
+   */
+  it('activates an item whose press moves no focus into the menu, the shape Safari dispatches', async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(<OverflowMenu items={[{ label: 'Delete', onSelect }]} label="Row actions" />);
+
+    await user.click(screen.getByRole('button', { name: 'Row actions' }));
+    const item = screen.getByRole('menuitem', { name: 'Delete' });
+    expect(item).toHaveFocus();
+
+    fireEvent.pointerDown(item);
+    fireEvent.mouseDown(item);
+    fireEvent.focusOut(item, { relatedTarget: null });
+    fireEvent.focusIn(document.body);
+    fireEvent.pointerUp(item);
+    fireEvent.mouseUp(item);
+    fireEvent.click(item);
+
+    expect(onSelect).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  /** The other half of the Safari fix: an outside press still dismisses the menu even though
+   * nothing about that press moves focus either. */
+  it('closes on an outside pointer press that moves no focus at all', async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <OverflowMenu items={[{ label: 'Delete', onSelect: vi.fn() }]} label="Row actions" />
+        <p>Outside the menu</p>
+      </>,
+    );
+    await user.click(screen.getByRole('button', { name: 'Row actions' }));
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+
+    fireEvent.pointerDown(screen.getByText('Outside the menu'));
+
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 

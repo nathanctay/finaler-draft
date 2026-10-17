@@ -12,6 +12,10 @@ import { OverflowMenu } from '../../../components/OverflowMenu.js';
 const UpgradeDialog = lazy(async () => ({
   default: (await import('../../../upgradeDialog.js')).UpgradeDialog,
 }));
+// Lazy for the same reason: only needed once a writer opens it.
+const SharingDialog = lazy(async () => ({
+  default: (await import('../../../sharingDialog.js')).SharingDialog,
+}));
 
 export const Route = createFileRoute('/projects/$projectId/')({ component: ProjectPage });
 
@@ -32,6 +36,17 @@ function ScreenplayRow({
     mutationFn: () => api.deleteScreenplay(screenplay.id),
     onSuccess: onDeleted,
   });
+  const [sharingOpen, setSharingOpen] = useState(false);
+  // The second of the slice's three entry points, and the one the owner asked for specifically:
+  // "the 3 dot menu on both the project or just the screenplay if thats all they want to share."
+  // Offered to an owner or an editor, matching the bar the server enforces, so it is never a
+  // control that answers 403. `screenplay.role` is the viewer's own effective role on this
+  // screenplay, resolved by the same lateral that authorized the listing.
+  //
+  // Note this gates only the new item. Delete is left exactly as it was -- it has always been
+  // shown unconditionally here, and narrowing it is a separate behaviour change this slice is not
+  // the place for.
+  const canShare = screenplay.role === 'owner' || screenplay.role === 'editor';
   return (
     <div className="project-row">
       <Link
@@ -42,9 +57,21 @@ function ScreenplayRow({
         {screenplay.title}
       </Link>
       <OverflowMenu
-        items={[{ label: 'Delete', onSelect: () => deleteMutation.mutate() }]}
+        items={[
+          ...(canShare ? [{ label: 'Share…', onSelect: () => setSharingOpen(true) }] : []),
+          { label: 'Delete', onSelect: () => deleteMutation.mutate() },
+        ]}
         label={`Screenplay actions for ${screenplay.title}`}
       />
+      {sharingOpen && (
+        <Suspense fallback={null}>
+          <SharingDialog
+            onClose={() => setSharingOpen(false)}
+            scope={{ kind: 'screenplay', screenplayId: screenplay.id }}
+            title={screenplay.title}
+          />
+        </Suspense>
+      )}
       {deleteMutation.isError && (
         <p className="field-error" role="alert">
           Delete failed. Try again.

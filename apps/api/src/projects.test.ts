@@ -246,11 +246,14 @@ describe('PostgreSQL project store', () => {
       ),
     ).resolves.toBe('missing');
 
-    const reviewerClient = fakeClient([
-      empty(),
-      rows([{ projectId, version: 1 }]),
-      rows([{ role: 'reviewer' }]),
-    ]);
+    // One queued result for the lock-and-resolve-role query, not two: since the
+    // screenplay-invitations slice `lockScreenplayRow` resolves the actor's effective role in the
+    // same statement that locks the row (through `screenplayRoleLateral`), rather than this store
+    // running a second `select role from project_members`. The authorization asserted here is
+    // unchanged -- a reviewer is still refused, an editor still succeeds -- and the same decisions
+    // are additionally proven against a real database, for both kinds of membership, in
+    // `sharing.integration.test.ts`.
+    const reviewerClient = fakeClient([empty(), rows([{ projectId, role: 'reviewer' }])]);
     await expect(
       createPostgresProjectStore(fakePool([], reviewerClient)).renameScreenplay(
         actorId,
@@ -261,8 +264,7 @@ describe('PostgreSQL project store', () => {
 
     const editorClient = fakeClient([
       empty(),
-      rows([{ projectId, version: 1 }]),
-      rows([{ role: 'editor' }]),
+      rows([{ projectId, role: 'editor' }]),
       rows([{ id: screenplayId, title: 'New Title' }]),
     ]);
     await expect(
@@ -279,11 +281,8 @@ describe('PostgreSQL project store', () => {
   });
 
   it('deletes a screenplay for an owner or editor, unlike project deletion which requires the owner', async () => {
-    const editorClient = fakeClient([
-      empty(),
-      rows([{ projectId, version: 1 }]),
-      rows([{ role: 'editor' }]),
-    ]);
+    // See the note in the rename test above on why there is one fewer queued result here.
+    const editorClient = fakeClient([empty(), rows([{ projectId, role: 'editor' }])]);
     await expect(
       createPostgresProjectStore(fakePool([], editorClient)).deleteScreenplay(
         actorId,
@@ -295,11 +294,7 @@ describe('PostgreSQL project store', () => {
       [screenplayId],
     );
 
-    const reviewerClient = fakeClient([
-      empty(),
-      rows([{ projectId, version: 1 }]),
-      rows([{ role: 'reviewer' }]),
-    ]);
+    const reviewerClient = fakeClient([empty(), rows([{ projectId, role: 'reviewer' }])]);
     await expect(
       createPostgresProjectStore(fakePool([], reviewerClient)).deleteScreenplay(
         actorId,
@@ -383,10 +378,12 @@ describe('PostgreSQL project store', () => {
       ),
     ).resolves.toBe('missing');
 
-    // The screenplay is genuinely soft-deleted and its project active (lockScreenplayRow finds
-    // it), but the actor has no membership row at all — a distinct code path from "not deleted"
-    // above, and it must reach the same 'missing' answer.
-    const noMemberClient = fakeClient([empty(), rows([{ projectId, version: 1 }]), empty()]);
+    // The actor holds no membership of either kind. Since the screenplay-invitations slice that is
+    // the *same* query as the row lock -- `screenplayRoleLateral` is a `cross join lateral`, so "no
+    // role" eliminates the row entirely and the lock itself returns nothing -- which is why this
+    // queues an empty result for the lock rather than a found row plus an empty membership lookup.
+    // It must still reach the same 'missing' answer, which is what this asserts.
+    const noMemberClient = fakeClient([empty(), empty()]);
     await expect(
       createPostgresProjectStore(fakePool([], noMemberClient)).restoreScreenplay(
         actorId,
@@ -396,8 +393,7 @@ describe('PostgreSQL project store', () => {
 
     const editorClient = fakeClient([
       empty(),
-      rows([{ projectId, version: 1 }]),
-      rows([{ role: 'editor' }]),
+      rows([{ projectId, role: 'editor' }]),
       rows([{ id: screenplayId, title: 'Draft' }]),
     ]);
     await expect(

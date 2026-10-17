@@ -34,6 +34,10 @@ import {
   supersedeRestoredDocuments,
   type NotificationClient,
 } from './restoreNotifications.js';
+import {
+  disconnectMembershipChangedConnections,
+  startMembershipNotificationListener,
+} from './membershipNotifications.js';
 import { encodeCollabRestoredMessage } from '@finaler-draft/config';
 
 try {
@@ -83,33 +87,39 @@ try {
   // is a dedicated connection rather than a pooled one, and why Postgres `NOTIFY` rather than an HTTP
   // call from `apps/api`.
   let onRestored: (notification: { screenplayId: string; epoch: number }) => void = () => undefined;
+  // One adapter, two listeners. Each `startNotificationListener` still owns its *own* connection
+  // (this is a factory, called once per listener) -- a `LISTEN` is session state, so two channels
+  // could in principle share one connection, but sharing would also mean one channel's connection
+  // failure silently taking the other channel's subscription down with it. Two connections, two
+  // independent retry loops.
+  const connectNotificationClient = async (): Promise<NotificationClient> => {
+    const client = new Client({ connectionString: environment.DATABASE_URL });
+    await client.connect();
+    // Adapted to `NotificationClient` explicitly rather than passed through: that interface exists
+    // so the listener's reconnect logic is testable without a database, and an adapter here is what
+    // keeps the production path honest about using exactly the four operations it describes.
+    const adapted: NotificationClient = {
+      close: async () => {
+        await client.end();
+      },
+      listen: async (channel) => {
+        // The channel name is a compile-time constant from `@finaler-draft/database`, never
+        // user-supplied -- `listen` takes no bind parameters, so a dynamic value here would be
+        // string interpolation into SQL.
+        await client.query(`listen ${channel}`);
+      },
+      onFailure: (listener) => {
+        client.on('error', listener);
+        client.on('end', () => listener(new Error('Notification connection ended')));
+      },
+      onNotification: (listener) => {
+        client.on('notification', (message) => listener(message.payload));
+      },
+    };
+    return adapted;
+  };
   const restoreNotifications = startRestoreNotificationListener({
-    connect: async () => {
-      const client = new Client({ connectionString: environment.DATABASE_URL });
-      await client.connect();
-      // Adapted to `NotificationClient` explicitly rather than passed through: that interface exists
-      // so the listener's reconnect logic is testable without a database, and an adapter here is what
-      // keeps the production path honest about using exactly the four operations it describes.
-      const adapted: NotificationClient = {
-        close: async () => {
-          await client.end();
-        },
-        listen: async (channel) => {
-          // The channel name is a compile-time constant from `@finaler-draft/database`, never
-          // user-supplied -- `listen` takes no bind parameters, so a dynamic value here would be
-          // string interpolation into SQL.
-          await client.query(`listen ${channel}`);
-        },
-        onFailure: (listener) => {
-          client.on('error', listener);
-          client.on('end', () => listener(new Error('Notification connection ended')));
-        },
-        onNotification: (listener) => {
-          client.on('notification', (message) => listener(message.payload));
-        },
-      };
-      return adapted;
-    },
+    connect: connectNotificationClient,
     onError: (error) => {
       console.error(
         JSON.stringify({
@@ -119,6 +129,24 @@ try {
       );
     },
     onRestored: (notification) => onRestored(notification),
+  });
+  // The screenplay-invitations slice: a demotion or a removal committed in `apps/api` has to reach
+  // the connections this process is already holding, or a removed member keeps writing until they
+  // happen to reconnect. See `membershipNotifications.ts` for why the response is to close the
+  // account's sockets and let the reconnect re-authorize from the database, rather than trying to
+  // re-derive the new role here.
+  let onMembershipChanged: (notification: { userId: string }) => void = () => undefined;
+  const membershipNotifications = startMembershipNotificationListener({
+    connect: connectNotificationClient,
+    onError: (error) => {
+      console.error(
+        JSON.stringify({
+          event: 'collab_membership_listener_failed',
+          error: error instanceof Error ? error.name : 'UnknownError',
+        }),
+      );
+    },
+    onMembershipChanged: (notification) => onMembershipChanged(notification),
   });
 
   const server = new Server({
@@ -361,6 +389,7 @@ try {
     async onDestroy() {
       idleSessionRevisions.dispose();
       await restoreNotifications.dispose();
+      await membershipNotifications.dispose();
       await pool.end();
     },
     port: environment.PORT,
@@ -381,6 +410,24 @@ try {
         epoch: notification.epoch,
         supersededDocuments: result.supersededDocuments,
         notifiedConnections: result.notifiedConnections,
+      }),
+    );
+  };
+  // Assigned after construction for the same reason `onRestored` is: this closure needs the
+  // `Hocuspocus` instance the `Server` owns. Logs the account only as the fact that *an* account's
+  // connections were closed -- never an email address, and never which project or screenplay the
+  // membership change was about, which this process is not told and does not need.
+  onMembershipChanged = (notification) => {
+    const result = disconnectMembershipChangedConnections(
+      server.hocuspocus.documents.values(),
+      notification,
+    );
+    console.info(
+      JSON.stringify({
+        event: 'collab_membership_changed_disconnected',
+        userId: notification.userId,
+        affectedDocuments: result.affectedDocuments,
+        closedConnections: result.closedConnections,
       }),
     );
   };

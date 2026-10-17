@@ -321,6 +321,7 @@ describe('persisted project API', () => {
     deleteProject: async () => deleteProjectResult,
     restoreProject: async () => restoreProjectResult,
     listScreenplays: async () => [],
+    listSharedScreenplays: async () => [],
     createScreenplay: async () => {
       if (createScreenplayResult === 'forbidden')
         throw new (await import('./projects.js')).ForbiddenError();
@@ -336,6 +337,11 @@ describe('persisted project API', () => {
       title: 'Draft',
       screenplay: screenplayFixture,
       currentEpoch: 0,
+      // The screenplay-invitations slice: the viewer's own effective role, which
+      // `screenplayResponseSchema` now requires -- a schema whose fields do not match the store
+      // would silently strip it, which is exactly what the "unstripped by the response schemas"
+      // test below exists to catch.
+      role: 'owner' as const,
     }),
     renameScreenplay: async () => renameScreenplayResult,
     deleteScreenplay: async () => deleteScreenplayResult,
@@ -453,6 +459,10 @@ describe('persisted project API', () => {
         // to connect to without it, so a schema that silently dropped it would leave every editor
         // unable to connect at all.
         currentEpoch: 0,
+        // The screenplay-invitations slice, for the same reason: the live screenplay route reads
+        // this to decide whether the File menu offers "Share…", so a schema that dropped it would
+        // hide sharing from every owner and editor.
+        role: 'owner',
       });
     } finally {
       await app.close();

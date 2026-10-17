@@ -1,9 +1,14 @@
 import { createFileRoute, useNavigate, useParams } from '@tanstack/react-router';
 import { z } from 'zod';
-import { api, type PersistedScreenplay } from '../../../api.js';
+import { api, type FetchedScreenplay, type PersistedScreenplay } from '../../../api.js';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import type { EntitlementReadOnly } from '../../../App.js';
+
+// Lazy for the same reason `EditorWorkspace` is: the dialog is only needed once a writer opens it.
+const SharingDialog = lazy(async () => ({
+  default: (await import('../../../sharingDialog.js')).SharingDialog,
+}));
 
 export const Route = createFileRoute('/projects/$projectId/screenplays/$screenplayId/')({
   component: ScreenplayPage,
@@ -21,6 +26,7 @@ function ScreenplayPage() {
   });
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const [sharingOpen, setSharingOpen] = useState(false);
   // This query is intentionally consumed once. The editor owns the immutable route snapshot thereafter.
   const screenplay = useQuery({
     queryKey: ['screenplay', screenplayId],
@@ -97,11 +103,33 @@ function ScreenplayPage() {
             : undefined,
       };
 
+  // The viewer's own effective role on this screenplay, from the same response that authorized the
+  // read. `onOpenSharing` is supplied only when it is `owner` or `editor` -- exactly the bar
+  // `apps/api`'s sharing store enforces -- so the File menu's "Share…" is present precisely when it
+  // would work, and absent rather than disabled otherwise (`App.tsx`'s `onOpenSharing` comment).
+  //
+  // The same field is also handed to the editor as `viewerRole`, which is what makes a reviewer's
+  // screenplay genuinely read-only rather than merely refused at the socket -- see `App.tsx`'s own
+  // comment on that prop. It is passed as the role, not as a precomputed read-only decision, so the
+  // ranking against `entitlementReadOnly` lives in the one component that gates editing.
+  const fetched = screenplay.data as FetchedScreenplay;
+  const mayShare = fetched.role === 'owner' || fetched.role === 'editor';
+
   return (
     <Suspense fallback={<main className="loading-screen">Loading editor…</main>}>
+      {sharingOpen && (
+        <Suspense fallback={null}>
+          <SharingDialog
+            onClose={() => setSharingOpen(false)}
+            scope={{ kind: 'screenplay', screenplayId }}
+            title={fetched.title}
+          />
+        </Suspense>
+      )}
       <EditorWorkspace
         entitlementReadOnly={entitlementReadOnly}
         initial={screenplay.data as PersistedScreenplay}
+        {...(mayShare ? { onOpenSharing: () => setSharingOpen(true) } : {})}
         // Collaboration slice 5: the epoch is part of the key, not just the screenplay id. A restore
         // (performed here or by a collaborator) changes `currentEpoch`, and `App` must then be a fresh
         // mount -- new `HocuspocusProvider` for the new document name, new (empty) `y-indexeddb`
@@ -122,6 +150,7 @@ function ScreenplayPage() {
         onReloadRestoredDocument={() => {
           void queryClient.invalidateQueries({ queryKey: ['screenplay', screenplayId] });
         }}
+        viewerRole={fetched.role}
       />
     </Suspense>
   );

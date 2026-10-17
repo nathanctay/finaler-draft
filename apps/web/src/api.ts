@@ -11,17 +11,106 @@ import { ApiError, json, request, session, type SessionUser } from './apiSession
 
 export { ApiError };
 
+/**
+ * The three roles any membership path can resolve to, declared before the first schema that needs
+ * it. `projectSchema.role` below was `z.string()` until the dashboard started deciding what a row
+ * *says* from it (`roleLabel` in the projects route): a loose string let an unexpected role through
+ * validation silently and then fell through every branch that switched on it.
+ */
+const effectiveRoleSchema = z.enum(['owner', 'editor', 'reviewer']);
 const projectSchema = z.object({
   id: z.string().uuid(),
-  role: z.string(),
+  role: effectiveRoleSchema,
   title: z.string(),
   updatedAt: z.string(),
 });
+const sharedRoleSchema = z.enum(['editor', 'reviewer']);
 const screenplaySummarySchema = z.object({
   id: z.string().uuid(),
   title: z.string(),
   updatedAt: z.string(),
+  // The screenplay-invitations slice: the viewer's own effective role on this screenplay, so the
+  // per-row three-dot menu can decide whether to offer "Share…" rather than rendering a control
+  // that always answers 403.
+  role: effectiveRoleSchema,
 });
+// The dashboard's "Shared with you" section -- a screenplay reached through screenplay-scoped
+// membership, whose project the viewer is deliberately *not* a member of. It carries `projectId`
+// only because the editor's route needs it; nothing here links to the project page.
+const sharedScreenplaySchema = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  updatedAt: z.string(),
+  projectId: z.string().uuid(),
+  projectTitle: z.string(),
+  role: effectiveRoleSchema,
+});
+// Mirrors apps/api/src/app.ts's own sharing schemas field for field. `email` appears on the
+// inviter-side member/invitation lists (the viewer is an owner/editor managing a project they can
+// already share, and the address is the identity they typed) and deliberately not on the
+// invitee-side list, which carries the inviter's display name only.
+const sharingMemberSchema = z.object({
+  userId: z.string(),
+  name: z.string(),
+  email: z.string(),
+  role: effectiveRoleSchema,
+  scope: z.enum(['project', 'screenplay']),
+});
+const sharingInvitationSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  email: z.string(),
+  role: sharedRoleSchema,
+  createdAt: z.string(),
+});
+const sharingViewSchema = z.object({
+  members: z.array(sharingMemberSchema),
+  invitations: z.array(sharingInvitationSchema),
+});
+// One 200 body for every outcome of an invite, discriminated on `outcome` -- see the server-side
+// schema's own comment for why `'no-account'`, `'self'` and `'already-member'` are data rather
+// than status codes. `message` on the `'no-account'` branch is the server's own sentence, shown
+// verbatim rather than paraphrased here, so the owner can reword it in one place.
+const inviteResultSchema = z.discriminatedUnion('outcome', [
+  z.object({
+    outcome: z.literal('invited'),
+    created: z.boolean(),
+    invitation: sharingInvitationSchema,
+  }),
+  z.object({
+    outcome: z.literal('already-member'),
+    role: effectiveRoleSchema,
+    scope: z.enum(['project', 'screenplay']),
+  }),
+  z.object({ outcome: z.literal('no-account'), message: z.string() }),
+  z.object({ outcome: z.literal('self') }),
+]);
+const memberChangeResultSchema = z.discriminatedUnion('outcome', [
+  z.object({ outcome: z.literal('changed'), role: effectiveRoleSchema }),
+  z.object({ outcome: z.literal('removed') }),
+  z.object({ outcome: z.literal('not-a-member') }),
+  z.object({ outcome: z.literal('owner-immutable') }),
+]);
+const incomingInvitationSchema = z.object({
+  id: z.string().uuid(),
+  role: sharedRoleSchema,
+  createdAt: z.string(),
+  projectId: z.string().uuid(),
+  projectTitle: z.string(),
+  screenplayId: z.string().uuid().nullable(),
+  screenplayTitle: z.string().nullable(),
+  invitedByName: z.string().nullable(),
+});
+const respondToInvitationResultSchema = z.discriminatedUnion('outcome', [
+  z.object({
+    outcome: z.literal('accepted'),
+    projectId: z.string().uuid(),
+    screenplayId: z.string().uuid().nullable(),
+    role: sharedRoleSchema,
+  }),
+  z.object({ outcome: z.literal('declined') }),
+  z.object({ outcome: z.literal('not-pending') }),
+]);
 const screenplayResponseSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
@@ -33,6 +122,9 @@ const screenplayResponseSchema = z.object({
   // its own `y-indexeddb` database on the same string, which is what keeps a pre-restore document's
   // offline work from merging into the restored one. Every epoch-gated write below also sends it.
   currentEpoch: z.number().int().min(0),
+  // See `screenplaySummarySchema.role` -- same field, same purpose, for the editor's File menu
+  // rather than the project page's per-row menu.
+  role: effectiveRoleSchema,
 });
 // Better Auth's `/sign-up/email` and `/sign-in/email` both return `{token, user}` (installed
 // `api/routes/sign-up.mjs`/`sign-in.mjs`). Only `signUp` below reads `token`: now that
@@ -568,7 +660,75 @@ export const api = {
     json('/api/billing/portal-session', billingSessionResponseSchema, { method: 'POST' }),
   billingSubscription: () => json('/api/billing/subscription', billingSubscriptionSchema),
   billingPlans: () => json('/api/billing/plans', billingPlansSchema),
+  // The screenplay-invitations slice. The inviter-side calls take a scope the same way the server
+  // does -- one pair of paths per operation, selected by `scope.kind` -- so the sharing dialog is
+  // one component that works for a project and for a screenplay rather than two near-copies.
+  sharing: (scope: SharingScope) => json(sharingPath(scope), sharingViewSchema),
+  // `jsonWithServerMessage`, matching `createNamedRevision`: a refusal here (403 for a project
+  // reviewer, 404 for a scope the viewer cannot see) carries the server's own explanation, which
+  // the dialog shows inline rather than a bare "Request failed (403)". The *successful* outcomes
+  // that are not an invitation -- no such account, inviting yourself, already a member -- arrive as
+  // a 200 body instead; see `inviteResultSchema`.
+  invite: (scope: SharingScope, email: string, role: SharedRole) =>
+    jsonWithServerMessage(invitationsPath(scope), inviteResultSchema, {
+      body: JSON.stringify({ email, role }),
+      method: 'POST',
+    }),
+  changeMemberRole: (scope: SharingScope, userId: string, role: SharedRole) =>
+    jsonWithServerMessage(memberPath(scope, userId), memberChangeResultSchema, {
+      body: JSON.stringify({ role }),
+      method: 'PATCH',
+    }),
+  removeMember: (scope: SharingScope, userId: string) =>
+    jsonWithServerMessage(memberPath(scope, userId), memberChangeResultSchema, {
+      method: 'DELETE',
+    }),
+  revokeInvitation: (invitationId: string) =>
+    jsonWithServerMessage(
+      `/api/invitations/${invitationId}`,
+      z.object({ outcome: z.literal('revoked') }),
+      {
+        method: 'DELETE',
+      },
+    ),
+  // The invitee side. Unauthenticated-adjacent in spirit but not in fact: this is "what has been
+  // offered to me", so it needs no scope at all.
+  invitations: () => json('/api/invitations', z.array(incomingInvitationSchema)),
+  respondToInvitation: (invitationId: string, response: 'accept' | 'decline') =>
+    jsonWithServerMessage(
+      `/api/invitations/${invitationId}/respond`,
+      respondToInvitationResultSchema,
+      { body: JSON.stringify({ response }), method: 'POST' },
+    ),
+  sharedScreenplays: () => json('/api/shared-screenplays', z.array(sharedScreenplaySchema)),
 };
+
+/**
+ * Which thing is being shared. Mirrors `apps/api/src/sharing.ts`'s own `SharingScope` exactly: the
+ * scope decides who may act and what is granted, so it belongs in the URL rather than a request
+ * body, and these three helpers are the only place the two path shapes are written.
+ */
+export type SharingScope =
+  | { kind: 'project'; projectId: string }
+  | { kind: 'screenplay'; screenplayId: string };
+
+function scopeRoot(scope: SharingScope): string {
+  return scope.kind === 'project'
+    ? `/api/projects/${scope.projectId}`
+    : `/api/screenplays/${scope.screenplayId}`;
+}
+
+function sharingPath(scope: SharingScope): string {
+  return `${scopeRoot(scope)}/sharing`;
+}
+
+function invitationsPath(scope: SharingScope): string {
+  return `${scopeRoot(scope)}/invitations`;
+}
+
+function memberPath(scope: SharingScope, userId: string): string {
+  return `${scopeRoot(scope)}/members/${encodeURIComponent(userId)}`;
+}
 
 export type Project = z.infer<typeof projectSchema>;
 export type ScreenplaySummary = z.infer<typeof screenplaySummarySchema>;
@@ -587,6 +747,20 @@ export type PersistedScreenplay = {
   /** The collaboration epoch this screenplay is currently on -- see `screenplayResponseSchema`. */
   currentEpoch: number;
 };
+
+/**
+ * What `GET /api/screenplays/:id` actually returns, which is `PersistedScreenplay` plus the
+ * viewer's own `role`.
+ *
+ * Deliberately a separate type, with `role` *not* on `PersistedScreenplay`: that type is what the
+ * editor (`App.tsx`) is handed, and the editor is also handed one by the historical-revision
+ * preview route, which constructs it from an immutable revision and has no live role to report.
+ * Requiring `role` there would have forced that route to invent a value for a field it has no
+ * business having. The live route reads `role` off this type instead and decides for itself whether
+ * to give `App` its optional `onOpenSharing` callback -- the same shape `onOpenRevisionHistory`
+ * already uses to mean "this screen can do this and the preview cannot."
+ */
+export type FetchedScreenplay = z.infer<typeof screenplayResponseSchema>;
 export type RevisionListItem = z.infer<typeof revisionListItemSchema>;
 export type RestoreRevisionResult = z.infer<typeof restoreRevisionResponseSchema>;
 export type RevisionDetail = z.infer<typeof revisionDetailSchema>;
@@ -595,3 +769,11 @@ export type ScreenplayBlockDiffEntry = z.infer<typeof screenplayBlockDiffEntrySc
 export type ScreenplaySceneDiffEntry = z.infer<typeof screenplaySceneDiffEntrySchema>;
 export type RevisionDiffSide = z.infer<typeof revisionDiffSideSchema>;
 export type RevisionDiffResult = z.infer<typeof revisionDiffResponseSchema>;
+export type EffectiveRole = z.infer<typeof effectiveRoleSchema>;
+export type SharedRole = z.infer<typeof sharedRoleSchema>;
+export type SharingMember = z.infer<typeof sharingMemberSchema>;
+export type SharingInvitation = z.infer<typeof sharingInvitationSchema>;
+export type SharingView = z.infer<typeof sharingViewSchema>;
+export type InviteResult = z.infer<typeof inviteResultSchema>;
+export type IncomingInvitation = z.infer<typeof incomingInvitationSchema>;
+export type SharedScreenplay = z.infer<typeof sharedScreenplaySchema>;

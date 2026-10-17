@@ -114,6 +114,12 @@ describe('projects page: delete and undo', () => {
     const menuTrigger = screen.getByRole('button', { name: 'Project actions for Feature' });
     menuTrigger.focus();
     await user.keyboard('{Enter}');
+    // Opening focuses the first item, which since the screenplay-invitations slice is "Share…"
+    // rather than Delete -- an owner's menu now holds two actions. ArrowDown to Delete, which is
+    // itself worth exercising: `OverflowMenu`'s arrow-key handling is what makes a two-item menu
+    // keyboard-operable at all, and this is the only test here that reaches Delete without a mouse.
+    expect(screen.getByRole('menuitem', { name: 'Share…' })).toHaveFocus();
+    await user.keyboard('{ArrowDown}');
     expect(screen.getByRole('menuitem', { name: 'Delete' })).toHaveFocus();
     await user.keyboard('{Enter}');
 
@@ -139,11 +145,14 @@ describe('projects page: delete and undo', () => {
     // Simulate an incidental refetch (e.g. window focus regain) that the writer did not cause.
     // The delete already succeeded server-side, so the fresh GET genuinely omits the row -- the
     // Undo affordance must survive this via the orphaned-id path, not disappear along with it.
-    // Four calls, not three: the page's own `['entitlement']` query (the lapse-chooser banner)
-    // fires once on mount alongside `['projects']`, and this invalidate only targets `['projects']`
-    // -- entitlement's own single fetch is unaffected either way.
+    // Six calls, not four: on mount this page fires `['projects']`, `['entitlement']` (the
+    // lapse-chooser banner) and -- since the screenplay-invitations slice -- `['invitations']` and
+    // `['shared-screenplays']`, both answered empty by this suite's catch-all; plus the DELETE,
+    // plus this invalidate's refetch of `['projects']` alone. That the other three mount queries
+    // are *not* refetched by an invalidate naming only `['projects']` is the property this count
+    // actually pins down.
     await act(() => queryClient.invalidateQueries({ queryKey: ['projects'] }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(6));
     expect(screen.getByText('Feature — Deleted')).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: 'Undo delete of Feature' }));

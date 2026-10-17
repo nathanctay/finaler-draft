@@ -112,7 +112,19 @@ describe('projects page', () => {
     );
   });
 
-  it('shows Delete only for a project the viewer owns, since deleteProject is owner-only server-side', () => {
+  /**
+   * Asserts the Delete *item*, not merely the presence of the menu that holds it.
+   *
+   * It used to assert the menu's presence as a proxy, which was exact while Delete was the only
+   * item an owner's menu could contain. The screenplay-invitations slice adds "Share…", which the
+   * server offers to an owner *or* an editor (`sharing.ts`: owner-or-editor on the project, the
+   * same `canEdit` bar every other project mutation uses), so an editor now has a menu with
+   * something genuinely in it. The owner-only property this test is named for is unchanged and is
+   * now checked directly -- a strictly stronger assertion than the proxy, since it would also
+   * catch Delete appearing in a menu that was correctly shown.
+   */
+  it('shows Delete only for a project the viewer owns, since deleteProject is owner-only server-side', async () => {
+    const user = userEvent.setup();
     routeState.query = {
       data: [
         { id: projectId, role: 'owner', title: 'Owned' },
@@ -123,10 +135,20 @@ describe('projects page', () => {
       isLoading: false,
     };
     render(<ProjectsPage />);
-    expect(screen.getByRole('button', { name: 'Project actions for Owned' })).toBeInTheDocument();
-    expect(
-      screen.queryByRole('button', { name: 'Project actions for Edited elsewhere' }),
-    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Project actions for Owned' }));
+    expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Share…' })).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+
+    // An editor may share but must never be offered Delete: `deleteProject` is owner-only
+    // server-side, so the control would always answer 403.
+    await user.click(screen.getByRole('button', { name: 'Project actions for Edited elsewhere' }));
+    expect(screen.queryByRole('menuitem', { name: 'Delete' })).not.toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Share…' })).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+
+    // A reviewer can perform neither action, so there is no menu at all rather than an empty one.
     expect(
       screen.queryByRole('button', { name: 'Project actions for Reviewed elsewhere' }),
     ).not.toBeInTheDocument();

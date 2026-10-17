@@ -12,6 +12,7 @@ export default defineConfig({
     '**/offline-persistence.spec.ts',
     '**/revision-history-persistence.spec.ts',
     '**/screenplay-diff-persistence.spec.ts',
+    '**/invitations-persistence.spec.ts',
   ],
   timeout: 30_000,
   reporter: 'list',

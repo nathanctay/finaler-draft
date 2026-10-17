@@ -51,6 +51,12 @@ describe('project screenplay list: delete and undo', () => {
                   title: 'Draft',
                   updatedAt: '2026-01-01T00:00:00Z',
                   version: 1,
+                  // `role` since the screenplay-invitations slice: the viewer's own effective role
+                  // on this screenplay, which `screenplaySummarySchema` requires -- this suite
+                  // keeps the real react-query and so the real schema, and a row without it is
+                  // rejected before anything renders. `owner`, matching this fixture's existing
+                  // assumption that the viewer may delete the screenplay.
+                  role: 'owner',
                 },
               ],
         );
@@ -113,7 +119,13 @@ describe('project screenplay list: delete and undo', () => {
       const method = init?.method ?? 'GET';
       if (url === `/api/projects/${projectId}/screenplays` && method === 'GET') {
         return jsonResponse([
-          { id: screenplayId, title: 'Draft', updatedAt: '2026-01-01T00:00:00Z', version: 1 },
+          {
+            id: screenplayId,
+            title: 'Draft',
+            updatedAt: '2026-01-01T00:00:00Z',
+            version: 1,
+            role: 'owner',
+          },
         ]);
       }
       if (url === `/api/screenplays/${screenplayId}` && method === 'DELETE') {

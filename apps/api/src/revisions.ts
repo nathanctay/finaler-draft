@@ -12,6 +12,8 @@ import {
   getRevisionById,
   insertRevisionIfChanged,
   listRevisionsForScreenplay,
+  roleCanEdit,
+  screenplayRoleLateral,
   type RevisionKind,
   type RevisionRow,
 } from '@finaler-draft/database';
@@ -176,14 +178,29 @@ export interface RevisionStore {
   ): Promise<DiffResult>;
 }
 
+// Delegates to `@finaler-draft/database`'s `roleCanEdit` rather than restating the predicate --
+// see the identical note on `projects.ts`'s own `canEdit`. The exported name stays because
+// `restore.ts` imports it.
 export function canEdit(role: unknown): boolean {
-  return role === 'owner' || role === 'editor';
+  return roleCanEdit(role);
 }
 
-/** Resolves whether `actorId` may read `screenplayId` at all -- the identical join
- * `getScreenplay` (`projects.ts`) already uses: any project role, screenplay and project both
- * active. Returns the actor's role so `createRevision` can additionally check `canEdit` for the
- * `named` case without a second query. */
+/**
+ * Resolves whether `actorId` may read `screenplayId` at all -- the identical resolution
+ * `getScreenplay` (`projects.ts`) uses: the actor's effective role on this one screenplay, with the
+ * screenplay and its project both active. Returns the role so `createRevision` can additionally
+ * check `canEdit` for the `named` case without a second query.
+ *
+ * This single function is the authorization for five separate things -- `listRevisions`,
+ * `getRevision`, `getRevisionDiff`, `createRevision`, and (through `restore.ts`, which imports it)
+ * `restoreRevision` -- which is why widening it to honour screenplay-scoped membership through
+ * `screenplayRoleLateral` is also what confines a screenplay-scoped member to their own
+ * screenplay's revision list, revision bodies, diffs, named milestones, and restores. The previous
+ * `join project_members m on m.project_id = s.project_id` was satisfied by any membership anywhere
+ * in the project, so leaving it in place would have made the revision surface -- including the
+ * whole canonical screenplay text a revision carries, and `restore`, which *writes* the live
+ * document -- a complete bypass of the screenplay scope on five routes at once.
+ */
 export async function resolveMembership(
   pool: Pool,
   screenplayId: string,
@@ -193,8 +210,8 @@ export async function resolveMembership(
     `select m.role
        from screenplays s
        join projects p on p.id = s.project_id
-       join project_members m on m.project_id = s.project_id
-      where s.id = $1 and m.user_id = $2
+       cross join lateral ${screenplayRoleLateral('$2')} m
+      where s.id = $1
         and s.deleted_at is null and p.deleted_at is null`,
     [screenplayId, actorId],
   );

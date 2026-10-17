@@ -538,3 +538,123 @@ export const editableSlots = pgTable('editable_slots', {
     .references(() => screenplays.id, { onDelete: 'cascade' }),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
+
+/**
+ * The roles an invitation can grant, and the only roles screenplay-scoped membership can hold.
+ *
+ * Deliberately *not* `projectRole`: `'owner'` is absent, so no invitation and no
+ * `screenplay_members` row can express it. That absence is the enforcement mechanism, not a
+ * convention -- a check constraint could be dropped by a later migration without the application
+ * noticing, whereas an enum with no `'owner'` value makes an owner-granting invitation fail at the
+ * database itself. Project ownership is established exactly once, by `createProject`
+ * (apps/api/src/projects.ts), and `project_single_owner_unique` already guarantees there is at most
+ * one; sharing must never become a second path to it.
+ */
+export const sharedRole = pgEnum('shared_role', ['editor', 'reviewer']);
+
+/**
+ * Screenplay-scoped membership -- the owner's "the 3 dot menu on both the project or just the
+ * screenplay if thats all they want to share."
+ *
+ * **Why a separate table rather than a nullable `screenplay_id` on `project_members`.** Every
+ * authorization path in this system joins `project_members` (apps/api/src/projects.ts,
+ * entitlementStore.ts, revisions.ts, restore.ts, apps/collab/src/authenticate.ts). Adding a
+ * nullable `screenplay_id` to that table would change what every one of those existing joins
+ * *means* while leaving all of them syntactically valid: any query that did not also constrain the
+ * new column would silently treat a member invited to one screenplay as a member of the whole
+ * project. The failure mode of a forgotten query would be a privilege escalation, discovered only
+ * if someone thought to go looking for it.
+ *
+ * A separate table inverts that failure mode. A screenplay-scoped member has no `project_members`
+ * row at all, so every pre-existing join denies them by construction, and access has to be granted
+ * explicitly by a query that names this table. A path this slice failed to widen refuses a member
+ * who should have been let in -- a visible, reportable bug -- rather than admitting one who should
+ * have been kept out. `membership.ts`'s `screenplayRoleLateral` is the single definition every
+ * widened path shares, so "which paths were widened" is answerable by grepping for one import.
+ *
+ * It also sidesteps two concrete traps in the nullable-column design: `project_member_unique` would
+ * have to become a three-column index whose NULL member is `NULLS DISTINCT` by default (so two
+ * project-wide rows for the same user would both insert on any Postgres before 15), and
+ * `project_single_owner_unique`'s partial predicate would start matching screenplay-scoped rows.
+ */
+export const screenplayMembers = pgTable(
+  'screenplay_members',
+  {
+    screenplayId: uuid('screenplay_id')
+      .notNull()
+      .references(() => screenplays.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    role: sharedRole('role').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('screenplay_member_unique').on(table.screenplayId, table.userId),
+    // Mirrors `project_members_user_id_index`'s purpose exactly: the "every screenplay this actor
+    // can reach" queries (`listSharedScreenplays`, and both copies of `fetchCandidateScreenplayIds`)
+    // are driven by `user_id`, never by a screenplay id.
+    index('screenplay_members_user_id_index').on(table.userId),
+  ],
+);
+
+export const invitationStatus = pgEnum('invitation_status', ['pending', 'accepted', 'declined']);
+
+/**
+ * One invitation per (scope, invited account) -- the row an invitee accepts or declines from their
+ * dashboard, and the row an inviter sees as still unanswered.
+ *
+ * **An invitation is not a membership.** Nothing in this table is ever joined by an authorization
+ * path; accepting is what writes `project_members`/`screenplay_members`. A pending invitation
+ * therefore grants exactly nothing, and that is a property of the schema rather than of a check
+ * somewhere -- there is no query that could accidentally read access out of this table, because no
+ * authorization query mentions it at all.
+ *
+ * **`screenplay_id` null means the whole project.** `project_id` is always populated (derived from
+ * the screenplay row for a screenplay-scoped invite, so the two can never disagree), which is what
+ * lets the inviter-side list for a project find both scopes through one index.
+ *
+ * **Idempotency** is the two partial unique indexes below, rather than one three-column index with a
+ * nullable member: `(project_id, invited_user_id)` where the scope is the whole project, and
+ * `(screenplay_id, invited_user_id)` where it is a single screenplay. Partial indexes avoid
+ * depending on `NULLS NOT DISTINCT` (Postgres 15+) for correctness, and they cover *every* status
+ * rather than only `pending` -- so re-inviting someone who has already accepted, or already
+ * declined, is an update to the one existing row and can never become a second one. Re-inviting
+ * resets no clock anywhere: nothing in this table feeds `editable_slots.updated_at`, which is the
+ * only cooldown this system has (plan.md: "Do not add an exception for newly shared screenplays;
+ * re-sharing would reset it").
+ */
+export const membershipInvitations = pgTable(
+  'membership_invitations',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    screenplayId: uuid('screenplay_id').references(() => screenplays.id, { onDelete: 'cascade' }),
+    invitedUserId: text('invited_user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    // Nullable with `set null`, matching `documentRevisions.authoredBy`'s own convention: an
+    // invitation is a fact about the invitee's access, so deleting the inviter's account must not
+    // delete a pending invitation out from under the person who was invited.
+    invitedByUserId: text('invited_by_user_id').references(() => user.id, { onDelete: 'set null' }),
+    role: sharedRole('role').notNull(),
+    status: invitationStatus('status').notNull().default('pending'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('membership_invitation_project_scope_unique')
+      .on(table.projectId, table.invitedUserId)
+      .where(sql`${table.screenplayId} is null`),
+    uniqueIndex('membership_invitation_screenplay_scope_unique')
+      .on(table.screenplayId, table.invitedUserId)
+      .where(sql`${table.screenplayId} is not null`),
+    // The invitee's own dashboard query (`listInvitationsForUser`), always filtered by status as
+    // well as by account.
+    index('membership_invitations_invited_user_index').on(table.invitedUserId, table.status),
+    // The inviter-side list for one project, which reads both scopes at once.
+    index('membership_invitations_project_index').on(table.projectId),
+  ],
+);

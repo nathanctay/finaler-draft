@@ -31,7 +31,10 @@ describe('API client', () => {
       )
       .mockResolvedValueOnce(response({ id: projectId, title: 'Feature' }))
       .mockResolvedValueOnce(
-        response([{ id: screenplayId, title: 'Draft', updatedAt: '2026-01-01' }]),
+        // `role` since the screenplay-invitations slice: the viewer's own effective role on each
+        // listed screenplay, which the per-row three-dot menu reads to decide whether to offer
+        // "Share…".
+        response([{ id: screenplayId, title: 'Draft', updatedAt: '2026-01-01', role: 'owner' }]),
       )
       .mockResolvedValueOnce(response({ id: screenplayId }))
       .mockResolvedValueOnce(
@@ -41,6 +44,7 @@ describe('API client', () => {
           screenplay: screenplayFixture,
           title: 'Draft',
           currentEpoch: 0,
+          role: 'owner',
         }),
       )
       .mockResolvedValueOnce(response({ id: projectId }))

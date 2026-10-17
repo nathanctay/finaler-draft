@@ -46,6 +46,24 @@ const BUDGETS = {
 const EDITOR_ROUTE_SRC_PREFIX =
   'src/routes/projects/$projectId.screenplays.$screenplayId/index.tsx';
 
+// Which of the editor route's lazy imports *is* the editor. The route used to have exactly one, so
+// "the only dynamic import" identified it unambiguously; the screenplay-invitations slice added a
+// second (`sharingDialog.tsx`, lazy for the same reason the editor is -- only needed once a writer
+// opens it), which made "the only one" ambiguous rather than wrong.
+//
+// Matched on the manifest's `name`, not its key and not a built filename. `App.tsx` is lazily
+// imported by three routes (the live editor, the historical-revision preview, and the diff view),
+// so Vite emits it as a *shared* chunk, and a shared chunk's manifest key is its built filename
+// (`_App-BQs-2GrE.js`) rather than its source path -- there is no `src/App.tsx` key to match, which
+// is why this is not simply a source-key lookup. `name` is derived from the source module and
+// carries no content hash, so it is a stable source-graph handle of exactly the kind the comment
+// above requires.
+//
+// This is stricter than the count it replaces, not looser: one dynamic import was only ever
+// *evidence* that it was the editor, whereas this names the module and still raises when it is
+// absent (the editor stopped being lazily imported) or ambiguous (two chunks claiming the name).
+const EDITOR_CHUNK_NAME = 'App';
+
 const webRoot = fileURLToPath(new URL('../apps/web/', import.meta.url));
 const distRoot = path.join(webRoot, 'dist');
 const manifestPath = path.join(distRoot, '.vite/manifest.json');
@@ -104,14 +122,22 @@ function classify(manifest) {
   }
   const [, routeValue] = routeMatches[0];
   const routeDynamicImports = routeValue.dynamicImports ?? [];
-  if (routeDynamicImports.length !== 1) {
+  // The editor must still be *lazily* imported by that route -- that is the budget's whole premise.
+  // An eagerly-imported editor would drop out of this list and fail here rather than quietly being
+  // folded into the entry chunk and measured against the wrong budget.
+  const editorMatches = routeDynamicImports.filter(
+    (key) => manifest[key]?.name === EDITOR_CHUNK_NAME,
+  );
+  if (editorMatches.length !== 1) {
     throw new Error(
-      'Expected the editor route to lazily import exactly one module (the editor chunk itself), ' +
-        `found ${routeDynamicImports.length}: ${JSON.stringify(routeDynamicImports)}. Cannot ` +
-        'confidently identify which one is the lazy editor chunk.',
+      `Expected exactly one of the editor route's lazy imports to be the editor chunk (manifest ` +
+        `name "${EDITOR_CHUNK_NAME}"), found ${editorMatches.length} among ` +
+        `${JSON.stringify(routeDynamicImports)}. If the editor module was renamed, update ` +
+        'EDITOR_CHUNK_NAME in this script; otherwise the editor is no longer lazily imported by ' +
+        'that route, which is a real regression this check refuses to guess through.',
     );
   }
-  const editorKey = routeDynamicImports[0];
+  const editorKey = editorMatches[0];
   const editorValue = manifest[editorKey];
   if (!editorValue || typeof editorValue.file !== 'string') {
     throw new Error(
