@@ -71,6 +71,7 @@ import { Plugin, Selection } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
 import { yCursorPlugin, ySyncPluginKey } from 'y-prosemirror';
 import type { Awareness } from 'y-protocols/awareness';
+import { participantLabelTextColor } from './contrast.js';
 
 /** How long a connected participant may go without real activity before this module stops
  * treating them as present -- excluded from the participant list, and their cursor stops drawing.
@@ -223,6 +224,12 @@ export function buildRemoteCursorWidget(user: PresenceUser): HTMLElement {
   const label = document.createElement('span');
   label.className = 'remote-cursor-label';
   label.style.backgroundColor = color;
+  // Both halves of the label's contrast pair are set here, from the one value they both depend on.
+  // `styles.css` used to declare `color: #fff` for this element while only the background came from
+  // the participant colour -- a contrast assertion the stylesheet had no way to check, and one that
+  // was wrong for three of the eight colours the palette shipped with. See contrast.ts's own
+  // top-of-file comment.
+  label.style.color = participantLabelTextColor(color);
   label.textContent = name;
   wrapper.append(label);
 

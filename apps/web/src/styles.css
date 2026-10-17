@@ -35,10 +35,44 @@
   --text-01: #f4f7f8;
   --text-02: #d9edf7;
   --text-03: #aab7bf;
-  --text-04: #a3adb2;
+  /* The two muted-grey tokens, each defined by the contrast floor it has to hold rather than by how
+     faint it looks, because every rule using them failed that floor before this pass
+     (`progress/contrast-and-participant-palette.md` has the measurements).
+
+     `--text-04` is **inactive-control** text: `.tool-button:disabled`, `.text-button:disabled`,
+     `.primary-button:disabled`, `.overflow-menu-list button:disabled`. WCAG 1.4.3 exempts inactive
+     controls, so the floor here is 3:1 rather than 4.5:1 -- but only 3:1, not nothing: the
+     comparison view is deliberately almost entirely disabled controls, so what used to be a rare
+     state is now a whole screen, and at the 1.67:1 `.primary-button:disabled` measured it was not a
+     label but a rumour. The binding surface is `.primary-button:disabled`'s own `--surface-11`
+     background, the darkest thing this token is ever painted on; clearing 3:1 there is what makes
+     it 4.25:1 on white.
+
+     `--text-07` is **muted but real** text: `.muted`, `.ruler`, `.scene-list small`,
+     `.navigator-empty`, `.toast-message`, `.title-page-line-remove`, both `:empty::after`
+     placeholder hints, `.smarttype-ghost`, and `.element-menu-key`. Real text, so the floor is the
+     full 4.5:1, against the darkest light surface any of them sits on (`--surface-09`, the project
+     and revision screens).
+
+     The four rules that moved from `--text-04` to `--text-07` in this pass -- the two placeholder
+     hints, the SmartType ghost, and the element menu's shortcut letter -- are the ones whose own
+     rules already described them as text a reader has to *read* (`.element-menu-key`'s comment:
+     "It is real text, not a decoration"). They were on the inactive-control token, at 2.29:1.
+     Nothing deliberately faint was darkened past its purpose: the ghost completion is still a far
+     lighter grey than the near-black manuscript text it previews, which is the distinction it
+     carries, and it is now legible enough to decide whether to accept.
+
+     Keeping two tokens rather than collapsing them into one costs the scale a little of its spread
+     -- they used to sit 17 lightness points apart and now sit 6 -- but they answer to different
+     floors, and a single value would have to take the stricter of the two and darken every disabled
+     control past what its own state calls for. The order of the scale is preserved: 04 is still
+     lighter than 07. */
+  --text-04-on-white: #6f7d84;
+  --text-04: var(--text-04-on-white);
   --text-05: #9aa3a8;
   --text-06: #9aa39c;
-  --text-07: #78848a;
+  --text-07-on-white: #5f686d;
+  --text-07: var(--text-07-on-white);
   --text-08: #697268;
   --text-09: #637078;
   --text-10: #5d686e;
@@ -88,6 +122,57 @@
   --surface-11: #1f282f;
   --surface-07: #2d3941;
   --feedback-error: #f2a49b;
+  /* The two muted-grey tokens are the only `--text-*` entries that had to follow the surfaces into
+     this block. Neither was redefined here before, so the same light greys that `:root` chose for a
+     near-white chrome were being painted on this one: measured, `.muted` in a dark Inspector sat at
+     2.70:1 and `.dark .ruler` at 3.08:1 -- the identical failure as in light mode, just unlisted
+     because the light theme's numbers were the ones being read.
+
+     Darkening the light-theme values (above) makes that strictly worse, which is why these exist:
+     the same value cannot clear 4.5:1 against both a white sheet and a #34424b panel, and no
+     arithmetic makes it. `--text-04` is restored to the exact grey it held before this pass --
+     #a3adb2 was always correct *here* (4.53:1 on the lightest dark panel), and its only fault was
+     being used on white as well. `--text-07` is a hair lighter again to reach 4.5:1 as real text.
+
+     The 04/07 step flattens to almost nothing in this theme (4.53:1 against 4.65:1). Deliberately
+     not chased: widening it means darkening disabled controls in a theme where nothing was wrong
+     with them, and the dark theme's own body text (`--dark-text-03`, 9.1:1 on the status bar) is
+     what both of these are read as quieter *than*. */
+  --text-04: #a3adb2;
+  --text-07: #a7afb3;
+}
+
+/*
+ * The surfaces that stay white under both themes, re-asserting `:root`'s light-surface greys so
+ * that `.dark`'s redefinition above does not follow them onto a background that never went dark.
+ * Exactly the technique and exactly the reason `--fd-diff-added-surface` already exists for (see
+ * its own comment at the top of this file): a custom property's `var()` is substituted on the
+ * element that declares it, and the nearest declaring ancestor wins, so a dialog inside the dark
+ * shell resolves these against `:root` while the panels around it resolve them against `.dark`.
+ *
+ * Chosen as *containers* rather than as the individual rules that need it, because the rules are
+ * not the stable thing. `.muted` in particular is used in the dark Inspector, in the comparison's
+ * dark canvas, on three light screens, and inside a white dialog; enumerating those callsites
+ * would leave the next `.muted` to be added silently wrong, whereas "this element's background is
+ * white, so muted text on it reads against white" cannot drift.
+ *
+ * `--text-04` is re-anchored on only the two floating menus. Not on `.dialog`, deliberately: the
+ * only `--text-04` rule a dialog contains is `.primary-button:disabled`, whose *background* is
+ * `--surface-11`, which `.dark` does redefine -- so inside a dark shell that button is dark, and its
+ * text must follow the theme rather than the dialog. The two menus contain no such pairing.
+ */
+.page,
+.title-page,
+.dialog,
+.toast,
+.element-menu,
+.overflow-menu-list {
+  --text-07: var(--text-07-on-white);
+}
+
+.element-menu,
+.overflow-menu-list {
+  --text-04: var(--text-04-on-white);
 }
 
 :root {
@@ -859,7 +944,7 @@ select:focus-visible,
  * only while the corresponding field is genuinely empty.
  */
 [data-title-page-field]:empty::after {
-  color: var(--text-04);
+  color: var(--text-07);
 }
 
 [data-title-page-field='title']:empty::after {
@@ -1082,7 +1167,7 @@ select:focus-visible,
  */
 .script-body [data-screenplay-block] .smarttype-ghost {
   position: absolute;
-  color: var(--text-04);
+  color: var(--text-07);
   white-space: pre;
   pointer-events: none;
   user-select: none;
@@ -1168,6 +1253,14 @@ select:focus-visible,
  * on the caret always reveals it; `[data-remote-cursor-active]` (set by `buildRemoteCursorWidget`,
  * cleared once `PRESENCE_TYPING_GLOW_MS` elapses with no further activity) is the "briefly when
  * they start typing" half.
+ *
+ * No `color` here, deliberately. Both this element's background *and* its text colour are set from
+ * the participant colour by `buildRemoteCursorWidget` (see `packages/screenplay-editor/src/
+ * contrast.ts`'s own top-of-file comment): the background has to come from JS, because the colour is
+ * per-participant data arriving over `Awareness`, and a `color: #fff` declared here alongside it was
+ * a contrast claim about every colour the palette might ever hold, made where nothing could check
+ * it -- and false for three of the eight it shipped with. Keeping a fallback `#fff` would only hide
+ * a future failure to set it; the two now live together in the one place that can compute them.
  */
 .remote-cursor-label {
   position: absolute;
@@ -1176,7 +1269,6 @@ select:focus-visible,
   white-space: pre;
   padding: 1px 4px;
   border-radius: 2px;
-  color: #fff;
   font-family: system-ui, sans-serif;
   font-size: 10px;
   font-weight: 600;
@@ -1245,7 +1337,7 @@ select:focus-visible,
 }
 
 .script-body [data-screenplay-block]:empty::after {
-  color: var(--text-04);
+  color: var(--text-07);
   content: 'Type screenplay text';
 }
 
@@ -1609,6 +1701,12 @@ select:focus-visible,
   margin-left: 10px;
 }
 
+/* The chip's background and the initial's colour are both set inline by `ParticipantAvatar`, for
+   the same reason `.remote-cursor-label` above declares neither: see that rule's comment, and
+   `packages/screenplay-editor/src/contrast.ts`. 9px bold is small text, and nothing in either
+   contrast metric certifies text this small at any colour -- what the inline pair guarantees is
+   only that the more legible of paper and ink is the one used, ranked by APCA. Enlarging this chip
+   is the change that would actually raise the floor; see contrast.ts. */
 .participant-avatar {
   display: flex;
   align-items: center;
@@ -1616,7 +1714,6 @@ select:focus-visible,
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  color: #fff;
   font-size: 9px;
   font-weight: 700;
   line-height: 1;
@@ -3087,6 +3184,22 @@ select:focus-visible,
   color: inherit;
 }
 
+/*
+ * Found while measuring the muted greys, and a different defect from the one that pass was about:
+ * the rule above has the same specificity as `.tool-button:disabled` (two classes each) and comes
+ * later in this file, so in the dark theme it won the cascade outright and a disabled toolbar
+ * button was painted in exactly the colour an enabled one is -- `cursor: default` was the only
+ * thing left saying otherwise. That is `app-shell.spec.ts`'s "a disabled instance rendered visually
+ * identical to an enabled one" defect, in a theme that spec does not exercise.
+ *
+ * Restated here rather than reordered: moving `.tool-button:disabled` below that block would put a
+ * disabled state's declaration hundreds of lines from the rest of the control it belongs to, and
+ * the next rule added to the block above would silently re-break it.
+ */
+.dark .tool-button:disabled {
+  color: var(--text-04);
+}
+
 .dark .panel-tabs,
 .dark .panel-heading,
 .dark .inspector-section {
@@ -3358,9 +3471,11 @@ select:focus-visible,
 
 /* The shortcut letter, set apart the way a menu sets an accelerator apart: right-aligned and
  * quieter than the name it belongs to, so the column reads as one list of elements rather than
- * fourteen words. `--text-04` is the grey `.smarttype-ghost` already uses for text that is on
- * offer rather than authored. It is real text, not a decoration -- a screen reader reads it as
- * part of the row's name, and the live region names it again. */
+ * fourteen words. `--text-07` is the muted-text grey `.smarttype-ghost` already uses for text that
+ * is on offer rather than authored -- the *real text* token, not the inactive-control one, because
+ * that is what this is: a screen reader reads it as part of the row's name, and the live region
+ * names it again. (It sat on `--text-04` until this pass, at 2.29:1 against the menu's white panel,
+ * which is the reading of "quieter" that its own sentence above never meant.) */
 .element-menu-key {
-  color: var(--text-04);
+  color: var(--text-07);
 }

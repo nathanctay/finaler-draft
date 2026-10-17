@@ -1582,3 +1582,7 @@ export const initialScreenplayContent: EditorContent = {
 // Remote presence: awareness-driven cursors and the participant list (slice 2). See
 // presence.ts's own top-of-file comment for what this carries and why.
 export * from './presence.js';
+
+// WCAG contrast arithmetic, and the paper-or-ink choice both painters of a participant's name make
+// from it. See contrast.ts's own top-of-file comment for why that rule lives in this package.
+export * from './contrast.js';
