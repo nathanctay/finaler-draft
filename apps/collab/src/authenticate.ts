@@ -5,6 +5,7 @@ import {
   TRANSIENT_SYNC_AUTH_FAILURE_REASON,
   UNKNOWN_DOCUMENT_EPOCH_FAILURE_REASON,
 } from '@finaler-draft/config';
+import { screenplayRoleLateral } from '@finaler-draft/database';
 import { isTrustedConnectionOrigin } from './originGuard.js';
 
 /**
@@ -36,14 +37,22 @@ export interface Queryable {
 }
 
 /**
- * The project role this actor holds on `screenplayId`, and that screenplay's current collaboration
- * epoch,
- * mirroring `apps/api/src/projects.ts`'s `getScreenplay` query exactly: joined through
- * `project_members`, and requiring both the screenplay and its parent project to be live
- * (`deleted_at is null`) -- a soft-deleted screenplay or project is unreachable here the same way
- * it is unreachable over REST. Returns `undefined` for "not a member, or the screenplay/project
- * does not exist" without distinguishing the two, the same information-hiding convention
- * `projects.ts` already uses.
+ * The role this actor holds on `screenplayId`, and that screenplay's current collaboration epoch,
+ * mirroring `apps/api/src/projects.ts`'s `getScreenplay` query exactly: resolved through
+ * `@finaler-draft/database`'s `screenplayRoleLateral`, and requiring both the screenplay and its
+ * parent project to be live (`deleted_at is null`) -- a soft-deleted screenplay or project is
+ * unreachable here the same way it is unreachable over REST. Returns `undefined` for "not a member,
+ * or the screenplay/project does not exist" without distinguishing the two, the same
+ * information-hiding convention `projects.ts` already uses.
+ *
+ * **This is the socket half of the screenplay-invitations slice's security property.** The previous
+ * `join project_members m on m.project_id = s.project_id` admitted any member of the project to any
+ * document under it, which for a screenplay-scoped member would have meant full collaborative
+ * access -- read *and*, for an editor, write -- to every sibling screenplay in the project, with
+ * the REST layer's own narrowing completely bypassed. `screenplayRoleLateral` resolves a role for
+ * this one screenplay, so `authenticateConnection` throws `'This document is not visible to this
+ * account'` for a sibling exactly as it does for a stranger. The lateral is the identical SQL
+ * fragment `apps/api` uses; a role is never resolved twice from two definitions.
  */
 async function fetchRoleAndEpoch(
   queryable: Queryable,
@@ -54,9 +63,8 @@ async function fetchRoleAndEpoch(
     `select m.role, s.current_epoch as "currentEpoch"
        from screenplays s
        join projects p on p.id = s.project_id
-       join project_members m on m.project_id = s.project_id
+       cross join lateral ${screenplayRoleLateral('$2')} m
       where s.id = $1
-        and m.user_id = $2
         and s.deleted_at is null
         and p.deleted_at is null`,
     [screenplayId, actorId],
@@ -71,25 +79,39 @@ async function fetchRoleAndEpoch(
 
 /**
  * The exact universe `entitlements.ts`'s `EntitlementSnapshot.candidateScreenplayIds` documents:
- * every screenplay where the actor holds `owner` or `editor` on a live screenplay under a live
- * project -- mirrors `apps/api/src/entitlementStore.ts`'s identically-named query. A `reviewer`
- * role is excluded by construction (the `in ('owner', 'editor')` clause), matching that file's own
- * comment: a reviewer cannot write regardless of billing state, so it can never occupy or contend
- * for the one editable slot.
+ * every screenplay where the actor holds `owner` or `editor` -- through project membership or
+ * through screenplay-scoped membership -- on a live screenplay under a live project; mirrors
+ * `apps/api/src/entitlementStore.ts`'s identically-named query, including its second `union`
+ * branch and that branch's reasoning (plan.md's "A free account **invited** to a screenplay may
+ * edit it by making it the one screenplay it holds editable"). A `reviewer` role is excluded by
+ * construction on both branches, matching that file's own comment: a reviewer cannot write
+ * regardless of billing state, so it can never occupy or contend for the one editable slot.
  */
 async function fetchCandidateScreenplayIds(
   queryable: Queryable,
   actorId: string,
 ): Promise<string[]> {
   const result = await queryable.query(
-    `select s.id
-       from screenplays s
-       join project_members m on m.project_id = s.project_id
-       join projects p on p.id = s.project_id
-      where m.user_id = $1
-        and m.role in ('owner', 'editor')
-        and s.deleted_at is null
-        and p.deleted_at is null`,
+    `select id
+       from (
+         select s.id
+           from screenplays s
+           join project_members m on m.project_id = s.project_id
+           join projects p on p.id = s.project_id
+          where m.user_id = $1
+            and m.role in ('owner', 'editor')
+            and s.deleted_at is null
+            and p.deleted_at is null
+         union
+         select s.id
+           from screenplays s
+           join screenplay_members sm on sm.screenplay_id = s.id
+           join projects p on p.id = s.project_id
+          where sm.user_id = $1
+            and sm.role = 'editor'
+            and s.deleted_at is null
+            and p.deleted_at is null
+       ) candidates`,
     [actorId],
   );
   return (result.rows as Array<{ id: string }>).map((row) => row.id);

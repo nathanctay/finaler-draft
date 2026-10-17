@@ -88,13 +88,30 @@ export interface StartRestoreNotificationListenerOptions {
 const DEFAULT_RETRY_DELAY_MS = 2_000;
 
 /**
- * Subscribes to `SCREENPLAY_RESTORED_NOTIFY_CHANNEL` and calls `onRestored` for every valid
- * notification, re-establishing the subscription if the connection fails. `dispose()` stops
- * retrying and closes the current connection; it is safe to call before the first connection has
- * even been established (a shutdown during startup), and after a failure.
+ * The channel-agnostic half of this module: own one connection, `LISTEN` on one channel, hand every
+ * payload to `onPayload`, and re-establish the subscription if the connection fails.
+ *
+ * Extracted when the screenplay-invitations slice added a second channel
+ * (`MEMBERSHIP_CHANGED_NOTIFY_CHANNEL`, see `membershipNotifications.ts`). Everything that was
+ * subtle about this -- a dedicated connection because `LISTEN` is session state and a pooled client
+ * would carry the subscription back into the pool, abandoning rather than closing a client that has
+ * already errored, a `dispose()` that is safe before the first connection exists, and a `started`
+ * promise a test can await instead of sleeping -- is identical for any channel, and a second copy
+ * of it would be a second chance to get one of those wrong. What stays per-channel is only the
+ * payload's own meaning, which is `onPayload`.
  */
-export function startRestoreNotificationListener(
-  options: StartRestoreNotificationListenerOptions,
+export interface StartNotificationListenerOptions {
+  channel: string;
+  connect: () => Promise<NotificationClient>;
+  onPayload: (payload: string | undefined) => void;
+  onError: (error: unknown) => void;
+  retryDelayMs?: number;
+  setTimeoutFn?: (callback: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  clearTimeoutFn?: (handle: ReturnType<typeof setTimeout>) => void;
+}
+
+export function startNotificationListener(
+  options: StartNotificationListenerOptions,
 ): RestoreNotificationListener {
   const retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
   const setTimeoutFn = options.setTimeoutFn ?? setTimeout;
@@ -121,10 +138,7 @@ export function startRestoreNotificationListener(
         return;
       }
       client = connected;
-      connected.onNotification((payload) => {
-        const notification = parseRestoreNotification(payload);
-        if (notification) options.onRestored(notification);
-      });
+      connected.onNotification((payload) => options.onPayload(payload));
       connected.onFailure((error) => {
         options.onError(error);
         // The failed client is abandoned rather than closed: a connection that just errored is not
@@ -132,7 +146,7 @@ export function startRestoreNotificationListener(
         if (client === connected) client = undefined;
         scheduleRetry();
       });
-      await connected.listen(SCREENPLAY_RESTORED_NOTIFY_CHANNEL);
+      await connected.listen(options.channel);
     } catch (error) {
       options.onError(error);
       client = undefined;
@@ -156,6 +170,33 @@ export function startRestoreNotificationListener(
       if (current) await current.close().catch(() => undefined);
     },
   };
+}
+
+/**
+ * Subscribes to `SCREENPLAY_RESTORED_NOTIFY_CHANNEL` and calls `onRestored` for every valid
+ * notification, re-establishing the subscription if the connection fails. `dispose()` stops
+ * retrying and closes the current connection; it is safe to call before the first connection has
+ * even been established (a shutdown during startup), and after a failure.
+ *
+ * A thin binding of `startNotificationListener` above to this one channel and this one payload
+ * shape -- the connection ownership and retry behaviour it used to implement itself are now shared
+ * with the membership-change listener, unchanged.
+ */
+export function startRestoreNotificationListener(
+  options: StartRestoreNotificationListenerOptions,
+): RestoreNotificationListener {
+  return startNotificationListener({
+    channel: SCREENPLAY_RESTORED_NOTIFY_CHANNEL,
+    connect: options.connect,
+    onError: options.onError,
+    onPayload: (payload) => {
+      const notification = parseRestoreNotification(payload);
+      if (notification) options.onRestored(notification);
+    },
+    ...(options.retryDelayMs === undefined ? {} : { retryDelayMs: options.retryDelayMs }),
+    ...(options.setTimeoutFn === undefined ? {} : { setTimeoutFn: options.setTimeoutFn }),
+    ...(options.clearTimeoutFn === undefined ? {} : { clearTimeoutFn: options.clearTimeoutFn }),
+  });
 }
 
 /** The two members of Hocuspocus's own `Connection` this module touches, named as an interface for

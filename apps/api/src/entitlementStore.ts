@@ -46,20 +46,51 @@ type Queryable = Pick<PoolClient, 'query'>;
 // so a reviewer-role screenplay can never occupy or contend for the slot), on a live screenplay
 // under a live project. Ordered by creation so results are deterministic for tests and logs, not
 // because order is policy-relevant.
+//
+// The screenplay-invitations slice adds the second branch: a screenplay-scoped editor's screenplay
+// is a candidate too. That is plan.md's entitlement design read literally -- "A free account
+// **invited** to a screenplay may edit it by making it the one screenplay it holds editable" --
+// and without it an invited free account could accept an invitation and then find the screenplay
+// permanently read-only, because `checkEntitlement` can only put a *candidate* in the slot.
+//
+// A `union` of two index-driven queries rather than a `cross join lateral` over `screenplays`:
+// unlike every single-screenplay lookup in this slice, this query has no screenplay id to start
+// from, so a lateral would have nothing to drive it but a full scan of every screenplay in the
+// installation. Each branch here is driven by its own membership index
+// (`project_members_user_id_index`, `screenplay_members_user_id_index`), exactly as the single
+// query it replaces was. `union`, not `union all`, so a screenplay reachable both ways appears
+// once.
+//
+// Most-privileged-wins (`screenplayRoleLateral`'s rule) is preserved rather than re-implemented: a
+// project editor who also holds a screenplay-scoped `reviewer` row is still a candidate via the
+// first branch, and a project reviewer who holds a screenplay-scoped `editor` row is a candidate
+// via the second. There is no combination this admits that the lateral would deny, or vice versa.
 async function fetchCandidateScreenplayIds(
   queryable: Queryable,
   actorId: string,
 ): Promise<string[]> {
   const result = await queryable.query(
-    `select s.id
-       from screenplays s
-       join project_members m on m.project_id = s.project_id
-       join projects p on p.id = s.project_id
-      where m.user_id = $1
-        and m.role in ('owner', 'editor')
-        and s.deleted_at is null
-        and p.deleted_at is null
-      order by s.created_at asc`,
+    `select id
+       from (
+         select s.id, s.created_at
+           from screenplays s
+           join project_members m on m.project_id = s.project_id
+           join projects p on p.id = s.project_id
+          where m.user_id = $1
+            and m.role in ('owner', 'editor')
+            and s.deleted_at is null
+            and p.deleted_at is null
+         union
+         select s.id, s.created_at
+           from screenplays s
+           join screenplay_members sm on sm.screenplay_id = s.id
+           join projects p on p.id = s.project_id
+          where sm.user_id = $1
+            and sm.role = 'editor'
+            and s.deleted_at is null
+            and p.deleted_at is null
+       ) candidates
+      order by created_at asc`,
     [actorId],
   );
   return (result.rows as Array<{ id: string }>).map((row) => row.id);

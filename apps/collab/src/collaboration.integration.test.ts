@@ -23,6 +23,7 @@ import {
   screenplayToPlainText,
 } from '@finaler-draft/screenplay';
 import {
+  MEMBERSHIP_CHANGED_NOTIFY_CHANNEL,
   restoreRevisionAsCurrent,
   type RestoreRevisionAsCurrentResult,
 } from '@finaler-draft/database';
@@ -47,6 +48,10 @@ import {
   type NotificationClient,
   type RestoreNotificationListener,
 } from './restoreNotifications.js';
+import {
+  disconnectMembershipChangedConnections,
+  startMembershipNotificationListener,
+} from './membershipNotifications.js';
 import {
   resolvePresenceIdentity,
   sanitizeAwarenessStates,
@@ -138,28 +143,40 @@ async function startServer(
   // server is holding, rather than the test calling `supersedeRestoredDocuments` by hand and proving
   // only half the path.
   let onRestored: (notification: { screenplayId: string; epoch: number }) => void = () => undefined;
+  const connectNotificationClient = async (): Promise<NotificationClient> => {
+    const client = new Client({ connectionString: databaseUrl });
+    await client.connect();
+    const adapted: NotificationClient = {
+      close: async () => {
+        await client.end();
+      },
+      listen: async (channel) => {
+        await client.query(`listen ${channel}`);
+      },
+      onFailure: (listener) => {
+        client.on('error', listener);
+      },
+      onNotification: (listener) => {
+        client.on('notification', (message) => listener(message.payload));
+      },
+    };
+    return adapted;
+  };
   const restoreNotifications: RestoreNotificationListener = startRestoreNotificationListener({
-    connect: async () => {
-      const client = new Client({ connectionString: databaseUrl });
-      await client.connect();
-      const adapted: NotificationClient = {
-        close: async () => {
-          await client.end();
-        },
-        listen: async (channel) => {
-          await client.query(`listen ${channel}`);
-        },
-        onFailure: (listener) => {
-          client.on('error', listener);
-        },
-        onNotification: (listener) => {
-          client.on('notification', (message) => listener(message.payload));
-        },
-      };
-      return adapted;
-    },
+    connect: connectNotificationClient,
     onError: () => undefined,
     onRestored: (notification) => onRestored(notification),
+  });
+  // The screenplay-invitations slice. Wired here for the same reason every other hook in this
+  // harness is: `server.ts` is a self-executing entrypoint rather than an exported config, so this
+  // file rebuilds its wiring by hand and the tests below exist to catch the two drifting apart.
+  // Without this, a demotion or removal would have no effect on a live connection in this suite and
+  // the test that proves otherwise would be proving nothing.
+  let onMembershipChanged: (notification: { userId: string }) => void = () => undefined;
+  const membershipNotifications: RestoreNotificationListener = startMembershipNotificationListener({
+    connect: connectNotificationClient,
+    onError: () => undefined,
+    onMembershipChanged: (notification) => onMembershipChanged(notification),
   });
   const instance = new Server({
     address: '127.0.0.1',
@@ -238,6 +255,7 @@ async function startServer(
     // process is exiting): several tests destroy and restart the server mid-run.
     async onDestroy() {
       await restoreNotifications.dispose();
+      await membershipNotifications.dispose();
     },
     port: 0,
     quiet: true,
@@ -247,7 +265,11 @@ async function startServer(
   onRestored = (notification) => {
     supersedeRestoredDocuments(instance.hocuspocus.documents.values(), notification);
   };
+  onMembershipChanged = (notification) => {
+    disconnectMembershipChangedConnections(instance.hocuspocus.documents.values(), notification);
+  };
   await restoreNotifications.started;
+  await membershipNotifications.started;
   await instance.listen();
   return instance;
 }
@@ -710,6 +732,212 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
       reviewerClient.destroy();
     }
   }, 20_000);
+
+  /**
+   * The screenplay-invitations slice's central security property, at the layer that enforces it on
+   * this side: **a member invited to one screenplay cannot reach a sibling screenplay in the same
+   * project over the collaboration socket.**
+   *
+   * The REST half of the same property is proven path by path in
+   * `apps/api/src/sharing.integration.test.ts`. This is the half that could not be proven there,
+   * and the one that would matter most if it were wrong: a socket connection to a sibling document
+   * would be full collaborative access -- live content streamed in, and for an `editor` role,
+   * writes accepted -- with the REST layer's narrowing bypassed entirely. Both directions are
+   * asserted in one test on purpose: that the invited screenplay *does* connect is what proves the
+   * sibling's refusal is the scope working rather than the fixture simply being broken.
+   */
+  it('a screenplay-scoped member connects to their own screenplay but is denied the sibling screenplay in the same project', async () => {
+    const owner = await signUp('owner-screenplay-scope@example.test');
+    const guest = await signUp('guest-screenplay-scope@example.test');
+    const { projectId, screenplayId } = await createProjectAndScreenplay(owner.actorId);
+    const sibling = await createSiblingScreenplay(projectId);
+    // Screenplay-scoped `editor` on one screenplay only -- and, pointedly, no `project_members`
+    // row at all, which is the whole modelling choice under test.
+    await addScreenplayMember(screenplayId, guest.actorId, 'editor');
+
+    const invited = connectProvider(screenplayId, guest.token);
+    try {
+      await waitForSynced(invited);
+      // Genuinely an editor on this one: not read-only, so the write path is really open here.
+      expect(invited.authorizedScope).not.toBe('readonly');
+    } finally {
+      invited.destroy();
+    }
+
+    const toSibling = connectProvider(sibling.screenplayId, guest.token);
+    try {
+      // `authenticateConnection` throws `'This document is not visible to this account'`, which
+      // Hocuspocus reports as its own `permission-denied` -- the identical, terminal refusal a
+      // complete stranger gets, never a read-only admission.
+      await expect(waitForSynced(toSibling)).rejects.toThrow(/Authentication failed/);
+      expect(toSibling.isSynced).toBe(false);
+    } finally {
+      toSibling.destroy();
+    }
+  }, 20_000);
+
+  /**
+   * The same claim for a screenplay-scoped **reviewer**, because the two roles fail differently if
+   * the scope is wrong: a reviewer connecting to a sibling would be admitted read-only rather than
+   * refused, which is a smaller leak than an editor's but still a leak of the whole document's live
+   * content. Asserting only the editor case would leave that unproven.
+   */
+  it('a screenplay-scoped reviewer is read-only on their own screenplay and denied -- not merely read-only -- on the sibling', async () => {
+    const owner = await signUp('owner-screenplay-scope-reviewer@example.test');
+    const guest = await signUp('guest-screenplay-scope-reviewer@example.test');
+    const { projectId, screenplayId } = await createProjectAndScreenplay(owner.actorId);
+    const sibling = await createSiblingScreenplay(projectId);
+    await addScreenplayMember(screenplayId, guest.actorId, 'reviewer');
+
+    const invited = connectProvider(screenplayId, guest.token);
+    try {
+      await waitForSynced(invited);
+      expect(invited.authorizedScope).toBe('readonly');
+    } finally {
+      invited.destroy();
+    }
+
+    const toSibling = connectProvider(sibling.screenplayId, guest.token);
+    try {
+      await expect(waitForSynced(toSibling)).rejects.toThrow(/Authentication failed/);
+      expect(toSibling.isSynced).toBe(false);
+    } finally {
+      toSibling.destroy();
+    }
+  }, 20_000);
+
+  /**
+   * **A pending invitation grants no access at all.** Not read-only access, not a connection that
+   * is admitted and then quietly inert -- no connection. `membership_invitations` is never joined by
+   * `resolveConnectionAuthorization`, so this is the socket-side proof of the property
+   * `apps/api/src/sharing.integration.test.ts` proves for every REST path.
+   *
+   * Both scopes, because they would fail differently: a project-scoped invitation leaking would
+   * expose every screenplay in the project at once.
+   */
+  it('a pending invitation grants no collaboration access, at either scope', async () => {
+    const owner = await signUp('owner-pending-invite@example.test');
+    const screenplayInvitee = await signUp('pending-screenplay-invite@example.test');
+    const projectInvitee = await signUp('pending-project-invite@example.test');
+    const { projectId, screenplayId } = await createProjectAndScreenplay(owner.actorId);
+
+    await addPendingInvitation(projectId, screenplayId, screenplayInvitee.actorId, 'editor');
+    await addPendingInvitation(projectId, null, projectInvitee.actorId, 'editor');
+
+    for (const invitee of [screenplayInvitee, projectInvitee]) {
+      const provider = connectProvider(screenplayId, invitee.token);
+      try {
+        await expect(waitForSynced(provider)).rejects.toThrow(/Authentication failed/);
+        expect(provider.isSynced).toBe(false);
+      } finally {
+        provider.destroy();
+      }
+    }
+
+    // And nothing about the invitations was consumed by the attempt -- they are still pending, so
+    // this proves refusal rather than some side effect having cleared them.
+    const pending = await pool!.query<{ count: string }>(
+      "select count(*) as count from membership_invitations where status = 'pending' and project_id = $1",
+      [projectId],
+    );
+    expect(pending.rows[0]!.count).toBe('2');
+  });
+
+  /**
+   * What happens to a connection that is **already open** when its holder is removed.
+   *
+   * `resolveConnectionAuthorization` runs once, at connection time, so without this the removal
+   * would have no effect until the writer happened to reconnect -- which for an open tab is
+   * unbounded, and is exactly the "silently leaves a removed member writing" outcome the brief
+   * forbids. The mechanism is the membership-changed notification closing the socket; the reconnect
+   * then re-authorizes against the database and is refused.
+   *
+   * Asserted as "their writes stop reaching the owner's document", not merely "the socket closed":
+   * a closed socket that silently reconnected with its old authorization would satisfy the weaker
+   * claim and still be the bug.
+   */
+  it('a member removed while connected has their live connection closed, and their further writes never reach the document again', async () => {
+    const owner = await signUp('owner-live-removal@example.test');
+    const guest = await signUp('guest-live-removal@example.test');
+    const { screenplayId } = await createProjectAndScreenplay(owner.actorId);
+    await addScreenplayMember(screenplayId, guest.actorId, 'editor');
+
+    const ownerClient = connectProvider(screenplayId, owner.token);
+    const guestClient = connectProvider(screenplayId, guest.token);
+    try {
+      await Promise.all([waitForSynced(ownerClient), waitForSynced(guestClient)]);
+      // Writing before the removal, so the "after" assertion is a change in behaviour rather than
+      // a write path that never worked.
+      writeLine(guestClient, 'An invited editor line, written while they still had access.');
+      await waitForCondition(() =>
+        projectedText(ownerClient).includes(
+          'An invited editor line, written while they still had access.',
+        ),
+      );
+
+      await pool!.query(
+        'delete from screenplay_members where screenplay_id = $1 and user_id = $2',
+        [screenplayId, guest.actorId],
+      );
+      await notifyMembershipChanged(guest.actorId);
+
+      // The server closes the connection it was holding for that account.
+      await waitForCondition(() => !guestClient.isSynced);
+
+      // Their further writes never arrive, however long they keep typing locally. A fixed wait,
+      // not `waitForCondition` polling for absence -- the same reasoning the reviewer
+      // write-rejection test above gives for proving a negative.
+      writeLine(guestClient, 'A removed member line that must never survive.');
+      await sleep(1_000);
+      expect(projectedText(ownerClient)).not.toContain(
+        'A removed member line that must never survive.',
+      );
+      // The owner's own connection is untouched: a removal is about one account, not the document.
+      writeLine(ownerClient, 'An owner line written after the removal.');
+      await waitForCondition(() =>
+        projectedText(ownerClient).includes('An owner line written after the removal.'),
+      );
+    } finally {
+      ownerClient.destroy();
+      guestClient.destroy();
+    }
+  }, 30_000);
+
+  /**
+   * The demotion half of the same mechanism: editor -> reviewer on a live connection. The socket is
+   * closed exactly as for a removal, and what differs is only what the reconnect resolves to --
+   * admitted, but read-only. Proven by reconnecting explicitly and checking the new connection's
+   * own scope, because that is the state a real client ends up in.
+   */
+  it('a member demoted from editor to reviewer while connected is closed, and reconnects read-only', async () => {
+    const owner = await signUp('owner-live-demotion@example.test');
+    const guest = await signUp('guest-live-demotion@example.test');
+    const { screenplayId } = await createProjectAndScreenplay(owner.actorId);
+    await addScreenplayMember(screenplayId, guest.actorId, 'editor');
+
+    const guestClient = connectProvider(screenplayId, guest.token);
+    try {
+      await waitForSynced(guestClient);
+      expect(guestClient.authorizedScope).not.toBe('readonly');
+
+      await pool!.query(
+        "update screenplay_members set role = 'reviewer' where screenplay_id = $1 and user_id = $2",
+        [screenplayId, guest.actorId],
+      );
+      await notifyMembershipChanged(guest.actorId);
+      await waitForCondition(() => !guestClient.isSynced);
+    } finally {
+      guestClient.destroy();
+    }
+
+    const afterDemotion = connectProvider(screenplayId, guest.token);
+    try {
+      await waitForSynced(afterDemotion);
+      expect(afterDemotion.authorizedScope).toBe('readonly');
+    } finally {
+      afterDemotion.destroy();
+    }
+  }, 30_000);
 
   // Alongside the reviewer test above: the *other* way a connection ends up read-only --
   // `checkEntitlement`'s `edit-screenplay`/`'not-in-slot'` branch (a restricted-tier account with
@@ -1824,6 +2052,23 @@ async function createProjectAndScreenplay(
   return { projectId, screenplayId };
 }
 
+/**
+ * A second screenplay in an existing project -- the "sibling" every screenplay-scope test is about.
+ * Deliberately a separate helper rather than a parameter on `createProjectAndScreenplay`: the thing
+ * under test is reachability *across* two screenplays under one project, and a helper whose name
+ * says "sibling" makes each test's fixture read as the scenario it is.
+ */
+async function createSiblingScreenplay(projectId: string): Promise<{ screenplayId: string }> {
+  const screenplayId = randomUUID();
+  const screenplay = { ...screenplayFixture, id: screenplayId };
+  await pool!.query(
+    `insert into screenplays (id, project_id, title, canonical_screenplay, canonical_hash)
+     values ($1, $2, $3, $4::jsonb, $5)`,
+    [screenplayId, projectId, 'Sibling Screenplay', JSON.stringify(screenplay), 'sibling-hash'],
+  );
+  return { screenplayId };
+}
+
 async function addMember(
   projectId: string,
   actorId: string,
@@ -1851,6 +2096,54 @@ async function addMember(
  * just forwards to this identical handler) -- `apps/collab` never mounts one, and Better Auth's
  * handler is framework-agnostic by design.
  */
+/**
+ * Screenplay-scoped membership, inserted directly -- the same fixture shape `addMember` above uses
+ * for `project_members`, and correct for the same reason: the invite/accept flow that produces
+ * these rows in the product is proven end to end in `apps/api/src/sharing.integration.test.ts`,
+ * while this file's job is proving what `apps/collab` does with a row once it exists.
+ */
+async function addScreenplayMember(
+  screenplayId: string,
+  actorId: string,
+  role: 'editor' | 'reviewer',
+): Promise<void> {
+  await pool!.query(
+    'insert into screenplay_members (screenplay_id, user_id, role) values ($1, $2, $3)',
+    [screenplayId, actorId, role],
+  );
+}
+
+/** A pending invitation and nothing else -- no membership row of any kind. This is the fixture for
+ * "an invitation grants no access": if it did, this is the only state that could reveal it. */
+async function addPendingInvitation(
+  projectId: string,
+  screenplayId: string | null,
+  actorId: string,
+  role: 'editor' | 'reviewer',
+): Promise<void> {
+  await pool!.query(
+    `insert into membership_invitations
+       (project_id, screenplay_id, invited_user_id, invited_by_user_id, role, status)
+     values ($1, $2, $3, null, $4, 'pending')`,
+    [projectId, screenplayId, actorId, role],
+  );
+}
+
+/**
+ * Issues exactly the notification `apps/api`'s `changeMemberRole`/`removeMember` issue on commit
+ * (`MEMBERSHIP_CHANGED_NOTIFY_CHANNEL`, payload `{userId}`). Deliberately not a call into
+ * `apps/api`'s sharing store, which this service does not and must not depend on: that store's own
+ * integration suite proves it emits this notification, and this file proves `apps/collab` acts on
+ * it -- the two halves meet at the channel and the payload shape, which is the only thing the two
+ * services actually share.
+ */
+async function notifyMembershipChanged(userId: string): Promise<void> {
+  await pool!.query('select pg_notify($1, $2)', [
+    MEMBERSHIP_CHANGED_NOTIFY_CHANNEL,
+    JSON.stringify({ userId }),
+  ]);
+}
+
 async function signUp(email: string): Promise<{ actorId: string; token: string }> {
   const signUpResponse = await auth!.handler(
     new Request('http://127.0.0.1:4000/api/auth/sign-up/email', {

@@ -6,9 +6,11 @@ import { createEntitlementEnforcedProjectStore } from './entitlementProjectStore
 import { createPostgresEntitlementStore } from './entitlementStore.js';
 import { loadRootEnvironment, shouldLoadRootEnvironment } from './environment.js';
 import { selectMailPort, type MailMessage } from '@finaler-draft/auth-server/mail';
+import { createInvitationMailNotifier } from './invitationMail.js';
 import { createPostgresProjectStore } from './projects.js';
 import { createPostgresRevisionStore } from './revisions.js';
 import { createPostgresRestoreStore } from './restore.js';
+import { createPostgresSharingStore } from './sharing.js';
 import { createStripeClient } from './stripeClient.js';
 import {
   createStripeIpAllowlist,
@@ -209,6 +211,16 @@ async function buildPersistentApp(
     // (`edit-screenplay` for this specific screenplay) is not one `createEntitlementEnforcedProjectStore`
     // makes for any of its own methods -- see `restore.ts`'s own module comment.
     restore: createPostgresRestoreStore(pool, entitlements),
+    // The screenplay-invitations slice. Takes the same `mail` port `createAuth` was given a few
+    // lines above -- one mail path for this process, not a second one (see
+    // `invitationMail.ts`'s own comment), which is also what keeps a system-test process from
+    // reaching a live provider: `selectMailPort` already forced the logging port for that case
+    // before either consumer saw it.
+    //
+    // `appOrigin` is reused rather than recomputed; it is the same public origin Checkout's
+    // redirects use, and the invitation email needs it for the one link it carries -- a link to the
+    // invitee's own dashboard, never an accept token.
+    sharing: createPostgresSharingStore(pool, createInvitationMailNotifier(mail, appOrigin)),
     collab: collabTokenConfigured ? { secret: persistence.COLLAB_TOKEN_SECRET! } : undefined,
     stripe: stripeConfigured
       ? {

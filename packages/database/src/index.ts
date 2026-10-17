@@ -34,6 +34,20 @@ export {
   type RestoreRevisionAsCurrentResult,
 } from './restore.js';
 
+// The screenplay-invitations slice: the one definition of "what role does this actor hold on this
+// screenplay" (now that a role can come from either `project_members` or `screenplay_members`), plus
+// the notify channel a committed membership change reaches `apps/collab` on. See `membership.ts`'s
+// own module comment for why this is one shared SQL fragment rather than five copies of one join.
+export {
+  MEMBERSHIP_CHANGED_NOTIFY_CHANNEL,
+  parseMembershipChangedNotification,
+  roleCanEdit,
+  ROLE_PRECEDENCE_SQL,
+  screenplayRoleLateral,
+  type EffectiveRole,
+  type MembershipChangedNotification,
+} from './membership.js';
+
 export function createDatabase(connectionString: string) {
   const pool = new Pool({
     connectionString,

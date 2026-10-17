@@ -708,6 +708,10 @@ describe('revision diff page: the editor’s chrome, not a plainer page', () => 
       'Document settings…',
       'Save named revision…',
       'Revision history…',
+      // The screenplay-invitations slice. Disabled here like the five around it -- the loop below
+      // additionally requires its tooltip to explain itself in terms of the comparison, which is
+      // what keeps this from passing on an item that was merely forgotten and left inert.
+      'Share…',
       'Download FDX…',
       'Download DOCX…',
       'Download PDF…',

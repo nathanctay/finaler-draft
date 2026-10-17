@@ -2270,6 +2270,97 @@ select:focus-visible,
   font-size: 13px;
 }
 
+/* The screenplay-invitations slice's sharing dialog (sharingDialog.tsx). Wider than `.dialog`'s own
+   360px because every row here carries four things on one line -- a name, an address, a role
+   control and a remove button -- and wrapping an address mid-row makes a member list much harder to
+   scan than it makes it narrow. Still viewport-bounded by the same `calc(100vw - 32px)` rule, so it
+   never overflows a phone. */
+.sharing-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+
+/* The invite form. A grid rather than flex so the email field takes the slack while the role select
+   and the button stay at their natural widths; it collapses to one column below the point where
+   three controls on a line stop fitting. */
+.sharing-invite-row {
+  display: grid;
+  align-items: end;
+  gap: 8px;
+  grid-template-columns: 1fr auto auto;
+}
+
+@media (width <= 560px) {
+  .sharing-invite-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sharing-invite-row .dialog-field input[type='email'] {
+  width: 100%;
+  border: 1px solid var(--border-04);
+  border-radius: 2px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+/* An invite outcome that is not a failure -- "no account for that address", "that is you", "they
+   already have this", and the success confirmation. Deliberately not `.field-error`'s colouring:
+   none of these is an error, and three of the four are the server answering a perfectly legitimate
+   request. */
+.sharing-notice {
+  margin: 0;
+  color: var(--text-09);
+  font-size: 12px;
+}
+
+.sharing-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  gap: 4px;
+  padding: 0;
+  list-style: none;
+}
+
+.sharing-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.sharing-row-identity {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+/* `overflow-wrap`, not `text-overflow: ellipsis`: an address is the identity the inviter typed and
+   the thing that distinguishes two collaborators with the same display name, so truncating it
+   silently is worse than letting a long one wrap. */
+.sharing-row-email {
+  overflow-wrap: anywhere;
+  color: var(--text-08);
+  font-size: 12px;
+}
+
+.sharing-row-role {
+  color: var(--text-08);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Pending invitations on the dashboard (routes/projects/index.tsx). Each row is a
+   `.readonly-banner` with a `.readonly-banner-actions` pair, reusing the established shape rather
+   than a new one -- this only stacks them and spaces them from the list below. */
+.invitation-list {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 16px;
+  gap: 8px;
+}
+
 .dialog-field-checkbox {
   flex-direction: row;
   align-items: center;

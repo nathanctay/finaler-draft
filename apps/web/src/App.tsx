@@ -330,6 +330,7 @@ export function App({
   historicalRevision,
   initial = legacyInitial,
   onOpenRevisionHistory,
+  onOpenSharing,
   onReloadRestoredDocument,
 }: {
   entitlementReadOnly?: EntitlementReadOnly | undefined;
@@ -345,6 +346,18 @@ export function App({
    * while already viewing history.
    */
   onOpenRevisionHistory?: () => void;
+  /**
+   * The screenplay-invitations slice's third entry point: the File menu's "Share…".
+   *
+   * A callback supplied by the live screenplay route, for exactly the reasons
+   * `onOpenRevisionHistory` above is one -- `App` stays free of `@tanstack/react-router` and of the
+   * sharing dialog's own chunk, and the route owns the dialog. Its *presence* is also the
+   * authorization signal: the route supplies it only for a viewer the server would let share
+   * (owner or editor on the project), so this file never recomputes that rule, and the
+   * historical-revision preview route never supplies it at all -- sharing a stored snapshot is not
+   * a thing, exactly as opening history from inside history is not.
+   */
+  onOpenSharing?: () => void;
   /**
    * Collaboration slice 5, plan.md step 4: "connected clients receive a restore event and reload the
    * new epoch." Called when the writer accepts the restore banner's invitation to open the restored
@@ -2014,6 +2027,13 @@ export function App({
             ...(onOpenRevisionHistory
               ? [{ label: 'Revision history…', onSelect: onOpenRevisionHistory }]
               : []),
+            // Present only when the route supplied it -- see `onOpenSharing`. Never disabled: it is
+            // offered exactly when it would work, so there is no "read-only" or entitlement state
+            // for it to explain. Sharing is not an edit to the document, so unlike "Document
+            // settings…" and "Save named revision…" above it is deliberately not gated on
+            // `editingAllowed`: a lapsed subscription makes a screenplay read-only, and has nothing
+            // to say about whether its owner may invite a collaborator.
+            ...(onOpenSharing ? [{ label: 'Share…', onSelect: onOpenSharing }] : []),
             {
               // Disabled, not a no-op, when `projection` is invalid: the FDX exporter takes a
               // canonical `Screenplay` (see `packages/fdx`'s own doc comment), which an invalid

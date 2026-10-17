@@ -38,6 +38,14 @@ import {
 import { createRevisionInput, type RevisionStore } from './revisions.js';
 import { restoreRevisionInput, type RestoreStore } from './restore.js';
 import {
+  changeRoleInput,
+  inviteInput,
+  NO_ACCOUNT_MESSAGE,
+  respondToInvitationInput,
+  type SharingScope,
+  type SharingStore,
+} from './sharing.js';
+import {
   createCheckoutSession,
   createPortalSession,
   fetchBillingPlans,
@@ -185,6 +193,18 @@ export interface BuildAppOptions {
    * registered at all, matching every other optional store here.
    */
   restore?: RestoreStore;
+  /**
+   * Backs the whole invitations/membership surface -- the inviter-side sharing views and
+   * invite/role-change/remove/revoke writes under `/api/projects/:id/...` and
+   * `/api/screenplays/:id/...`, plus the invitee-side `/api/invitations` list and accept/decline.
+   *
+   * A separate option from `projects` for the same reason `revisions` and `restore` are: its
+   * authorization is a different question (who may *grant* access, which is project owner-or-editor
+   * for both scopes, never a screenplay-scoped role -- see `sharing.ts`'s module comment), and it
+   * is the only store here that writes membership at all. Absent means none of these routes is
+   * registered, matching every other optional store.
+   */
+  sharing?: SharingStore;
 }
 
 const idParam = z.object({ id: z.string().uuid() });
@@ -278,6 +298,9 @@ const screenplayListItemSchema = z.object({
   id: z.string(),
   title: z.string(),
   updatedAt: z.string(),
+  // See `screenplayResponseSchema.role` -- same field, same purpose, for the per-row three-dot
+  // menu on the project page rather than the editor's File menu.
+  role: z.enum(['owner', 'editor', 'reviewer']),
 });
 const createScreenplayResponseSchema = z.object({ id: z.string() });
 const screenplayResponseSchema = z.object({
@@ -292,12 +315,29 @@ const screenplayResponseSchema = z.object({
   // database, which is what keeps a pre-restore document's offline work from merging into the
   // restored one -- and for the `epoch` every epoch-gated write below must carry.
   currentEpoch: z.number().int().min(0),
+  // The screenplay-invitations slice: the viewer's own effective role on this screenplay, resolved
+  // by the same lateral that authorized the read. The editor's File menu uses it to decide whether
+  // "Share…" is offered at all; it never gates a write, which stays the server's decision on every
+  // path.
+  role: z.enum(['owner', 'editor', 'reviewer']),
 });
 // Shared by both projects and screenplays: rename and restore both return the resource's
 // current id and title, and delete returns just the id it acted on. One schema per shape rather
 // than four near-identical ones, since the two resources' responses are structurally identical.
 const renameResponseSchema = z.object({ id: z.string(), title: z.string() });
 const deleteResponseSchema = z.object({ id: z.string() });
+// The dashboard's "Shared with you" section -- every screenplay this actor reaches only through
+// screenplay-scoped membership. See `ProjectStore.listSharedScreenplays` for why these arrive as
+// screenplays rather than as projects, and why that is what keeps project-level controls away from
+// someone who cannot use them.
+const sharedScreenplaySchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  updatedAt: z.string(),
+  projectId: z.string(),
+  projectTitle: z.string(),
+  role: z.enum(['owner', 'editor', 'reviewer']),
+});
 const deletedProjectSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -518,6 +558,83 @@ const planPriceSchema = z.object({
   interval: z.string().nullable(),
 });
 const billingPlansResponseSchema = z.object({ monthly: planPriceSchema, annual: planPriceSchema });
+
+// The screenplay-invitations slice. Mirrors `sharing.ts`'s own `SharingView`/`IncomingInvitation`
+// shapes field for field, the same convention every schema in this file follows -- a schema whose
+// fields did not match would silently strip data rather than fail loudly.
+//
+// `email` appears on the inviter-side member and invitation lists but *not* on the invitee-side
+// list below. That asymmetry is deliberate: the inviter-side viewer is an owner/editor managing a
+// project they can already share, and the address is the identity they themselves typed to invite
+// someone (and the only thing that distinguishes two collaborators with the same display name).
+// The invitee has typed nothing and needs nothing: their list carries the inviter's display name
+// only.
+const sharedRoleResponseSchema = z.enum(['editor', 'reviewer']);
+const sharingMemberSchema = z.object({
+  userId: z.string(),
+  name: z.string(),
+  email: z.string(),
+  role: z.enum(['owner', 'editor', 'reviewer']),
+  scope: z.enum(['project', 'screenplay']),
+});
+const sharingInvitationSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  email: z.string(),
+  role: sharedRoleResponseSchema,
+  createdAt: z.string(),
+});
+const sharingViewResponseSchema = z.object({
+  members: z.array(sharingMemberSchema),
+  invitations: z.array(sharingInvitationSchema),
+});
+// One schema for every outcome of `POST .../invitations`, discriminated on `outcome`, rather than
+// a 2xx body plus several error codes. Only `'no-account'`, `'self'` and `'already-member'` could
+// plausibly have been status codes, and all three are *successful* evaluations of a legitimate
+// request by an authorized inviter -- nothing failed, the answer is simply "that would not do what
+// you meant." Returning them as data is what lets the dialog say precisely which one happened; a
+// shared 4xx would have had the client parsing prose to tell them apart.
+const inviteResponseSchema = z.discriminatedUnion('outcome', [
+  z.object({
+    outcome: z.literal('invited'),
+    created: z.boolean(),
+    invitation: sharingInvitationSchema,
+  }),
+  z.object({
+    outcome: z.literal('already-member'),
+    role: z.enum(['owner', 'editor', 'reviewer']),
+    scope: z.enum(['project', 'screenplay']),
+  }),
+  z.object({ outcome: z.literal('no-account'), message: z.string() }),
+  z.object({ outcome: z.literal('self') }),
+]);
+const memberChangeResponseSchema = z.discriminatedUnion('outcome', [
+  z.object({ outcome: z.literal('changed'), role: z.enum(['owner', 'editor', 'reviewer']) }),
+  z.object({ outcome: z.literal('removed') }),
+  z.object({ outcome: z.literal('not-a-member') }),
+  z.object({ outcome: z.literal('owner-immutable') }),
+]);
+const incomingInvitationSchema = z.object({
+  id: z.string().uuid(),
+  role: sharedRoleResponseSchema,
+  createdAt: z.string(),
+  projectId: z.string().uuid(),
+  projectTitle: z.string(),
+  screenplayId: z.string().uuid().nullable(),
+  screenplayTitle: z.string().nullable(),
+  invitedByName: z.string().nullable(),
+});
+const respondToInvitationResponseSchema = z.discriminatedUnion('outcome', [
+  z.object({
+    outcome: z.literal('accepted'),
+    projectId: z.string().uuid(),
+    screenplayId: z.string().uuid().nullable(),
+    role: sharedRoleResponseSchema,
+  }),
+  z.object({ outcome: z.literal('declined') }),
+  z.object({ outcome: z.literal('not-pending') }),
+]);
+const revokeInvitationResponseSchema = z.object({ outcome: z.literal('revoked') });
 
 /**
  * Pure projection from an `EntitlementSnapshot` to the wire shape `GET /api/entitlement` returns.
@@ -927,13 +1044,23 @@ export async function buildApp(options: BuildAppOptions = {}) {
     });
   }
 
+  // Every option whose routes sit behind the authenticated-actor hook below must be listed here,
+  // or the hook is not registered at all and those routes run with `request.actorId` undefined --
+  // not denied, *unauthenticated*. `restore` and `sharing` were both missing from this condition
+  // (the first a latent gap: `server.ts` always supplies `projects` too, so the hook always
+  // registered in production and the omission never showed). `sharingRoutes.test.ts`'s
+  // "requires an authenticated session" case builds an app with `sharing` as the *only* store and
+  // is what makes this list's completeness an asserted property rather than a coincidence of how
+  // `server.ts` happens to wire things.
   if (
     options.auth &&
     (options.projects ||
       options.entitlements ||
       options.billing ||
       options.collab ||
-      options.revisions)
+      options.revisions ||
+      options.restore ||
+      options.sharing)
   ) {
     // Runs as `preValidation`, not `preHandler`. Fastify's request lifecycle runs
     // preValidation -> schema validation -> preHandler -> the route handler, and before this
@@ -958,7 +1085,16 @@ export async function buildApp(options: BuildAppOptions = {}) {
         !request.url.startsWith('/api/deleted') &&
         !request.url.startsWith('/api/entitlement') &&
         !request.url.startsWith('/api/billing') &&
-        !request.url.startsWith('/api/collab')
+        !request.url.startsWith('/api/collab') &&
+        // The screenplay-invitations slice's two invitee-side prefixes. They carry the identical
+        // authenticated-actor and same-origin requirements as everything else here, and for the
+        // sharing routes specifically that is load-bearing rather than incidental: the invite
+        // endpoint reports honestly whether an address has an account, which is only defensible
+        // because reaching it at all requires an authenticated session (this hook) *and*
+        // owner-or-editor membership on the project (`sharing.ts`'s own check). The inviter-side
+        // routes sit under `/api/projects` and `/api/screenplays`, already listed above.
+        !request.url.startsWith('/api/invitations') &&
+        !request.url.startsWith('/api/shared-screenplays')
       )
         return;
       // Checked ahead of the session lookup: a forged cross-origin request is rejected outright
@@ -1338,6 +1474,15 @@ export async function buildApp(options: BuildAppOptions = {}) {
       { schema: { response: { 200: deletedResponseSchema } } },
       async (request) => options.projects!.listDeleted(request.actorId!),
     );
+    // Not `/api/projects/shared-screenplays`, for exactly the reason `/api/deleted` is not
+    // `/api/projects/deleted`: `/api/projects/:id` already owns that path shape, so the literal
+    // segment would bind as `:id` and fail UUID validation with a 400 before this handler ran.
+    // Its prefix is listed in the `preValidation` hook above alongside `/api/invitations`.
+    typedApp.get(
+      '/api/shared-screenplays',
+      { schema: { response: { 200: z.array(sharedScreenplaySchema) } } },
+      async (request) => options.projects!.listSharedScreenplays(request.actorId!),
+    );
   }
 
   if (options.auth && options.revisions) {
@@ -1488,6 +1633,205 @@ export async function buildApp(options: BuildAppOptions = {}) {
           return reply.code(409).send({
             error: 'This screenplay has already moved on to a newer version. Reload and try again.',
           });
+        return result;
+      },
+    );
+  }
+  if (options.auth && options.sharing) {
+    const sharing = options.sharing;
+    // One pair of handlers per operation, each reached from two routes that differ only in how the
+    // scope is read out of the URL -- `sharing.ts` takes a `SharingScope`, so a project-scoped and a
+    // screenplay-scoped invite are the same code path with the same authorization, not two
+    // implementations that could drift. The alternative (one route taking the scope in the body)
+    // was rejected: the scope decides who may act and what is granted, and a body field is the
+    // wrong place for that.
+    const memberParams = idParam.extend({
+      // Better Auth user ids are opaque strings, not UUIDs (`user.id` is `text`), so this is
+      // deliberately not `.uuid()`. Bounded rather than unbounded: an id is an identifier here, and
+      // nothing this API issues approaches this length.
+      userId: z.string().min(1).max(255),
+    });
+    const sharingViewSchema = {
+      params: idParam,
+      response: {
+        200: sharingViewResponseSchema,
+        403: errorResponseSchema,
+        404: errorResponseSchema,
+      },
+    } as const;
+    const inviteSchema = {
+      params: idParam,
+      body: inviteInput,
+      response: {
+        200: inviteResponseSchema,
+        403: errorResponseSchema,
+        404: errorResponseSchema,
+      },
+    } as const;
+    const changeRoleSchema = {
+      params: memberParams,
+      body: changeRoleInput,
+      response: {
+        200: memberChangeResponseSchema,
+        403: errorResponseSchema,
+        404: errorResponseSchema,
+      },
+    } as const;
+    const removeMemberSchema = {
+      params: memberParams,
+      response: {
+        200: memberChangeResponseSchema,
+        403: errorResponseSchema,
+        404: errorResponseSchema,
+      },
+    } as const;
+
+    // `'missing'` is 404 and `'forbidden'` is 403 throughout, the same information-hiding
+    // convention the rest of this API uses: a non-member asking about a project gets the answer a
+    // stranger gets, while a project *reviewer* -- who demonstrably can see the project -- gets a
+    // 403 that admits it exists but not that they may share it.
+    function scopeReplies<T>(
+      reply: { code(status: 403 | 404): { send(body: { error: string }): T } },
+      result: unknown,
+    ): T | undefined {
+      if (result === 'missing') return reply.code(404).send({ error: 'Not found' });
+      if (result === 'forbidden')
+        return reply.code(403).send({ error: 'Project editor access required to share' });
+      return undefined;
+    }
+
+    for (const [path, toScope] of [
+      [
+        '/api/projects/:id/sharing',
+        (id: string): SharingScope => ({ kind: 'project', projectId: id }),
+      ],
+      [
+        '/api/screenplays/:id/sharing',
+        (id: string): SharingScope => ({ kind: 'screenplay', screenplayId: id }),
+      ],
+    ] as const) {
+      typedApp.get(path, { schema: sharingViewSchema }, async (request, reply) => {
+        const result = await sharing.listSharing(request.actorId!, toScope(request.params.id));
+        const refusal = scopeReplies(reply, result);
+        if (refusal !== undefined) return refusal;
+        return result as Exclude<typeof result, 'missing' | 'forbidden'>;
+      });
+    }
+
+    for (const [path, toScope] of [
+      [
+        '/api/projects/:id/invitations',
+        (id: string): SharingScope => ({ kind: 'project', projectId: id }),
+      ],
+      [
+        '/api/screenplays/:id/invitations',
+        (id: string): SharingScope => ({ kind: 'screenplay', screenplayId: id }),
+      ],
+    ] as const) {
+      typedApp.post(path, { schema: inviteSchema }, async (request, reply) => {
+        const result = await sharing.invite(
+          request.actorId!,
+          toScope(request.params.id),
+          request.body,
+        );
+        const refusal = scopeReplies(reply, result);
+        if (refusal !== undefined) return refusal;
+        const outcome = result as Exclude<typeof result, 'missing' | 'forbidden'>;
+        // 200 with an `outcome`, never a 4xx, for `'no-account'`/`'self'`/`'already-member'` -- see
+        // `inviteResponseSchema`'s own comment. The message for the unknown-address case travels
+        // from `NO_ACCOUNT_MESSAGE` (`sharing.ts`) rather than being written again here, so the one
+        // sentence the owner asked to be able to reword lives in exactly one place.
+        if (outcome.outcome === 'no-account')
+          return { outcome: 'no-account' as const, message: NO_ACCOUNT_MESSAGE };
+        return outcome;
+      });
+    }
+
+    for (const [path, toScope] of [
+      [
+        '/api/projects/:id/members/:userId',
+        (id: string): SharingScope => ({ kind: 'project', projectId: id }),
+      ],
+      [
+        '/api/screenplays/:id/members/:userId',
+        (id: string): SharingScope => ({ kind: 'screenplay', screenplayId: id }),
+      ],
+    ] as const) {
+      typedApp.patch(path, { schema: changeRoleSchema }, async (request, reply) => {
+        const result = await sharing.changeMemberRole(
+          request.actorId!,
+          toScope(request.params.id),
+          request.params.userId,
+          request.body.role,
+        );
+        const refusal = scopeReplies(reply, result);
+        if (refusal !== undefined) return refusal;
+        return result as Exclude<typeof result, 'missing' | 'forbidden'>;
+      });
+      typedApp.delete(path, { schema: removeMemberSchema }, async (request, reply) => {
+        const result = await sharing.removeMember(
+          request.actorId!,
+          toScope(request.params.id),
+          request.params.userId,
+        );
+        const refusal = scopeReplies(reply, result);
+        if (refusal !== undefined) return refusal;
+        return result as Exclude<typeof result, 'missing' | 'forbidden'>;
+      });
+    }
+
+    // The invitee side. `GET` needs no scope at all -- it is "what has been offered to me" -- and
+    // the two writes take the invitation's own id, which carries its scope with it.
+    typedApp.get(
+      '/api/invitations',
+      { schema: { response: { 200: z.array(incomingInvitationSchema) } } },
+      async (request) => sharing.listInvitationsForUser(request.actorId!),
+    );
+    typedApp.post(
+      '/api/invitations/:invitationId/respond',
+      {
+        schema: {
+          params: z.object({ invitationId: z.string().uuid() }),
+          body: respondToInvitationInput,
+          response: { 200: respondToInvitationResponseSchema, 404: errorResponseSchema },
+        },
+      },
+      async (request, reply) => {
+        const result = await sharing.respondToInvitation(
+          request.actorId!,
+          request.params.invitationId,
+          request.body,
+        );
+        // No 403 branch exists here on purpose: `respondToInvitation` scopes its lookup to
+        // `invited_user_id = actorId`, so someone else's invitation id is `'missing'`. Answering
+        // 403 would confirm that the id names a real invitation belonging to someone else.
+        if (result === 'missing') return reply.code(404).send({ error: 'Invitation not found' });
+        return result;
+      },
+    );
+    // Revoking is the inviter-side withdrawal of an unanswered invitation, authorized from the
+    // invitation's own project rather than from the URL -- which is why there is one route here
+    // rather than one per scope.
+    typedApp.delete(
+      '/api/invitations/:invitationId',
+      {
+        schema: {
+          params: z.object({ invitationId: z.string().uuid() }),
+          response: {
+            200: revokeInvitationResponseSchema,
+            403: errorResponseSchema,
+            404: errorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        const result = await sharing.revokeInvitation(
+          request.actorId!,
+          request.params.invitationId,
+        );
+        if (result === 'missing') return reply.code(404).send({ error: 'Invitation not found' });
+        if (result === 'forbidden')
+          return reply.code(403).send({ error: 'Project editor access required to share' });
         return result;
       },
     );

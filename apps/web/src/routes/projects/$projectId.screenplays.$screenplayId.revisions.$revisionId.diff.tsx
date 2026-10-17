@@ -305,6 +305,19 @@ function RevisionDiffPage() {
                 }),
             },
             {
+              // The screenplay-invitations slice. Disabled rather than omitted, matching this
+              // list's five other unavailable items and the principle this whole frame is built
+              // on: the comparison wears the same chrome as the editor and disables what has no
+              // meaning here, rather than reading as a stripped-down different product. Sharing a
+              // stored comparison has no meaning for any viewer -- there is nothing here to grant
+              // access to that is not already the live screenplay's to grant -- so unlike the
+              // editor's own copy of this item, it needs no role to decide.
+              disabled: true,
+              disabledReason:
+                'A comparison is a reading view of two stored snapshots — share the live screenplay instead.',
+              label: 'Share…',
+            },
+            {
               disabled: true,
               disabledReason:
                 'A comparison is not a screenplay — export the document itself, from the editor.',

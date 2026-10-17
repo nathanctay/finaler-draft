@@ -17,7 +17,12 @@ import type { EntitlementSnapshot } from '@finaler-draft/entitlements';
  * status-code test and be a catastrophe, so every refusal below also asserts that
  * `restoreRevisionAsCurrent` was never called.
  */
-vi.mock('@finaler-draft/database', () => ({
+// Spread over the real module for the same reason `revisions.test.ts` does -- see that file's own
+// comment: the pure membership helpers this store reaches through `resolveMembership`/`canEdit`
+// must stay real, and a wholesale replacement makes any pure helper added later silently
+// `undefined`.
+vi.mock('@finaler-draft/database', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   getRevisionById: vi.fn(),
   restoreRevisionAsCurrent: vi.fn(),
 }));

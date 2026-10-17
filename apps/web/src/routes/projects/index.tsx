@@ -1,10 +1,17 @@
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createFileRoute, Link, redirect, useNavigate } from '@tanstack/react-router';
-import { api, type Project } from '../../api.js';
+import { api, type IncomingInvitation, type Project, type SharedScreenplay } from '../../api.js';
 import { guardSessionUser } from '../../session.js';
 import { DeletedRow } from '../../components/DeletedRow.js';
 import { OverflowMenu } from '../../components/OverflowMenu.js';
+
+// Lazy for the same reason the upgrade dialog is on the project page: the sharing dialog is only
+// needed once a writer actually opens it, not on every visit to the dashboard, so it stays out of
+// this route's eagerly-loaded chunk graph.
+const SharingDialog = lazy(async () => ({
+  default: (await import('../../sharingDialog.js')).SharingDialog,
+}));
 
 export const Route = createFileRoute('/projects/')({
   beforeLoad: async ({ context }) => {
@@ -31,6 +38,12 @@ function ProjectRow({ onDeleted, project }: { onDeleted: () => void; project: Pr
     mutationFn: () => api.deleteProject(project.id),
     onSuccess: onDeleted,
   });
+  const [sharingOpen, setSharingOpen] = useState(false);
+  // The first of the slice's three entry points. Offered to an owner *or* an editor, which is
+  // exactly the bar the server enforces (`sharing.ts`: owner-or-editor on the project, for both
+  // scopes) -- so this is never a control that answers 403, and never one withheld from someone
+  // who could have used it. A reviewer gets no menu at all, as before.
+  const canShare = project.role === 'owner' || project.role === 'editor';
   return (
     <div className="project-row">
       <Link
@@ -39,19 +52,134 @@ function ProjectRow({ onDeleted, project }: { onDeleted: () => void; project: Pr
         to="/projects/$projectId"
       >
         <strong>{project.title}</strong>
-        <span className="project-row-role">{project.role}</span>
+        <span className="project-row-role">{roleLabel(project.role)}</span>
       </Link>
-      {project.role === 'owner' && (
+      {canShare && (
         <OverflowMenu
-          items={[{ label: 'Delete', onSelect: () => deleteMutation.mutate() }]}
+          items={[
+            { label: 'Share…', onSelect: () => setSharingOpen(true) },
+            // Still owner-only -- `deleteProject` is owner-only server-side, so showing it to an
+            // editor would be the broken control this file's own comment already warns about.
+            ...(project.role === 'owner'
+              ? [{ label: 'Delete', onSelect: () => deleteMutation.mutate() }]
+              : []),
+          ]}
           label={`Project actions for ${project.title}`}
         />
+      )}
+      {sharingOpen && (
+        <Suspense fallback={null}>
+          <SharingDialog
+            onClose={() => setSharingOpen(false)}
+            scope={{ kind: 'project', projectId: project.id }}
+            title={project.title}
+          />
+        </Suspense>
       )}
       {deleteMutation.isError && (
         <p className="field-error" role="alert">
           Delete failed. Try again.
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * One pending invitation, with Accept and Decline right-aligned as a pair.
+ *
+ * This is the authoritative accept mechanism for the whole slice (the notification email carries
+ * no token and no accept link -- see `invitationMail.ts`): it needs nothing to expire or leak, the
+ * inviter can withdraw it at any time, and it does not depend on mail having been delivered.
+ *
+ * `.readonly-banner`/`.readonly-banner-actions` are reused rather than a new pair of classes
+ * invented: that is already the established shape for "a persistent strip of explanation with a
+ * right-aligned action group", and `.readonly-banner-actions` exists for exactly a two-action row
+ * (App.tsx's historical-revision banner) and is already covered by its own tests.
+ */
+function InvitationRow({ invitation }: { invitation: IncomingInvitation }) {
+  const queryClient = useQueryClient();
+  const respond = useMutation({
+    mutationFn: (response: 'accept' | 'decline') =>
+      api.respondToInvitation(invitation.id, response),
+    onSuccess: async () => {
+      // Three caches can change on an accept: the invitation list it leaves, and whichever of the
+      // project list or the shared-screenplay list it joins. Invalidating all three on either
+      // response is simpler than branching on the outcome, and a decline makes the two listing
+      // refetches cheap no-ops.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['invitations'] }),
+        queryClient.invalidateQueries({ queryKey: ['projects'] }),
+        queryClient.invalidateQueries({ queryKey: ['shared-screenplays'] }),
+      ]);
+    },
+  });
+  const what =
+    invitation.screenplayTitle === null
+      ? `the project “${invitation.projectTitle}”`
+      : `the screenplay “${invitation.screenplayTitle}” in “${invitation.projectTitle}”`;
+  const who = invitation.invitedByName ?? 'Someone';
+  return (
+    <div className="readonly-banner" role="status">
+      <p>
+        <strong>{who}</strong> invited you to {what} as{' '}
+        {invitation.role === 'editor' ? 'an editor' : 'a reviewer'}.
+      </p>
+      <div className="readonly-banner-actions">
+        <button
+          className="primary-button"
+          disabled={respond.isPending}
+          onClick={() => respond.mutate('accept')}
+          type="button"
+        >
+          Accept
+        </button>
+        <button
+          disabled={respond.isPending}
+          onClick={() => respond.mutate('decline')}
+          type="button"
+        >
+          Decline
+        </button>
+      </div>
+      {respond.isError && (
+        <p className="field-error" role="alert">
+          That could not be completed. Try again.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A screenplay reached through screenplay-scoped membership. Deliberately rendered as a screenplay
+ * linking straight into the editor, never as a project row: the invitee is not a member of the
+ * project, so a project row would lead to a page whose every control -- rename, New screenplay,
+ * the project's own three-dot menu -- they cannot use. See `ProjectStore.listSharedScreenplays`.
+ */
+/**
+ * How a row tells the viewer whose it is. `owner` is stated plainly; every other role is prefixed
+ * with "shared with you" rather than shown as a bare role word, because "editor" on its own reads
+ * as a capability rather than as someone else's document. The role is kept alongside it rather than
+ * replaced by it -- whether this is editable is the next thing a writer wants to know.
+ */
+function roleLabel(role: 'owner' | 'editor' | 'reviewer'): string {
+  return role === 'owner' ? 'owner' : `shared with you \u00b7 ${role}`;
+}
+
+function SharedScreenplayRow({ screenplay }: { screenplay: SharedScreenplay }) {
+  return (
+    <div className="project-row">
+      <Link
+        className="project-row-link"
+        params={{ projectId: screenplay.projectId, screenplayId: screenplay.id }}
+        to="/projects/$projectId/screenplays/$screenplayId"
+      >
+        <strong>{screenplay.title}</strong>
+        <span className="project-row-role">
+          {roleLabel(screenplay.role)} · in {screenplay.projectTitle}
+        </span>
+      </Link>
     </div>
   );
 }
@@ -71,6 +199,23 @@ function ProjectsPage() {
   // Undo before the writer chooses to use it or leave.
   const [deletedProjects, setDeletedProjects] = useState<Record<string, string>>({});
   const projects = useQuery({ queryKey: ['projects'], queryFn: api.projects });
+  // The screenplay-invitations slice's two dashboard additions. Both are unconditional fetches on
+  // the one page every flow in the system suite touches, which this file's own `entitlement`
+  // comment records as a real cost -- so both carry the same `staleTime` that comment settled on,
+  // for the same reason: an invitation arriving, or a screenplay being shared, is not something a
+  // writer needs reflected within a second of it happening, and both are cheap single-index reads
+  // rather than `getSnapshot`'s three parallel queries. Neither is deferred behind an interaction,
+  // because an invitation nobody is looking for has to be visible without one.
+  const invitations = useQuery({
+    queryKey: ['invitations'],
+    queryFn: api.invitations,
+    staleTime: 60_000,
+  });
+  const sharedScreenplays = useQuery({
+    queryKey: ['shared-screenplays'],
+    queryFn: api.sharedScreenplays,
+    staleTime: 60_000,
+  });
   // Drives the persistent lapse-chooser banner below: plan.md's "a lapsed account with several
   // screenplays must be asked which one stays editable" -- shown only when there is genuinely a
   // choice to make (more than one candidate) and none has been made yet. An active subscriber, a
@@ -172,6 +317,18 @@ function ProjectsPage() {
       <section className="project-list">
         <p className="eyebrow">PRIVATE PROJECTS</p>
         <h1>Your writing desk</h1>
+        {/* Above the lapse-chooser banner and above the project list: an invitation is the one
+            thing on this page that someone else is waiting on, and (plan.md) "the invitation itself
+            is the moment the upgrade is most legible" -- it has to be the first thing seen, not
+            something found below a list. An errored fetch renders nothing, matching the banner
+            below: there is nothing unsafe about staying silent until the next successful fetch. */}
+        {(invitations.data ?? []).length > 0 && (
+          <section className="invitation-list" aria-label="Invitations">
+            {(invitations.data ?? []).map((invitation) => (
+              <InvitationRow invitation={invitation} key={invitation.id} />
+            ))}
+          </section>
+        )}
         {showLapseChooserBanner && (
           // Persistent, not dismissible: this state does not resolve itself, and the owner
           // explicitly rejected a blocking modal here (it would interrupt someone who only
@@ -243,6 +400,18 @@ function ProjectsPage() {
                   restore={() => api.restoreProject(id)}
                   title={deletedProjects[id]!}
                 />
+              </li>
+            ))}
+            {/* Screenplay-scoped shares sit in this same list rather than under a heading of their
+                own. A separate section made "what do I have access to" two questions instead of one,
+                and the row's own role label already answers which of these is someone else's -- see
+                `roleLabel`. They are screenplay rows among project rows, which is the shape the
+                thing actually shared has: screenplay-scoped access grants one screenplay inside
+                someone else's project, not the project, so surfacing the parent would name a
+                container the viewer cannot otherwise open. */}
+            {(sharedScreenplays.data ?? []).map((screenplay) => (
+              <li key={screenplay.id}>
+                <SharedScreenplayRow screenplay={screenplay} />
               </li>
             ))}
           </ul>

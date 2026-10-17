@@ -2220,6 +2220,55 @@ describe('revision history entry point', () => {
     await user.click(screen.getByRole('button', { name: 'File menu' }));
     expect(screen.queryByRole('menuitem', { name: 'Revision history…' })).not.toBeInTheDocument();
   });
+
+  // The screenplay-invitations slice's third entry point. Same contract as "Revision history…"
+  // above: present only when the route supplied the callback, which is also the authorization
+  // signal (see `onOpenSharing`'s own comment -- the live route supplies it only for a viewer the
+  // server would let share, and the historical-preview route never supplies it at all).
+  it('offers "Share…" only when the route supplies onOpenSharing, and calls it on select', async () => {
+    const user = userEvent.setup();
+    const onOpenSharing = vi.fn();
+    render(<App initial={script} onOpenSharing={onOpenSharing} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    const item = screen.getByRole('menuitem', { name: 'Share…' });
+    expect(item).toBeEnabled();
+
+    await user.click(item);
+    expect(onOpenSharing).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits "Share…" entirely when the route supplies no callback', async () => {
+    const user = userEvent.setup();
+    render(<App initial={script} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    expect(screen.queryByRole('menuitem', { name: 'Share…' })).not.toBeInTheDocument();
+  });
+
+  it('keeps "Share…" enabled on a read-only screenplay, unlike the items that change the document', async () => {
+    // Sharing is not an edit. The two items above it in this menu ("Document settings…", "Save
+    // named revision…") are gated on `editingAllowed` because they write; offering sharing only to
+    // an account whose subscription is current would make a lapse silently take away the owner's
+    // ability to invite a collaborator, which is not what a lapse means.
+    const user = userEvent.setup();
+    const onOpenSharing = vi.fn();
+    render(
+      <App
+        entitlementReadOnly={{ message: 'Your subscription has ended.' }}
+        initial={script}
+        onOpenSharing={onOpenSharing}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'File menu' }));
+    expect(screen.getByRole('menuitem', { name: 'Document settings…' })).toBeDisabled();
+    const share = screen.getByRole('menuitem', { name: 'Share…' });
+    expect(share).toBeEnabled();
+    await user.click(share);
+    expect(onOpenSharing).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('named revision saving', () => {

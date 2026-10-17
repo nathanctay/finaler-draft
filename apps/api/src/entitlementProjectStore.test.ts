@@ -36,6 +36,7 @@ function unusedProjectStore(): ProjectStore {
     deleteProject: fail('deleteProject'),
     restoreProject: fail('restoreProject'),
     listScreenplays: fail('listScreenplays'),
+    listSharedScreenplays: fail('listSharedScreenplays'),
     createScreenplay: fail('createScreenplay'),
     getScreenplay: fail('getScreenplay'),
     renameScreenplay: fail('renameScreenplay'),

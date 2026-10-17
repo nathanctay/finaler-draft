@@ -16,6 +16,7 @@ export default defineConfig({
     '**/offline-persistence.spec.ts',
     '**/revision-history-persistence.spec.ts',
     '**/screenplay-diff-persistence.spec.ts',
+    '**/invitations-persistence.spec.ts',
   ],
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),

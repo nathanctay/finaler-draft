@@ -103,6 +103,15 @@ export function reactQueryMock(): Record<string, unknown> {
     useMutation: (options: {
       mutationFn: (variables?: unknown) => Promise<unknown>;
       onSuccess?: (value: never) => unknown;
+      /**
+       * Invoked on a rejected `mutationFn`, as React Query itself does. Added for
+       * `sharingDialog.tsx`, the first component here to handle a refusal through `onError` rather
+       * than by reading `isError` off the mutation object -- it has several independent writes on
+       * one screen, so "which one failed, and what did the server say" cannot come from a single
+       * shared `isError` flag. Purely additive for every existing caller: none of them passes
+       * `onError`, and `mutationErrorValue` is still recorded exactly as before.
+       */
+      onError?: (error: unknown) => unknown;
     }) => ({
       error: routeState.mutationErrorValue,
       isError: routeState.mutationError || routeState.mutationErrorValue !== undefined,
@@ -116,6 +125,7 @@ export function reactQueryMock(): Record<string, unknown> {
           (value) => options.onSuccess?.(value as never),
           (error: unknown) => {
             routeState.mutationErrorValue = error;
+            options.onError?.(error);
           },
         ),
       reset: () => {
@@ -180,6 +190,7 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
       historicalRevision,
       initial,
       onOpenRevisionHistory,
+      onOpenSharing,
       onReloadRestoredDocument,
     }: {
       entitlementReadOnly?: {
@@ -194,6 +205,7 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
       };
       initial: { title: string };
       onOpenRevisionHistory?: () => void;
+      onOpenSharing?: () => void;
       onReloadRestoredDocument?: () => void;
     }) => {
       const [mountId] = react.useState(() => ++routeState.editorMounts);
@@ -255,6 +267,16 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
               Revision history…
             </button>
           )}
+          {/* The screenplay-invitations slice's third entry point. Its *presence* is the
+              authorization signal (see `onOpenSharing` in App.tsx): the live route supplies it only
+              for a viewer the server would let share, so a route test asserts both that the route
+              decided correctly and that clicking through opens the dialog, without the
+              Tiptap-backed `App`. `App.test.tsx` owns how the real File menu renders it. */}
+          {onOpenSharing && (
+            <button onClick={onOpenSharing} type="button">
+              Share…
+            </button>
+          )}
         </div>
       );
     },
@@ -267,7 +289,17 @@ export function resetRouteHarness() {
   routeState.mutationErrorValue = undefined;
   routeState.navigate.mockReset();
   routeState.query = { data: undefined, isError: false, isLoading: false };
-  routeState.queries = {};
+  // The screenplay-invitations slice added two further concurrent queries to the dashboard, and the
+  // single shared `routeState.query` fallback cannot serve three keys at once -- without a default,
+  // every pre-existing projects-page test would see its project list rendered a second time as
+  // "shared with you" and a third time as a list of invitations. These defaults are the state those
+  // tests already implicitly assume (nothing invited, nothing shared screenplay-by-screenplay), in
+  // exactly the spirit of `fetchMock`'s own per-endpoint defaults below: the shape a test not
+  // specifically about invitations can safely ignore. `index.sharing.test.tsx` overrides both.
+  routeState.queries = {
+    [JSON.stringify(['invitations'])]: { data: [], isError: false, isLoading: false },
+    [JSON.stringify(['shared-screenplays'])]: { data: [], isError: false, isLoading: false },
+  };
   routeState.revisionId = revisionId;
   routeState.screenplayId = screenplayId;
   invalidateQueries.mockReset();

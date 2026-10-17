@@ -223,6 +223,81 @@ describe('screenplay page', () => {
     });
   });
 
+  /**
+   * The third of the screenplay-invitations slice's entry points. The route, not `App`, decides
+   * whether sharing is offered at all: it has the viewer's effective role from the same response
+   * that authorized the read, and it passes `onOpenSharing` only when that role may share -- so
+   * `App` never recomputes the rule and the File menu's item is present exactly when it works.
+   * `App.test.tsx` owns how the real File menu renders it.
+   */
+  describe('the File menu’s Share entry point', () => {
+    function screenplayWithRole(role: 'owner' | 'editor' | 'reviewer') {
+      return {
+        id: screenplayId,
+        projectId,
+        currentEpoch: 0,
+        role,
+        title: 'Act One',
+        screenplay: {
+          annotations: [],
+          blocks: [{ id: '317e84fe-704d-40b4-aeea-aec01f628931', type: 'action', text: 'A line.' }],
+          id: screenplayId,
+          schemaVersion: 1,
+          title: 'Act One',
+          titlePages: [],
+        },
+      };
+    }
+
+    it('is supplied for an owner and for an editor', async () => {
+      for (const role of ['owner', 'editor'] as const) {
+        setQueries(screenplayWithRole(role));
+        const { unmount } = render(<ScreenplayPage />);
+        expect(await screen.findByRole('button', { name: 'Share…' })).toBeInTheDocument();
+        unmount();
+      }
+    });
+
+    it('is not supplied for a reviewer', async () => {
+      setQueries(screenplayWithRole('reviewer'));
+      render(<ScreenplayPage />);
+      await screen.findByTestId('editor-instance');
+      expect(screen.queryByRole('button', { name: 'Share…' })).not.toBeInTheDocument();
+    });
+
+    it('opens the dialog scoped to this screenplay', async () => {
+      setQueries(screenplayWithRole('owner'));
+      routeState.queries[JSON.stringify(['sharing', 'screenplay', screenplayId])] = {
+        data: { members: [], invitations: [] },
+        isError: false,
+        isLoading: false,
+      };
+      render(<ScreenplayPage />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Share…' }));
+      const dialog = await screen.findByRole('dialog');
+      expect(dialog).toHaveAccessibleName('Share “Act One”');
+      expect(dialog).toHaveTextContent(/this screenplay only/i);
+    });
+
+    it('is offered regardless of entitlement -- a lapsed subscription is not a reason not to share', async () => {
+      // Sharing is not an edit to the document. A read-only screenplay is read-only because of
+      // billing state, which has nothing to say about whether its owner may invite a collaborator.
+      setQueries(
+        screenplayWithRole('owner'),
+        entitlementSnapshot({
+          tier: 'restricted',
+          editableScreenplayId: 'another-screenplay',
+          candidateScreenplayIds: [],
+        }),
+      );
+      render(<ScreenplayPage />);
+      expect(await screen.findByRole('button', { name: 'Share…' })).toBeInTheDocument();
+      // ...and the editor is genuinely read-only at the same time, so this is not passing because
+      // the entitlement fixture failed to apply.
+      expect(screen.getByTestId('entitlement-readonly')).toBeInTheDocument();
+    });
+  });
+
   describe('entitlement-driven editability', () => {
     const script = {
       id: screenplayId,

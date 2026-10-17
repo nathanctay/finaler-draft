@@ -6,7 +6,15 @@ import { screenplayFixture, minimalScreenplayFixture } from '@finaler-draft/scre
 // mechanics -- those are proven directly, against a real row-level model, in
 // `packages/database/src/revisions.test.ts`. The identical separation-of-concerns convention
 // `apps/collab/src/database.test.ts` already establishes for mocking `updateLog.js`.
-vi.mock('@finaler-draft/database', () => ({
+//
+// Spread over the real module rather than replacing it wholesale: `screenplayRoleLateral` and
+// `roleCanEdit` (which `resolveMembership` and `canEdit` in this file now use) are pure functions
+// with no database access of their own, and stubbing them would not isolate anything -- it would
+// just make the membership resolution under test stop working. A wholesale replacement is also what
+// silently broke when those two imports were added, which is the second reason to spread: a pure
+// helper added later cannot quietly become `undefined` here.
+vi.mock('@finaler-draft/database', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   insertRevisionIfChanged: vi.fn(),
   listRevisionsForScreenplay: vi.fn(),
   getRevisionById: vi.fn(),
