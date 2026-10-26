@@ -318,22 +318,34 @@ function RevisionDiffPage() {
               label: 'Share…',
             },
             {
-              disabled: true,
-              disabledReason:
-                'A comparison is not a screenplay — export the document itself, from the editor.',
-              label: 'Download FDX…',
-            },
-            {
-              disabled: true,
-              disabledReason:
-                'A comparison is not a screenplay — export the document itself, from the editor.',
-              label: 'Download DOCX…',
-            },
-            {
-              disabled: true,
-              disabledReason:
-                'A comparison is not a screenplay — export the document itself, from the editor.',
-              label: 'Download PDF…',
+              // Grouped under one "Download" submenu parent, matching the editor's own File menu
+              // (App.tsx). All three children are permanently disabled here, so the parent is too --
+              // `OverflowMenu` derives that from the children, carrying their shared reason, rather
+              // than needing its own `disabled: true` repeated a fourth time.
+              label: 'Download',
+              submenuItems: [
+                {
+                  ariaLabel: 'Download FDX…',
+                  disabled: true,
+                  disabledReason:
+                    'A comparison is not a screenplay — export the document itself, from the editor.',
+                  label: 'FDX…',
+                },
+                {
+                  ariaLabel: 'Download DOCX…',
+                  disabled: true,
+                  disabledReason:
+                    'A comparison is not a screenplay — export the document itself, from the editor.',
+                  label: 'DOCX…',
+                },
+                {
+                  ariaLabel: 'Download PDF…',
+                  disabled: true,
+                  disabledReason:
+                    'A comparison is not a screenplay — export the document itself, from the editor.',
+                  label: 'PDF…',
+                },
+              ],
             },
           ]}
         />

@@ -704,6 +704,12 @@ describe('revision diff page: the editor’s chrome, not a plainer page', () => 
 
     await user.click(screen.getByRole('button', { name: 'File menu' }));
     const items = screen.getAllByRole('menuitem');
+    // The three exports are grouped behind one "Download" submenu parent (OverflowMenu.tsx's
+    // `submenuItems`) and are not themselves in the DOM until that submenu is opened -- so this
+    // top-level enumeration sees "Download" once, not its three children. `textContent` (rather
+    // than the accessible name) also picks up the parent's visible disclosure glyph, which is
+    // `aria-hidden` and therefore excluded from the accessible name `getByRole`'s `name` option
+    // below still matches against.
     expect(items.map((item) => item.textContent)).toEqual([
       'Document settings…',
       'Save named revision…',
@@ -712,9 +718,7 @@ describe('revision diff page: the editor’s chrome, not a plainer page', () => 
       // additionally requires its tooltip to explain itself in terms of the comparison, which is
       // what keeps this from passing on an item that was merely forgotten and left inert.
       'Share…',
-      'Download FDX…',
-      'Download DOCX…',
-      'Download PDF…',
+      'Download ›',
     ]);
     for (const item of items) {
       if (item.textContent === 'Revision history…') {

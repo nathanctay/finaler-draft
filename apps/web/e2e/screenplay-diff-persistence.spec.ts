@@ -1019,9 +1019,12 @@ test('the inline diff reads as the document with changes marked in place, and di
     // The screenplay-invitations slice: the editor offers this to an owner or editor, and the
     // comparison carries it disabled for the same reason it carries the five around it that way.
     'Share…',
-    'Download FDX…',
-    'Download DOCX…',
-    'Download PDF…',
+    // The three exports are grouped behind one "Download" submenu parent (OverflowMenu.tsx's
+    // `submenuItems`), unreachable in the DOM as separate items until that submenu opens -- this
+    // reads the plain `textContent` of the closed parent row, which includes its `aria-hidden`
+    // disclosure glyph (excluded only from the *accessible name*, which this raw-DOM enumeration
+    // does not compute).
+    'Download ›',
   ]);
 
   // Both panels, open by default on both screens, at the same width, with the same heading, the same
