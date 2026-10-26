@@ -187,6 +187,7 @@ describe('historical revision preview', () => {
     await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
 
     await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Download' }));
     await user.click(screen.getByRole('menuitem', { name: 'Download FDX…' }));
 
     await waitFor(() => expect(triggerFdxDownload).toHaveBeenCalledTimes(1));

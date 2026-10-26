@@ -2099,67 +2099,90 @@ export function App({
             // to say about whether its owner may invite a collaborator.
             ...(onOpenSharing ? [{ label: 'Share…', onSelect: onOpenSharing }] : []),
             {
-              // Disabled, not a no-op, when `projection` is invalid: the FDX exporter takes a
-              // canonical `Screenplay` (see `packages/fdx`'s own doc comment), which an invalid
-              // local projection is not, and `screenplayToFdx` has no licence to guess at one.
-              // The `if (projection.valid)` guard inside `onSelect` is still required -- it is
-              // what lets TypeScript narrow `projection` to the branch with a `.screenplay` --
-              // but it is no longer the only thing standing between a click and nothing
-              // happening: `disabled` means that click can no longer reach `onSelect` at all.
-              disabled: !projection.valid,
-              disabledReason: exportDisabledReason,
-              label: 'Download FDX…',
-              onSelect: () => {
-                if (projection.valid) {
-                  const { screenplay } = projection;
-                  runExport('FDX', async () => {
-                    const { triggerFdxDownload } = await import('./fdxDownload.js');
-                    triggerFdxDownload(screenplay);
-                  });
-                }
-              },
-            },
-            {
-              // Same reasoning as "Download FDX…" above: `screenplayToDocx` takes a canonical
-              // `Screenplay` (see `packages/docx`'s own doc comment), and an invalid local
-              // projection is not one.
-              disabled: !projection.valid,
-              disabledReason: exportDisabledReason,
-              label: 'Download DOCX…',
-              onSelect: () => {
-                if (projection.valid) {
-                  const { screenplay } = projection;
-                  runExport('DOCX', async () => {
-                    const { triggerDocxDownload } = await import('./docxDownload.js');
-                    triggerDocxDownload(screenplay);
-                  });
-                }
-              },
-            },
-            {
-              // Same disabled-not-a-no-op reasoning as "Download FDX…" above -- this is in fact
-              // the owner's exact reported symptom: "Download PDF did nothing when clicked" was
-              // this same `if (projection.valid)` guard with no disabled state and no reason,
-              // on a document a paste had made invalid (progress/paste-sanitization.md).
-              // `triggerPdfDownload` is `async` (`screenplayToPdf` is -- see
-              // `@finaler-draft/pdf`'s `index.ts`), so a rejection (most likely
-              // `@finaler-draft/pdf`'s WinAnsiEncoding limitation -- a character PDF's
-              // un-embedded standard Courier cannot render) must still be caught here or it
-              // becomes an unhandled promise rejection; that failure mode is unrelated to and
-              // unfixed by `disabled`, which only ever concerns an invalid local projection.
-              // `runExport` surfaces it in the toast below, same as FDX and DOCX.
-              disabled: !projection.valid,
-              disabledReason: exportDisabledReason,
-              label: 'Download PDF…',
-              onSelect: () => {
-                if (projection.valid) {
-                  const { screenplay } = projection;
-                  runExport('PDF', async () => {
-                    const { triggerPdfDownload } = await import('./pdfDownload.js');
-                    await triggerPdfDownload(screenplay);
-                  });
-                }
-              },
+              // The owner's ask: "move the download options in the file dropdown to a sub
+              // dropdown... it will say something like 'Download >' and if you hover over it you
+              // get the download options." `submenuItems` is `OverflowMenu`'s support for exactly
+              // this -- see its own doc comment. No `disabled`/`disabledReason` set here: the
+              // parent's is derived from the three children below (all share `disabled:
+              // !projection.valid`, so the parent renders disabled, carrying `exportDisabledReason`,
+              // exactly when they do -- there is deliberately no second, independently-set flag
+              // here that could drift from theirs).
+              label: 'Download',
+              submenuItems: [
+                {
+                  // Disabled, not a no-op, when `projection` is invalid: the FDX exporter takes a
+                  // canonical `Screenplay` (see `packages/fdx`'s own doc comment), which an invalid
+                  // local projection is not, and `screenplayToFdx` has no licence to guess at one.
+                  // The `if (projection.valid)` guard inside `onSelect` is still required -- it is
+                  // what lets TypeScript narrow `projection` to the branch with a `.screenplay` --
+                  // but it is no longer the only thing standing between a click and nothing
+                  // happening: `disabled` means that click can no longer reach `onSelect` at all.
+                  //
+                  // `label` is the short "FDX…" rather than "Download FDX…": the parent item
+                  // already says "Download", and repeating it on every child read as noise once
+                  // they moved into its submenu. `ariaLabel` keeps the full sentence as this
+                  // item's accessible name regardless -- a screen reader that jumps straight to it
+                  // by name (rather than arrow-navigating in, where "Download"'s own context is
+                  // still fresh) must not hear a bare, ambiguous "FDX…".
+                  ariaLabel: 'Download FDX…',
+                  disabled: !projection.valid,
+                  disabledReason: exportDisabledReason,
+                  label: 'FDX…',
+                  onSelect: () => {
+                    if (projection.valid) {
+                      const { screenplay } = projection;
+                      runExport('FDX', async () => {
+                        const { triggerFdxDownload } = await import('./fdxDownload.js');
+                        triggerFdxDownload(screenplay);
+                      });
+                    }
+                  },
+                },
+                {
+                  // Same reasoning as "FDX…" above: `screenplayToDocx` takes a canonical
+                  // `Screenplay` (see `packages/docx`'s own doc comment), and an invalid local
+                  // projection is not one.
+                  ariaLabel: 'Download DOCX…',
+                  disabled: !projection.valid,
+                  disabledReason: exportDisabledReason,
+                  label: 'DOCX…',
+                  onSelect: () => {
+                    if (projection.valid) {
+                      const { screenplay } = projection;
+                      runExport('DOCX', async () => {
+                        const { triggerDocxDownload } = await import('./docxDownload.js');
+                        triggerDocxDownload(screenplay);
+                      });
+                    }
+                  },
+                },
+                {
+                  // Same disabled-not-a-no-op reasoning as "FDX…" above -- this is in fact the
+                  // owner's exact reported symptom: "Download PDF did nothing when clicked" was
+                  // this same `if (projection.valid)` guard with no disabled state and no reason,
+                  // on a document a paste had made invalid (progress/paste-sanitization.md).
+                  // `triggerPdfDownload` is `async` (`screenplayToPdf` is -- see
+                  // `@finaler-draft/pdf`'s `index.ts`), so a rejection (most likely
+                  // `@finaler-draft/pdf`'s WinAnsiEncoding limitation -- a character PDF's
+                  // un-embedded standard Courier cannot render) must still be caught here or it
+                  // becomes an unhandled promise rejection; that failure mode is unrelated to and
+                  // unfixed by `disabled`, which only ever concerns an invalid local projection.
+                  // `runExport` surfaces it in the toast below, same as FDX and DOCX.
+                  ariaLabel: 'Download PDF…',
+                  disabled: !projection.valid,
+                  disabledReason: exportDisabledReason,
+                  label: 'PDF…',
+                  onSelect: () => {
+                    if (projection.valid) {
+                      const { screenplay } = projection;
+                      runExport('PDF', async () => {
+                        const { triggerPdfDownload } = await import('./pdfDownload.js');
+                        await triggerPdfDownload(screenplay);
+                      });
+                    }
+                  },
+                },
+              ],
             },
           ]}
           fileMenuRef={fileMenuRef}

@@ -1893,7 +1893,12 @@ describe('an invalid projection is never silent', () => {
     expect(container.querySelector('.save-dot')).toHaveClass('attention');
   });
 
-  it('disables the export menu items with a reason instead of letting them silently no-op', async () => {
+  it('disables the Download submenu parent with a reason instead of letting it open on dead items', async () => {
+    // The three exports moved behind one "Download" submenu parent (OverflowMenu.tsx's
+    // `submenuItems`). When every child is disabled, the parent is disabled too, carrying their
+    // shared reason -- a writer is never invited to open a submenu with nothing usable inside it.
+    // That also makes the children themselves unreachable by click here, same as any other
+    // disabled-trigger menu: there is nothing to assert on them directly in this state.
     const user = userEvent.setup();
     render(
       <App
@@ -1903,28 +1908,16 @@ describe('an invalid projection is never silent', () => {
     await screen.findByText(/Draft needs attention/);
 
     await user.click(screen.getByRole('button', { name: 'File menu' }));
-    const fdxItem = screen.getByRole('menuitem', { name: 'Download FDX…' });
-    const docxItem = screen.getByRole('menuitem', { name: 'Download DOCX…' });
-    // The owner's literal report (progress/paste-sanitization.md): "Download PDF did nothing
-    // when clicked" on a document a paste had made invalid. This is that exact reproduction.
-    const pdfItem = screen.getByRole('menuitem', { name: 'Download PDF…' });
-    expect(fdxItem).toBeDisabled();
-    expect(docxItem).toBeDisabled();
-    expect(pdfItem).toBeDisabled();
+    const downloadItem = screen.getByRole('menuitem', { name: 'Download' });
+    expect(downloadItem).toBeDisabled();
     const expectedReason = `Can't export: Stable id ${sharedBlockId} must be globally unique within a screenplay.`;
-    expect(fdxItem).toHaveAttribute('title', expectedReason);
-    expect(docxItem).toHaveAttribute('title', expectedReason);
-    expect(pdfItem).toHaveAttribute('title', expectedReason);
+    expect(downloadItem).toHaveAttribute('title', expectedReason);
 
     // A disabled `<button>` never dispatches `click` at all -- this confirms that, rather than
-    // trusting the `disabled` attribute's presence alone to mean nothing happens.
-    const createObjectURL = vi.fn();
-    vi.stubGlobal('URL', { ...URL, createObjectURL });
-    await user.click(fdxItem);
-    await user.click(docxItem);
-    await user.click(pdfItem);
-    expect(createObjectURL).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
+    // trusting the `disabled` attribute's presence alone to mean nothing happens. If the submenu
+    // had opened, "FDX…" would be queryable; it must not be.
+    await user.click(downloadItem);
+    expect(screen.queryByRole('menuitem', { name: 'Download FDX…' })).not.toBeInTheDocument();
   });
 
   it('reports an invalid projection as needing attention, not as synced', async () => {
@@ -1965,6 +1958,7 @@ describe('FDX download', () => {
     await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
 
     await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Download' }));
     await user.click(screen.getByRole('menuitem', { name: 'Download FDX…' }));
 
     // `fdxDownload.js` is loaded with a dynamic `import()` (App.tsx's `runExport`), not bundled
@@ -2020,6 +2014,7 @@ describe('FDX download', () => {
     await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
 
     await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Download' }));
     await user.click(screen.getByRole('menuitem', { name: 'Download FDX…' }));
 
     const alert = await screen.findByRole('alert');
@@ -2055,6 +2050,7 @@ describe('DOCX download', () => {
     await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
 
     await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Download' }));
     await user.click(screen.getByRole('menuitem', { name: 'Download DOCX…' }));
 
     // `docxDownload.js` is loaded with a dynamic `import()` (App.tsx's `runExport`), not bundled
@@ -2098,6 +2094,7 @@ describe('DOCX download', () => {
     await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
 
     await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Download' }));
     await user.click(screen.getByRole('menuitem', { name: 'Download DOCX…' }));
 
     const alert = await screen.findByRole('alert');
@@ -2133,6 +2130,7 @@ describe('PDF download', () => {
     await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
 
     await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Download' }));
     await user.click(screen.getByRole('menuitem', { name: 'Download PDF…' }));
 
     // `pdfDownload.js` is loaded with a dynamic `import()` (App.tsx's `runExport`), and
@@ -2179,6 +2177,7 @@ describe('PDF download', () => {
     await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
 
     await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Download' }));
     await user.click(screen.getByRole('menuitem', { name: 'Download PDF…' }));
 
     const alert = await screen.findByRole('alert');
@@ -2470,6 +2469,7 @@ describe('document settings', () => {
     await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
 
     await user.click(screen.getByRole('button', { name: 'File menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Download' }));
     const pdfItem = screen.getByRole('menuitem', { name: 'Download PDF…' });
     // Precondition: this is NOT the disabled path. The screenplay is valid; only the export fails.
     expect(pdfItem).not.toBeDisabled();

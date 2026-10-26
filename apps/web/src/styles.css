@@ -2312,6 +2312,65 @@ select:focus-visible,
 }
 
 /*
+ * The File menu's "Download" submenu (`OverflowMenu.tsx`'s `submenuItems`). `.overflow-menu-submenu-group`
+ * wraps a submenu-parent row and gives it a positioning context of its own -- `position: relative`
+ * so the flyout below can anchor to this one row rather than to the whole list's box, which would
+ * misplace it for a parent row that is not the list's first.
+ */
+.overflow-menu-submenu-group {
+  position: relative;
+}
+
+.overflow-menu-submenu-trigger {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.overflow-menu-disclosure {
+  color: var(--text-04);
+  font-size: 11px;
+}
+
+/*
+ * The flyout itself reuses `.overflow-menu-list`'s box styling (border, background, padding) via
+ * the shared class on the element, and this rule only repositions it: anchored to its own trigger
+ * row (within `.overflow-menu-submenu-group`, not the list's `calc(100% + 4px)` below the whole
+ * menu) and opening to the right (`left: 100%`), the conventional direction for a cascading submenu
+ * on a menu that itself opens below-*left* of its trigger -- opening further left here would run
+ * the flyout toward, or past, the left edge of the viewport.
+ *
+ * `right: auto` is **redundant today and deliberately kept**: every submenu currently renders
+ * inside `ApplicationMenubar`'s `.menu-file` wrapper, which already sets `right: auto`, so
+ * removing this declaration changes nothing and no test can catch its absence (verified by
+ * mutation -- dropping it leaves `submenu-position.spec.ts` green). It guards the base
+ * `.overflow-menu-list { right: 0 }` case instead: a submenu placed in any other menu would
+ * resolve both `left` and `right`, which stretches the box across the gap rather than sizing it to
+ * its own content. One line against a silent layout break in the next menu that grows a submenu.
+ *
+ * **The selector is three classes deep on purpose, and must stay at least that specific.** The
+ * flyout element carries both `.overflow-menu-list` and `.overflow-menu-submenu`, so it is matched
+ * by every `<ancestor> .overflow-menu-list` rule in this file as well. One of those is
+ * `.menu-file .overflow-menu-list { left: 0 }` (specificity 0-2-0), and the File menu is the only
+ * place a submenu is currently used -- so while this rule was a single class (0-1-0) it *lost* the
+ * cascade for `left`, and the flyout rendered directly on top of the menu it belongs to. The
+ * `left: 100%` declaration was present and correct the whole time; it was simply being overridden.
+ *
+ * jsdom performs no layout, so none of `OverflowMenu.test.tsx`'s 39 tests could see this --
+ * `apps/web/e2e/submenu-position.spec.ts` measures the two boxes in a real browser and is the only
+ * guard that can. Keep this selector above any `<ancestor> .overflow-menu-list` rule's specificity
+ * rather than relying on source order, which a rule added later in the file would quietly break.
+ */
+.overflow-menu-submenu-group .overflow-menu-list.overflow-menu-submenu {
+  top: -5px;
+  right: auto;
+  left: 100%;
+  margin-left: 4px;
+}
+
+/*
  * The document-settings dialog (`documentSettingsDialog.tsx`), reached from the File menu. A
  * plain overlay + centered panel, matching the hand-built-popup approach `OverflowMenu` already
  * establishes elsewhere in this app rather than the native `<dialog>` element -- see that
