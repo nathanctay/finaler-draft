@@ -146,11 +146,63 @@ function classify(manifest) {
     );
   }
 
+  // The editor's cost is its own chunk **plus every chunk it statically imports**, transitively,
+  // minus whatever the entry chunk already paid for. Measuring `App-*.js` alone used to be the
+  // same number, because the editor was one chunk; it stopped being so when a second route began
+  // dynamically importing `@finaler-draft/screenplay-editor` (the FDX-import slice's read-only
+  // probe), which made that package shared between two dynamic entries and so made Vite extract
+  // it into a sibling chunk. `App-*.js` fell from 145 kB gzip to 23 kB with no code removed, and
+  // this check reported that as a pass: the 200 kB budget had silently stopped covering about
+  // 120 kB of editor code.
+  //
+  // Nothing about that was a real improvement, so the budget must follow the graph rather than one
+  // filename. Subtracting the entry's own closure is what keeps the number meaningful: those bytes
+  // are already in the browser before the editor is ever opened, so charging the editor for them
+  // would overstate what opening it costs.
+  const editorClosure = staticClosure(manifest, editorKey);
+  const entryClosure = staticClosure(manifest, entryMatches[0][0]);
+  const editorFiles = [...editorClosure]
+    .filter((key) => !entryClosure.has(key))
+    .map((key) => manifest[key]?.file)
+    .filter((file) => typeof file === 'string' && file.endsWith('.js'))
+    .sort();
+  if (editorFiles.length === 0) {
+    throw new Error(
+      "The editor chunk resolved to no JavaScript files once the entry chunk's own closure was " +
+        'excluded. The manifest is inconsistent with itself.',
+    );
+  }
+
   return {
-    entry: { file: entryValue.file },
-    css: { file: entryValue.css[0] },
-    editor: { file: editorValue.file },
+    entry: { files: [entryValue.file] },
+    css: { files: [entryValue.css[0]] },
+    editor: { files: editorFiles },
   };
+}
+
+/**
+ * Every manifest key reachable from `startKey` through `imports` (static imports only, never
+ * `dynamicImports`) -- the set of chunks a browser must fetch before the module at `startKey` can
+ * execute. `dynamicImports` are deliberately excluded: those are separate lazy boundaries that are
+ * not paid for until something actually awaits them, which is the entire reason the editor has a
+ * budget of its own rather than being part of the entry's.
+ *
+ * Non-chunk keys (`index.html`) are skipped by the caller's `.js` filter rather than here, so that
+ * a genuinely missing manifest record still surfaces as an inconsistency instead of being quietly
+ * dropped during the walk.
+ */
+function staticClosure(manifest, startKey) {
+  const seen = new Set();
+  const queue = [startKey];
+  while (queue.length > 0) {
+    const key = queue.pop();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    for (const next of manifest[key]?.imports ?? []) {
+      if (!seen.has(next)) queue.push(next);
+    }
+  }
+  return seen;
 }
 
 function formatKb(bytes) {
@@ -177,8 +229,13 @@ async function main() {
 
   const failures = [];
   for (const [role, budget] of Object.entries(BUDGETS)) {
-    const { file } = artifacts[role];
-    const bytes = await gzipSizeOf(file);
+    const { files } = artifacts[role];
+    let bytes = 0;
+    for (const file of files) bytes += await gzipSizeOf(file);
+    // Each chunk is gzipped separately, which is what the browser actually fetches -- not one
+    // gzip stream over the concatenation, which would understate the real transfer by sharing a
+    // dictionary across files that arrive independently.
+    const file = files.length === 1 ? files[0] : `${files.length} chunks`;
     const overBy = bytes - budget.bytes;
     const status = overBy > 0 ? 'FAIL' : 'ok  ';
     console.log(
@@ -186,6 +243,13 @@ async function main() {
         `${formatKb(bytes).padStart(10)} / ${formatKb(budget.bytes)} budget` +
         (overBy > 0 ? `  -- OVER by ${formatKb(overBy)} (${overBy} bytes)` : ''),
     );
+    if (files.length > 1) {
+      for (const member of files) {
+        console.log(
+          `[bundle-budget]        ${formatKb(await gzipSizeOf(member)).padStart(10)}  ${member}`,
+        );
+      }
+    }
     if (overBy > 0) {
       // Both units: kB rounds a sub-500-byte overage to "0.00 kB", which reads as passing at a
       // glance even though this is a real, if tiny, regression -- the exact byte count next to it

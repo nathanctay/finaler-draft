@@ -2606,6 +2606,75 @@ select:focus-visible,
   flex: 1;
 }
 
+/*
+ * The split-button control (Task 3, progress/fdx-import.md; `CreateScreenplaySplitButton.tsx`)
+ * that replaced the standalone "Import FDX…" button: a single pill-shaped unit -- the "New
+ * screenplay" label, a vertical divider, and an arrow -- with the arrow's own dropdown menu
+ * anchored directly below the *whole* unit, never overlapping it.
+ *
+ * `position: relative` lives on `.split-button` itself, not on `.create-row` or any ancestor
+ * further out: `.split-button-menu`'s `position: absolute` resolves against the nearest
+ * positioned ancestor, and that must be this exact element so "below the button" and "below the
+ * positioned ancestor" are the same thing. Getting this wrong -- no positioned ancestor at all,
+ * or the wrong one -- is the other common shape of the defect `split-button-geometry.spec.ts`
+ * exists to catch (that spec's own second test, pinning the menu away from the page origin).
+ */
+.split-button {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.split-button-primary {
+  border-right: none;
+  border-radius: 1px 0 0 1px;
+}
+
+/* The vertical divider the owner specifically asked for, between the label and the arrow -- a
+   thin filled bar rather than a border on either button, so it reads as one seam regardless of
+   which side a future restyle puts the emphasis on. */
+.split-button-divider {
+  width: 1px;
+  background: var(--border-13);
+}
+
+.split-button-arrow {
+  border-left: none;
+  border-radius: 0 1px 1px 0;
+  padding: 11px 12px;
+}
+
+/* Same geometry convention as `.overflow-menu-list` (`top: calc(100% + 4px)`, a small fixed gap
+   rather than flush against the control) -- the identical relationship, so the two dropdowns in
+   this app read as one visual language rather than two separately tuned ones. */
+.split-button-menu {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 4px);
+  left: 0;
+  display: flex;
+  min-width: 160px;
+  flex-direction: column;
+  border: 1px solid var(--border-03);
+  border-radius: 2px;
+  background: var(--surface-01);
+  padding: 4px 0;
+}
+
+.split-button-menu button {
+  border: 0;
+  background: transparent;
+  padding: 8px 14px;
+  color: var(--text-17);
+  font-size: 12px;
+  text-align: left;
+}
+
+.split-button-menu button:hover:not(:disabled),
+.split-button-menu button:focus-visible:not(:disabled) {
+  background: var(--surface-05);
+}
+
 .project-list ul {
   list-style: none;
   margin: 0;

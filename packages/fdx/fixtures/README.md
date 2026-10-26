@@ -26,3 +26,24 @@ The reference contains element types this product has no canonical equivalent fo
 `Sequence`, `Beat`, `Summary`, `New Act`, `End of Act`, `Cast List`, `Note`, `Page #`). Export
 ignores them by definition, since nothing in our model produces them. What to do with them on
 **import** is an open question for that slice, not this one.
+
+## `multi-page-script.fdx`
+
+The owner's own reproduction of a real import defect: a 47 KB, 118-paragraph screenplay exported
+from this product, which then failed to re-import with `unmapped_content` ("a title page whose
+paragraph sequence does not match the structure this product recognizes"). Every body paragraph
+`Type` in this file is mappable (`Action`, `Dialogue`, `Character`, `Scene Heading`,
+`Parenthetical`, `Shot`) -- the body was never the problem. The defect was entirely in the title
+page: its `authors` field is `['Nathan', '', '']`, two trailing blank author lines that
+`decodeTitlePageContent`'s fixed-gap grammar mis-swallowed into the following field's own gap.
+See `packages/fdx/src/import.ts`'s `decodeTitlePageContent` doc comment and `progress/fdx-import.md`'s
+Task 1 (this pass) for the full diagnosis and fix.
+
+This file is also the first confirmation that `TITLE_PAGE_LINES_BEFORE_DRAFT_DATE` and
+`TITLE_PAGE_LINES_BEFORE_CONTACT` (`packages/fdx/src/index.ts`) are the correct gaps for a
+genuine, non-synthetic Final Draft title page: both fields were populated only in this file, not
+in `final-draft-13-reference.fdx`, whose own test script left them blank.
+
+Contains no personal data beyond the writer's first name ("Nathan") and placeholder contact lines
+("line 1" through "line 15") the owner typed directly into the title page while reproducing this
+defect.

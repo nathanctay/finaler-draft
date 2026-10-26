@@ -10,7 +10,17 @@ permissions:
 
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`. GitHub rolled that label to Ubuntu 26.04, which Playwright
+    # 1.55.0 refuses outright: "Playwright does not support chromium on ubuntu26.04-x64", so
+    # `playwright install --with-deps` fails before any test runs and every job on every branch
+    # goes red. The last green run on this repo predates that roll.
+    #
+    # Pinning is the deliberate choice over bumping Playwright: the browser suite is verified
+    # against 1.55.0, and a dependency upgrade that changes real browser behaviour does not belong
+    # in whatever feature branch happens to notice CI is broken. Upgrading Playwright and moving
+    # back to a current image is its own task; until then this label must stay explicit, because
+    # reverting it to `ubuntu-latest` silently restores the breakage.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16
@@ -77,7 +87,17 @@ jobs:
   deploy:
     needs: checks
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`. GitHub rolled that label to Ubuntu 26.04, which Playwright
+    # 1.55.0 refuses outright: "Playwright does not support chromium on ubuntu26.04-x64", so
+    # `playwright install --with-deps` fails before any test runs and every job on every branch
+    # goes red. The last green run on this repo predates that roll.
+    #
+    # Pinning is the deliberate choice over bumping Playwright: the browser suite is verified
+    # against 1.55.0, and a dependency upgrade that changes real browser behaviour does not belong
+    # in whatever feature branch happens to notice CI is broken. Upgrading Playwright and moving
+    # back to a current image is its own task; until then this label must stay explicit, because
+    # reverting it to `ubuntu-latest` silently restores the breakage.
+    runs-on: ubuntu-24.04
     # Two merges in quick succession must not race each other into production, and the later one
     # must not be cancelled -- it carries the newer code. Queue them instead.
     concurrency:

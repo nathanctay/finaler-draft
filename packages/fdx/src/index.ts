@@ -45,6 +45,19 @@ const REFERENCE_FONT_SPEC =
   '<FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="12" Style=""/>';
 
 export { escapeXmlText } from '@finaler-draft/xml-escape';
+export {
+  fdxToScreenplay,
+  FdxImportError,
+  FdxUnknownTypesError,
+  MAPPABLE_BLOCK_TYPES,
+  type FdxImportErrorCode,
+  type FdxImportResult,
+  type FdxSkippedTally,
+  type FdxUnknownType,
+  type FdxUnknownTypeResolution,
+  type FdxUnknownTypeResolutions,
+  type MappableBlockType,
+} from './import.js';
 
 /**
  * Serializes a canonical `Screenplay` (`packages/screenplay`) to a Final Draft `.fdx` document.
@@ -487,17 +500,26 @@ const TITLE_PAGE_PARAGRAPH_FIXED_ATTRS =
 // Title; 3 blank centered lines, then credit; 2 blank centered lines, then each author; 4 blank
 // centered lines, then source) -- not Beat's guessed constants, which produced a structurally
 // wrong title page (centered-paragraph layout, no `Title Paragraph` type) and are gone entirely.
-const TITLE_PAGE_LINES_BEFORE_TITLE = 17;
-const TITLE_PAGE_LINES_BEFORE_CREDIT = 3;
-const TITLE_PAGE_LINES_BEFORE_AUTHOR = 2;
-const TITLE_PAGE_LINES_BEFORE_SOURCE = 4;
-// `draftDate`/`contact` positioning is NOT confirmed by the reference: its test script leaves
-// both fields blank, so the title page ends after `source` with no trailing content or padding.
-// This reuses the same order-of-magnitude gap as the verified fields above rather than inventing
-// an unrelated number. Needs the owner's check once a reference title page with these fields
-// populated exists.
-const TITLE_PAGE_LINES_BEFORE_DRAFT_DATE = 3;
-const TITLE_PAGE_LINES_BEFORE_CONTACT = 3;
+//
+// Every one of these five constants is exported, because `import.ts`'s `decodeTitlePageContent`
+// is the literal inverse of this function and must test against the identical gap this function
+// pushes for each field -- a decoder that restated any of these as its own number could silently
+// drift from the encoder's, which is exactly the class of defect `progress/fdx-import.md`'s Task 1
+// (the unconditional leading run before `title`) and this pass's own fix (excess blanks belonging
+// to `authors`) both had to correct. See `decodeTitlePageContent`'s own doc comment for how each
+// constant is used on the decode side.
+export const TITLE_PAGE_LINES_BEFORE_TITLE = 17;
+export const TITLE_PAGE_LINES_BEFORE_CREDIT = 3;
+export const TITLE_PAGE_LINES_BEFORE_AUTHOR = 2;
+export const TITLE_PAGE_LINES_BEFORE_SOURCE = 4;
+// `draftDate`/`contact` positioning was NOT confirmed by the reference (its test script leaves
+// both fields blank, so the title page ends after `source` with no trailing content or padding)
+// when these two constants were first written. It is now independently confirmed by the owner's
+// real `Multi page script.fdx` fixture (`packages/fdx/fixtures/multi-page-script.fdx`), whose
+// title page populates both fields and uses exactly these two gaps -- see
+// `packages/fdx/fixtures/README.md`.
+export const TITLE_PAGE_LINES_BEFORE_DRAFT_DATE = 3;
+export const TITLE_PAGE_LINES_BEFORE_CONTACT = 3;
 
 type TitlePageLine = {
   text: string;

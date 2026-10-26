@@ -25,6 +25,17 @@ export function readReferenceFixture(): string {
   return readFileSync(path, 'utf8');
 }
 
+/**
+ * The owner's own reproduction of the title-page defect this pass's Task 1 fixes -- a genuine
+ * Final Draft 13 export whose `authors` field is `['Nathan', '', '']`. See
+ * `packages/fdx/fixtures/README.md` for full provenance and `import.test.ts`'s own test for what
+ * this fixture is asserted against.
+ */
+export function readMultiPageScriptFixture(): string {
+  const path = fileURLToPath(new URL('../fixtures/multi-page-script.fdx', import.meta.url));
+  return readFileSync(path, 'utf8');
+}
+
 export function actionBlock(id: string, text: string): ScreenplayBlock {
   return { id, type: 'action', text };
 }

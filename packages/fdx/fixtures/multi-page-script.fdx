@@ -1,0 +1,417 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<FinalDraft DocumentType="Script" Template="No" Version="6">
+  <Content>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="47d6d8ea-cdbc-4244-8732-e4d51f1e9ed0">
+      <Text># Server port again I am doing a thing. The web client proxies /api to this address during local development.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="31b9ef69-58f2-407d-9fab-0c4807cd6094">
+      <Text>PORT=3001</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="7f32b083-eba3-40ef-bb6d-16f9398a0de9">
+      <Text># Use production only behind HTTPS and with a dedicated public app origin.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="3185574b-c02f-41da-b074-9f9cdf677251">
+      <Text>NODE_ENV=development</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="af79f528-67cb-4923-a645-4552db3404be">
+      <Text># PostgreSQL connection used by Better Auth and screenplay persistence.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="e5a34ab8-cd26-4f81-945d-f2b484658570">
+      <Text>DATABASE_URL=postgresql://postgres:password@localhost:5432/finaler_draft</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="a5ef76af-953c-4a5f-a98b-7dbfbcfffe99">
+      <Text># Generate a unique secret with at least 32 characters; never reuse this example value.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="3c43092d-394b-43dc-bd75-bba294182271">
+      <Text>BETTER_AUTH_SECRET=wAl67wDxAToOX84EmU0aBq7HXKILE/SkXAH111VjPzs=</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="8ef20243-78d5-4493-b5ed-c5ff10f8f29f">
+      <Text># The public origin Better Auth uses to issue secure same-origin sessions.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="e8b9c85a-8ac6-4eaf-814e-846785ff2a3d">
+      <Text>BETTER_AUTH_URL=http://localhost:3001</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="3.10" Type="Parenthetical" id="423a6ae2-fb7f-496e-b1d0-92af668274bb">
+      <Text>(CLIENT_ORIGIN=http://localhost:5173)</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="6e1c505d-e3b4-4f92-9100-422ef17872c1"/>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="dba541b6-ec3f-4a99-bbe4-54cd6cba1183">
+      <Text>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nunc vitae sem interdum, pharetra felis quis, suscipit nunc. Nulla ac dolor et metus cursus elementum. Praesent in risus nisi. Maecenas laoreet sit amet mi vel molestie. Duis elementum posuere tristique. Vestibulum vitae enim laoreet, iaculis erat nec, tempor erat. Morbi ex nibh, tempus quis tristique at, laoreet quis risus. Donec gravida nec odio eget eleifend. Vestibulum ut justo nec arcu pretium ornare. Ut vel erat dui. Donec a elementum massa. Maecenas posuere vulputate consectetur. In pretium quis lacus imperdiet varius. Fusce convallis, nisl sed sagittis hendrerit, lectus elit luctus lectus, eget mattis elit turpis vel metus. Sed cursus leo non tortor iaculis sodales. Aliquam efficitur nibh orci, iaculis suscipit ex fermentum ultricies.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="3.70" Type="Character" id="800c975e-ffd1-4807-a741-094fb030d8d5">
+      <Text Style="AllCaps">Viamus</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="3.10" Type="Parenthetical" id="8a6adc64-ae20-4b2c-9ef9-6731f427c544">
+      <Text>(egestas, ante eget blandit)</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="2.50" Type="Dialogue" id="27c32fc3-1bab-446e-9a1a-6aeabea8ccb3">
+      <Text> accumsan, quam mauris suscipit diam, eget blanditbe quam elit vestibulum dui. Donec eu orci eget libero ullamcorper commodo a non mauris. Nullam nulla dolor, </Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="2.50" Type="Dialogue" id="048cf25d-25b2-48c0-8c1e-d6585e8d4c57"/>
+    <Paragraph Alignment="Left" LeftIndent="2.50" Type="Dialogue" id="258bae69-bf42-4fe7-ae47-8753b1484e78"/>
+    <Paragraph Alignment="Left" LeftIndent="2.50" Type="Dialogue" id="ac6aa954-5e53-4d0f-bc29-877c9e808af8"/>
+    <Paragraph Alignment="Left" LeftIndent="2.50" Type="Dialogue" id="98dac7df-4a44-44a7-981f-6c9c507e4465"/>
+    <Paragraph Alignment="Left" LeftIndent="2.50" Type="Dialogue" id="9c620341-6f03-4f8e-b4fd-5571583e4356"/>
+    <Paragraph Alignment="Left" LeftIndent="2.50" Type="Dialogue" id="d56857e8-a87e-40c0-952f-56255c4f1cda"/>
+    <Paragraph Alignment="Left" LeftIndent="2.50" Type="Dialogue" id="da224ae5-fc61-45d3-9457-727304886cce"/>
+    <Paragraph Alignment="Left" LeftIndent="2.50" Type="Dialogue" id="87aab9c3-7168-4777-a322-e70110a4d962">
+      <Text>consequat ac ipsum eget, tempus fermentum ipsum. Duis sit amet lectus mi. Nulla facilisi. Nam in libero vitae leo semper porttitor. Donec placerat lacinia urna ut ornare. Quisque sed sollicitudin erat. Morbi volutpat velit a finibus posuere. Fusce vulputate erat ex, a volutpat risus convallis eget. Donec cosdfdsnsectetur tempus eleifend.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Scene Heading" id="61c5fdac-efde-4b20-af2e-cb9ccb9c2c51">
+      <Text Style="AllCaps">Nunc nec ligula </Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="298ef123-2b81-42b7-970c-2db430d43eca">
+      <Text>mauris. Curabitur consectetur iaculis orci vitae fringilla. In finibus blandit turpis in tincidunt. Interdum et malesuada fames ac ante ipsum primis in faucibus. Morbi quis enim ex. Etiam imperdiet faucibus sagittis. Suspendisse mauris augue, rhoncus a dolor ut, commodo vulputate mauris.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="6dda70f0-0914-4cd0-8f05-145acd80e772">
+      <Text>Sed leo est, mattis sed posuere imperdiet, dapibus a tellus. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. Maecenas eget massa ac lectus pharetra gravida. Aliquam non malesuada lorem. Nam facilisis luctus magna, et porta nunc auctor at. Phasellus ipsum quam, rhoncus a ex ac, egestas sollicitudin eros. Sed nulla urna, aliquet in blandit in, imperdiet ut neque. Etiam ornare ut dolor id fringilla. Sed condimentum, augue nec pulvinar laoreet, felis felis rutrum metus, a faucibus sem tortor sit amet magna. Fusce vel libero scelerisque, suscipit eros vitae, suscipit turpis. Sed lobortis erat et pulvinar lobortis. Sed et eleifend ex. Fusce eu velit nulla. Morbi condimentum libero turpis, eu fermentum tortor finibus a.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="e323e9b5-48ab-41cf-9b0a-448093facde9">
+      <Text>Maecenas lacinia neque ut posuere ultricies. In hac habitasse platea dictumst. Phasellus nisi est, varius non ipsum vel, condimentum lobortis leo. Etiam egestas malesuada ligula, quis aliquam nulla ornare ut. Fusce blandit dignissim mollis. Pellentesque convallis, sem quis congue porta, augue felis euismod erat, a sagittis urna lorem vitae orci. Aenean faucibus aliquet mattis.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="b98bb5e5-762e-418e-a871-c94eafd06f36">
+      <Text>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nunc vitae sem interdum, pharetra felis quis, suscipit nunc. Nulla ac dolor et metus cursus elementum. Praesent in risus nisi. Maecenas laoreet sit amet mi vel molestie. Duis elementum posuere tristique. Vestibulum vitae enim laoreet, iaculis erat nec, tempor erat. Morbi ex nibh, tempus quis tristique at, laoreet quis risus. Donec gravida nec odio eget eleifend. Vestibulum ut justo nec arcu pretium ornare. Ut vel erat dui. Donec a elementum massa. Maecenas posuere vulputate consectetur. In pretium quis lacus imperdiet varius. Fusce convallis, nisl sed sagittis hendrerit, lectus elit luctus lectus, eget mattis elit turpis vel metus. Sed cursus leo non tortor iaculis sodales. Aliquam efficitur nibh orci, iaculis suscipit ex fermentum ultricies.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="7d36e952-1f16-4b31-ae77-ba93b6c5eb5c">
+      <Text>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nunc vitae sem interdum, pharetra felis quis, suscipit nunc. Nulla ac dolor et metus cursus elementum. Praesent in risus nisi. Maecenas laoreet sit amet mi vel molestie. Duis elementum posuere tristique. Vestibulum vitae enim laoreet, iaculis erat nec, tempor erat. Morbi ex nibh, tempus quis tristique at, laoreet quis risus. Donec gravida nec odio eget eleifend. Vestibulum ut justo nec arcu pretium ornare. Ut vel erat dui. Donec a elementum massa. Maecenas posuere vulputate consectetur. In pretium quis lacus imperdiet varius. Fusce convallis, nisl sed sagittis hendrerit, lectus elit luctus lectus, eget mattis elit turpis vel metus. Sed cursus leo non tortor iaculis sodales. Aliquam efficitur nibh orci, iaculis suscipit ex fermentum ultricies.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="3.70" Type="Character" id="09537258-a964-4ef9-8d5e-d52081ac429d">
+      <Text Style="AllCaps">Vivamus </Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="2.50" Type="Dialogue" id="017a87c3-b639-4f1d-bdcf-937b5fb76102">
+      <Text>egestas, ante eget blandit accumsan, quam mauris suscipit diam, eget blandit quam elit vestibulum dui. Donec eu orci eget libero ullamcorper commodo a non mauris. Nullam nulla dolor, consequat ac ipsum eget, tempus fermentum ipsum. Duis sit amet lectus mi. Nulla facilisi. Nam in libero vitae leo semper porttitor. Donec placerat lacinia urna ut ornare. Quisque sed sollicitudin erat. Morbi volutpat velit a finibus posuere. Fusce vulputate erat ex, a volutpat risus convallis eget. Donec consectetur tempus eleifend.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="4ce186c7-11ab-4d3e-bc36-023e2576d99a">
+      <Text>Nunc nec ligula mauris. Curabitur consectetur iaculis orci vitae fringilla. In finibus blandit turpis in tincidunt. Interdum et malesuada fames ac ante ipsum primis in faucibus. Morbi quis enim ex. Etiam imperdiet faucibus sagittis. Suspendisse mauris augue, rhoncus a dolor ut, commodo vulputate mauris.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="01d29955-e506-4c30-9b81-35e902098019">
+      <Text>Sed leo est, mattis sed posuere imperdiet, dapibus a tellus. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. Maecenas eget massa ac lectus pharetra gravid😘a. Aliquam non malesuada lorem. Nam facilisis luctus magna, et porta nunc auctor at. Phasellus ipsum quam, rhoncus a ex ac, egestas sollicitudin eros. Sed nulla urna, aliquet in blandit in, imperdiet ut neque. Etiam ornare ut dolor id fringilla. Sed condimentum, augue nec pulvinar laoreet, felis felis rutrum metus, a faucibus sem tortor sit amet magna. Fusce vel libero scelerisque, suscipit eros vitae, suscipit turpis. Sed lobortis erat et pulvinar lobortis. Sed et eleifend ex. Fusce eu velit nulla. Morbi condimentum libero turpis, eu fermentum tortor finibus a.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="2d1347b0-62ea-43f5-9e41-8f690cd24802">
+      <Text>Maecenas lacinia neque ut posuere ultricies. In hac habitasse platea dictumst. Phasellus nisi est, varius non ipsum vel, condimentum lobortis leo. Etiam egestas malesuada ligula, quis aliquam nulla ornare ut. Fusce blandit dignissim mollis. Pellentesque convallis, sem quis congue porta, augue felis euismod erat, a sagittis urna lorem vitae orci. Aenean faucibus aliquet mattis.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="8db78af6-02d8-492c-a7fb-4576a23126e9">
+      <Text>😘😘😘😘😘😘😘😘😘😘</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="dbcef4b9-7dd4-4e0a-add1-c65b76f8334c">
+      <Text>�</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="8444d627-4130-4588-b2d0-2d22df1a82ea">
+      <Text>ΘД</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="419b7b6b-2f8f-4d7f-a45f-ca743da43e41">
+      <Text>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nunc vitae sem interdum, pharetra felis quis, suscipit nunc. Nulla ac dolor et metus cursus elementum. Praesent in risus nisi. Maecenas laoreet sit amet mi vel molestie. Duis elementum posuere tristique. Vestibulum vitae enim laoreet, iaculis erat nec, tempor erat. Morbi ex nibh, tempus quis tristique at, laoreet quis risus. Donec gravida nec odio eget eleifend. Vestibulum ut justo nec arcu pretium ornare. Ut vel erat dui. Donec a elementum massa. Maecenas posuere vulputate consectetur. In pretium quis lacus imperdiet varius. Fusce convallis, nisl sed sagittis hendrerit, lectus elit luctus lectus, eget mattis elit turpis vel metus. Sed cursus leo non tortor iaculis sodales. Aliquam efficitur nibh orci, iaculis suscipit ex fermentum ultricies.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="8b866d42-bd58-4bf4-a650-7723a607d6f0">
+      <Text>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nunc vitae sem interdum, pharetra felis quis, suscipit nunc. Nulla ac dolor et metus cursus elementum. Praesent in risus nisi. Maecenas laoreet sit amet mi vel molestie. Duis elementum posuere tristique. Vestibulum vitae enim laoreet, iaculis erat nec, tempor erat. Morbi ex nibh, tempus quis tristique at, laoreet quis risus. Donec gravida nec odio eget eleifend. Vestibulum ut justo nec arcu pretium ornare. Ut vel erat dui. Donec a elementum massa. Maecenas posuere vulputate consectetur. In pretium quis lacus imperdiet varius. Fusce convallis, nisl sed sagittis hendrerit, lectus elit luctus lectus, eget mattis elit turpis vel metus. Sed cursus leo non tortor iaculis sodales. Aliquam efficitur nibh orci, iaculis suscipit ex fermentum ultricies.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="bcc55361-a502-452d-bb8a-37db1178db05">
+      <Text>Vivamus egestas, ante eget blandit accumsan, quam mauris suscipit diam, eget blandit quam elit vestibulum dui. Donec eu orci eget libero ullamcorper commodo a non mauris. Nullam nulla dolor, consequat ac ipsum eget, tempus fermentum ipsum. Duis sit amet lectus mi. Nulla facilisi. Nam in libero vitae leo semper porttitor. Donec placerat lacinia urna ut ornare. Quisque sed sollicitudin erat. Morbi volutpat velit a finibus posuere. Fusce vulputate erat ex, a volutpat risus convallis eget. Donec consectetur tempus eleifend.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="25df2c31-9dd7-4211-92f9-8d44055f4900">
+      <Text>Nunc nec ligula mauris. Curabitur consectetur iaculis orci vitae fringilla. In finibus blandit turpis in tincidunt. Interdum et malesuada fames ac ante ipsum primis in faucibus. Morbi quis enim ex. Etiam imperdiet faucibus sagittis. Suspendisse mauris augue, rhoncus a dolor ut, commodo vulputate mauris.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="a67554a0-2d1b-47eb-9ba4-67639f83fc2d">
+      <Text>Sed leo est, mattis sed posuere imperdiet, dapibus a tellus. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. Maecenas eget massa ac lectus pharetra gravid😘a. Aliquam non malesuada lorem. Nam facilisis luctus magna, et porta nunc auctor at. Phasellus ipsum quam, rhoncus a ex ac, egestas sollicitudin eros. Sed nulla urna, aliquet in blandit in, imperdiet ut neque. Etiam ornare ut dolor id fringilla. Sed condimentum, augue nec pulvinar laoreet, felis felis rutrum metus, a faucibus sem tortor sit amet magna. Fusce vel libero scelerisque, suscipit eros vitae, suscipit turpis. Sed lobortis erat et pulvinar lobortis. Sed et eleifend ex. Fusce eu velit nulla. Morbi condimentum libero turpis, eu fermentum tortor finibus a.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="2d8a49b1-9aab-49dc-9d46-78cb17eab5ff">
+      <Text>Maecenas lacinia neque ut posuere ultricies. In hac habitasse platea dictumst. Phasellus nisi est, varius non ipsum vel, condimentum lobortis leo. Etiam egestas malesuada ligula, quis aliquam nulla ornare ut. Fusce blandit dignissim mollis. Pellentesque convallis, sem quis congue porta, augue felis euismod erat, a sagittis urna lorem vitae orci. Aenean faucibus aliquet mattis.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="72a6d3ab-940c-4bf9-8aeb-2c971123a748">
+      <Text>😘😘😘😘😘😘😘😘😘😘</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="f97914ad-ce77-492c-a0c7-699a8a6d365a">
+      <Text>😘😘😘😘😘😘😘😘😘😘</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="89f099df-2bed-4ec8-9013-87e70130d0e4">
+      <Text>�</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="8cb02065-ed27-404f-b8c2-72f596d4801f">
+      <Text>ΘД</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="ae4444e5-1b2f-4b91-99b7-724b86774243"/>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="83a6d4a8-6975-41c5-b32b-5f3e670a12d1">
+      <Text>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nunc vitae sem interdum, pharetra felis quis, suscipit nunc. Nulla ac dolor et metus cursus elementum. Praesent in risus nisi. Maecenas laoreet sit amet mi vel molestie. Duiselementum posuere tristique. Vestibulum vitae enim laoreet, iaculis erat nec, tempor erat. Morbi ex nibh, tempus quis tristique at, laoreet quis risus. Donec gravida nec odio eget eleifend. Vestibulum ut justo nec arcu pretium ornare. Ut vel erat dui. Donec a elementum massa. Maecenas posuere vulputate consectetur. In pretium quis lacus imperdiet varius. Fusce convallis, nisl sed sagittis hendrerit, lectus elit luctus lectus, eget mattis elit turpis vel metus. Sed cursus leo non tortor iaculis sodales. Aliquam efficitur nibh orci, iaculis suscipit ex fermentum ultricies.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="3.70" Type="Character" id="aa1de8d9-81ad-46fc-97da-fa514d07938d">
+      <Text Style="AllCaps">Lorem</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="53da3c6c-c8a8-4af0-98d1-e703f6a721b1">
+      <Text> ipsum dolor sit amet, consectetur adipiscing elit. Nunc vitae sem interdum, pharetra felis quis, suscipit nunc. Nulla ac dolor et metus cursus elementum. Praesent in risus nisi. Maecenas laoreet sit amet mi vel molestie. Duis elementum posuere tristique. Vestibulum vitae enim laoreet, iaculis erat nec, tempor erat. Morbi ex nibh, tempus quis tristique at, laoreet quis risus. Donec gravida nec odio eget eleifend. Vestibulum ut justo nec arcu pretium ornare. Ut vel erat dui. Donec a elementum massa. Maecenas posuere vulputate consectetur. In pretium quis lacus imperdiet varius. Fusce convallis, nisl sed sagittis hendrerit, lectus elit luctus lectus, eget mattis elit turpis vel metus. Sed cursus leo non tortor iaculis sodales. Aliquam efficitur nibh orci, iaculis suscipit ex fermentum ultricies.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="81a4a8fb-55c1-43ef-914d-a7e451e4d219">
+      <Text>Vivamus egestas, ante eget blandit accumsan, quam mauris suscipit diam, eget blandit quam elit vestibulum dui. Donec eu orci eget libero ullamcorper commodo a non mauris. Nullam nulla dolor, consequat ac ipsum eget, tempus fermentum ipsum. Duis sit amet lectus mi. Nulla facilisi. Nam in libero vitae leo semper porttitor. Donec placerat lacinia urna ut ornare. Quisque sed sollicitudin erat. Morbi volutpat velit a finibus posuere. Fusce vulputate erat ex, a volutpat risus convallis eget. Donec consectetur tempus eleifend.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="eca6c7ab-17d7-4d44-9ddd-487caf1c7cd9">
+      <Text>Nunc nec ligula mauris. Curabitur consectetur iaculis orci vitae fringilla. In finibus blandit turpis in tincidunt. Interdum et malesuada fames ac ante ipsum primis in faucibus. Morbi quis enim ex. Etiam imperdiet faucibus sagittis. Suspendisse mauris augue, rhoncus a dolor ut, commodo vulputate mauris.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="a7179903-c5f5-49c9-8706-8ae39d55ae47">
+      <Text>Sed leo est, mattis sed posuere imperdiet, dapibus a tellus. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. Maecenas eget massa ac lectus pharetra gravid😘a. Aliquam non malesuada lorem. Nam facilisis luctus magna, et porta nunc auctor at. Phasellus ipsum quam, rhoncus a ex ac, egestas sollicitudin eros. Sed nulla urna, aliquet in blandit in, imperdiet ut neque. Etiam ornare ut dolor id fringilla. Sed condimentum, augue nec pulvinar laoreet, felis felis rutrum metus, a faucibus sem tortor sit amet magna. Fusce vel libero scelerisque, suscipit eros vitae, suscipit turpis. Sed lobortis erat et pulvinar lobortis. Sed et eleifend ex. Fusce eu velit nulla. Morbi condimentum libero turpis, eu fermentum tortor finibus a.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="9537666c-4067-4f94-b3f6-3b41cdb63b73">
+      <Text>Maecenas lacinia neque ut posuere ultricies. In hac habitasse platea dictumst. Phasellus nisi est, varius non ipsum vel, condimentum lobortis leo. Etiam egestas malesuada ligula, quis aliquam nulla ornare ut. Fusce blandit dignissim mollis. Pellentesque convallis, sem quis congue porta, augue felis euismod erat, a sagittis urna lorem vitae orci. Aenean faucibus aliquet mattis.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="28f6b100-b4ce-4b72-a4e5-7a2e6fbe9475">
+      <Text>😘😘😘😘😘😘😘😘😘😘</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="78eb9bac-816f-4d53-8a90-894ec87f9335">
+      <Text>😘😘😘😘😘😘😘😘😘😘</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="50f8f624-85ed-4336-81f4-17e7326552e4">
+      <Text>�</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="474118b5-626d-4b2a-a400-5fec0126850d">
+      <Text>ΘД</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="fb1cb6ea-d4f2-48be-90cf-d51546b3b260">
+      <Text>Maecenas lacinia neque ut posuere ultricies. In hac habitasse platea dictumst. Phasellus nisi est, varius non ipsum vel, condimentum lobortis leo. Etiam egestas malesuada ligula, quis aliquam nulla ornare ut. Fusce blandit dignissim mollis. Pellentesque convallis, sem quis congue porta, augue felis euismod erat, a sagittis urna lorem vitae orci. Aenean faucibus aliquet mattis.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="12d7ab67-d980-40b2-8471-8753475f19d7">
+      <Text>😘😘😘😘😘😘😘😘😘😘</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="3f8ce672-dbf8-4dd7-9b9d-d00f3954dce9">
+      <Text>😘😘😘😘😘😘😘😘😘😘</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="a22b1943-a93e-4d96-81d0-2680a8c4e872">
+      <Text>�</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="24a9bb28-bb8f-4d03-a9dd-6ca28b404a2f">
+      <Text>ΘД</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="8cda3ff7-e0b3-49d5-8037-63d3f697d232"/>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="0eeb1e70-d078-41cf-bc4a-d394b4cbfd9c">
+      <Text>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nunc vitae sem interdum, pharetra felis quis, suscipit nunc. Nulla ac dolor et metus cursus elementum. Praesent in risus nisi. Maecenas laoreet sit amet mi vel molestie. Duis elementum posuere tristique. Vestibulum vitae enim laoreet, iaculis erat nec, tempor erat. Morbi ex nibh, tempus quis tristique at, laoreet quis risus. Donec gravida nec odio eget eleifend. Vestibulum ut justo nec arcu pretium ornare. Ut vel erat dui. Donec a elementum massa. Maecenas posuere vulputate consectetur. In pretium quis lacus imperdiet varius. Fusce convallis, nisl sed sagittis hendrerit, lectus elit luctus lectus, eget mattis elit turpis vel metus. Sed cursus leo non tortor iaculis sodales. Aliquam efficitur nibh orci, iaculis suscipit ex fermentum ultricies.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="cd2537d1-b263-457f-9f36-49927c7fa816">
+      <Text>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nunc vitae sem interdum, pharetra felis quis, suscipit nunc. Nulla ac dolor et metus cursus elementum. Praesent in risus nisi. Maecenas laoreet sit amet mi vel molestie. Duis elementum posuere tristique. Vestibulum vitae enim laoreet, iaculis erat nec, tempor erat. Morbi ex nibh, tempus quis tristique at, laoreet quis risus. Donec gravida nec odio eget eleifend. Vestibulum ut justo nec arcu pretium ornare. Ut vel erat dui. Donec a elementum massa. Maecenas posuere vulputate consectetur. In pretium quis lacus imperdiet varius. Fusce convallis, nisl sed sagittis hendrerit, lectus elit luctus lectus, eget mattis elit turpis vel metus. Sed cursus leo non tortor iaculis sodales. Aliquam efficitur nibh orci, iaculis suscipit ex fermentum ultricies.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="6913eab6-80b5-44a2-9a51-8cb7366bdfa6">
+      <Text>Vivamus egestas, ante eget blandit accumsan, quam mauris suscipit diam, eget blandit quam elit vestibulum dui. Donec eu orci eget libero ullamcorper commodo a non mauris. Nullam nulla dolor, consequat ac ipsum eget, tempus fermentum ipsum. Duis sit amet lectus mi. Nulla facilisi. Nam in libero vitae leo semper porttitor. Donec placerat lacinia urna ut ornare. Quisque sed sollicitudin erat. Morbi volutpat velit a finibus posuere. Fusce vulputate erat ex, a volutpat risus convallis eget. Donec consectetur tempus eleifend.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="b814eed5-4c1f-4b72-a207-30e18fedebae">
+      <Text>Nunc nec ligula mauris. Curabitur consectetur iaculis orci vitae fringilla. In finibus blandit turpis in tincidunt. Interdum et malesuada fames ac ante ipsum primis in faucibus. Morbi quis enim ex. Etiam imperdiet faucibus sagittis. Suspendisse mauris augue, rhoncus a dolor ut, commodo vulputate mauris.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="2544b1bb-5eb4-49ce-bda9-7a33f872566f">
+      <Text>Sed leo est, mattis sed posuere imperdiet, dapibus a tellus. Pellentesque habitant morbi tristique senectus et netus et malesuada fames ac turpis egestas. Maecenas eget massa ac lectus pharetra gravid😘a. Aliquam non malesuada lorem. Nam facilisis luctus magna, et porta nunc auctor at. Phasellus ipsum quam, rhoncus a ex ac, egestas sollicitudin eros. Sed nulla urna, aliquet in blandit in, imperdiet ut neque. Etiam ornare ut dolor id fringilla. Sed condimentum, augue nec pulvinar laoreet, felis felis rutrum metus, a faucibus sem tortor sit amet magna. Fusce vel libero scelerisque, suscipit eros vitae, suscipit turpis. Sed lobortis erat et pulvinar lobortis. Sed et eleifend ex. Fusce eu velit nulla. Morbi condimentum libero turpis, eu fermentum tortor finibus a.Maecenas lacinia neque ut posuere ultricies. In hac habitasse platea dictumst. Phasellus nisi est, varius non ipsum vel, condimentum lobortis leo. Etiam egestas malesuada ligula, quis aliquam nulla ornare ut. Fusce blandit dignissim mollis. Pellentesque convallis, sem quis congue porta, augue felis euismod erat, a sagittis urna lorem vitae orci. Aenean faucibus aliquet mattis.</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Scene Heading" id="29c3112f-de9f-42a9-88d6-e4a18a0e8421">
+      <Text Style="AllCaps">EXT. NUNC NEC LIGULA - </Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="25abf467-9cde-40d1-beb1-ae58e2dff68b">
+      <Text>😘😘😘😘😘😘😘😘😘😘</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="6c8d75ce-859f-4b38-b96d-f80c637c8db4">
+      <Text>😘😘😘😘😘😘😘😘😘😘</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="9871f999-9df8-4d0e-978e-b16af99f31b5">
+      <Text>�</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="fe66ec2e-41c2-4306-a314-6cb34a682fa5">
+      <Text>ΘД</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="3.70" Type="Character" id="565df5b9-2f66-4afa-b6a1-8dbeda8a0e00">
+      <Text Style="AllCaps">VIVAMUS</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Scene Heading" id="87aa0763-acb4-42dd-a3d9-761c2eb8fd2c">
+      <Text Style="AllCaps">INT. NUNC NEC LIGULA - DAY</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="3.70" Type="Character" id="f58a9881-0495-4d65-b299-219de0eb599e">
+      <Text Style="AllCaps">LOREM</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Scene Heading" id="45c6d1e8-bd5c-4232-86c0-acad29ccf550">
+      <Text Style="AllCaps">INT. NUNC NEC LIGULA - DUSK</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Shot" id="f8f73d4a-e098-4fe2-9397-8cfafc6099b7">
+      <Text Style="AllCaps">gdfgdgdfgdgdghf</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="ed408273-5b61-420d-8ae9-0c6ef65dfb58">
+      <Text>fghfghghdhjhghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="fec5d051-a692-41ec-a7ff-e5c925f34bbd">
+      <Text>gjhhjghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="9eb1b126-7531-4377-87ad-6b4c17a2341d">
+      <Text>ghjghjhgjghjgj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="81fd0198-ead3-4d18-b2c0-d699b8872716">
+      <Text>ghjgfhjghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="62f7b5a1-1891-48d5-ba84-be3bccd93ed4">
+      <Text>ghjhgjhfgjhf</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="89e06da3-07e2-4218-8753-e6091c400dfc">
+      <Text>fghjjghjghjgh</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="f6e29832-0567-4df7-b0e3-6591670267f3">
+      <Text>ghjghjgfhf</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="21e10949-17f2-4f2d-a7d5-b0bfa7b1708f">
+      <Text>fghjfjfjgh</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="77b47bc7-5f90-4808-8610-0f4778eaafd3">
+      <Text>ghjfghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="cc5db588-86e7-4551-992f-e2838f103ad9">
+      <Text>hjgfjghjghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="579a1e75-2a22-4da9-87aa-73137046ba21">
+      <Text>hjghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="462bd6ee-c59b-440b-9f6b-b2f40b194715">
+      <Text>ghjhgfj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="3860b4d5-3cc7-490c-aa3e-3d5ca7fce00d">
+      <Text>ghjhgj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="3e7468d2-b5af-4ac3-a45b-d0616e3bb06a">
+      <Text>ghjhgj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="7121d470-b483-4ed7-832b-27fb7d9c6a52">
+      <Text>gjghjghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="8cf46e73-74b4-493c-af01-1d8214b38fdb">
+      <Text>ghjhgjhg</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="cfe287e2-9d4e-4313-b657-509bd41bd6af">
+      <Text>jhfghjghjgh</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="e8daad1c-2ade-4da7-b40e-c3015d15afa9">
+      <Text>ghjghhjgf</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="b4f7516d-004d-4041-b6a3-04ae2ace4e6f">
+      <Text>I am making some legitimate changes here. This is a full change</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="591a2b2a-cbf6-4e87-96a9-64859a552ad7">
+      <Text>gjhfgj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="08456c1a-0404-4948-b52b-f2538ac0d9b9">
+      <Text>ghjfghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="604c7dd0-0a18-47ca-8ba2-e5d5bdf36f92">
+      <Text>hjggfhj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="6483b6f6-1e24-4600-beff-1f7aeefdf107">
+      <Text>ghjfhj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="d41adba4-1a80-482e-8082-3c09dc01eebd">
+      <Text>ghjfghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="5df1a18f-d1f0-4a27-bc9f-acf9478aff56">
+      <Text>ghjghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="c918a768-5279-4c64-97af-522275ee9eb2">
+      <Text>ghjghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="4412c763-7e2c-4a5f-9832-d30dd0546837">
+      <Text>ghjgh</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="d40fd18a-bfa4-4425-a47a-817d7b40ebdd">
+      <Text>fghjghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="e32c1c62-1a51-487a-b454-af31dfac0c55">
+      <Text>fghjghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="cad64833-63a1-466f-9d89-53bb874b97e6">
+      <Text>ghjghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="d748226a-18fe-4801-a978-b3d9af84a1e4">
+      <Text>fghjghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="fab685ef-ec50-4f5f-b33c-b99f0328f48f">
+      <Text>ghjjgh</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="cd77b216-c7ec-49e3-8923-d8e76d91e628">
+      <Text>gjh</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="7159c0ad-5b2e-486a-8f05-4667e8e21660">
+      <Text>jhhjfghj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="cbe8888c-b789-4175-bbda-0b93c27d5c65">
+      <Text>hjfj</Text>
+    </Paragraph>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="4e9b8eb9-e8cd-47dc-8f8b-3b7ef63c2e2d"/>
+    <Paragraph Alignment="Left" LeftIndent="1.50" Type="Action" id="917fb627-7053-433c-bebc-6531214fb78a"/>
+  </Content>
+  <PageLayout BottomMargin="72" BreakDialogueAndActionAtSentences="Yes" DocumentLeading="Normal" FooterMargin="36" HeaderMargin="36" InvisiblesColor="#808080808080" TopMargin="72" UsesSmartQuotes="Yes">
+    <PageSize Height="11.00" Width="8.50"/>
+    <AutoCastList AddParentheses="Yes" AutomaticallyGenerate="Yes" CastListElement="Cast List"/>
+  </PageLayout>
+  <TitlePage>
+    <Content>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="a1fcdea8-7a2b-438e-b838-26ce019976fe"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="f9ad845e-7f48-4275-8115-a673c22e7f9e"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="c06389bb-eda7-4d79-affe-19362ae6cff8"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="e8661df0-9218-4fd7-ac9b-d14a197b55fb"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="1bfb13b3-9c8d-401d-96f6-1e8e56f94596"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="a5e170f1-3ecb-47d2-b13b-a3e5b9e093a1"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="e71e2e8f-3ba1-4228-97d7-cec084041743"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="eed5e70c-7abb-4bad-ac5a-f0026af30b95"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="2f1fd2ba-b822-461d-9a6b-3cad1263f94b"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="f638197c-1868-4a53-a8e3-9c9b542de28a"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="fff07b39-a173-45fe-93d8-756adccc9bf1"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="438e84b4-9c6d-4426-8a78-257ba7fd7f26"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="d0f1df25-3bea-4659-9f65-72291c5aa3c2"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="0625873f-fd61-4a5a-8826-f3fdeb471088"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="d89dfe76-8fdb-4936-b621-5a4cce95fe64"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="8b62790e-1062-40f2-aa84-4c74497c062f"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="9c5a1192-5569-4546-84e2-afa4350d97b5"/>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="88cd2e78-f475-4f4d-8b1f-41a1869f2f7f">
+        <Text Font="Courier Final Draft" Size="12" Style="Underline+AllCaps">Multi page script</Text>
+      </Paragraph>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="a0f25372-e3d9-427c-94a8-c0c06e8ef892"/>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="7ea4c543-fdb2-4655-a30c-59b5e9f9e119"/>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="c2467daf-8f4e-44f9-a2aa-e8cca69a53a1"/>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="a98f4640-6061-4876-b860-895278b735d2">
+        <Text Font="Courier Final Draft" Size="12">written by</Text>
+      </Paragraph>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="5306ef61-6b85-4fc8-b459-5f0e00af7a09"/>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="6ab96b76-f094-465e-b4ab-123af2a37b09"/>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="e4e9b3a9-c227-40f1-bdd9-dc65db3ec476">
+        <Text Font="Courier Final Draft" Size="12">Nathan</Text>
+      </Paragraph>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="0908e62c-609f-498d-a795-0614f72d80ec"/>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="28c22f32-adab-44aa-b7a6-718619286d06"/>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="488865eb-ea2a-4be3-bfd1-ce9b7e5f0af5"/>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="92e6129a-4792-4985-9678-30403a091fb2"/>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="44e70033-da46-4bd7-9124-be0ba4b89860"/>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="a065712f-22b2-4f3e-8c96-79a3e48b5b0e"/>
+      <Paragraph Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="519535fc-92dc-4ce7-be29-a307bd53292f">
+        <Text Font="Courier Final Draft" Size="12">Based on War and Peace</Text>
+      </Paragraph>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="cb4e35a9-798b-4629-a557-646e0fa5adf4"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="7e1a471e-652b-4ad6-857b-dab6a1a56a97"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="58ac84d0-c7d8-46c3-82d9-7af37b33a40e"/>
+      <Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="6070b743-869d-4d4f-972f-06a2f0a21a6d">
+        <Text Font="Courier Final Draft" Size="12">08/22/26</Text>
+      </Paragraph>
+      <Paragraph Alignment="Right" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="99603ae7-45bf-45ae-bdc2-dbbb83b05c0c"/>
+      <Paragraph Alignment="Right" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="cd42ed74-3e36-4b99-93f6-891902e46f20"/>
+      <Paragraph Alignment="Right" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="9b47aeef-8690-4e8d-97ff-343050e6be59"/>
+      <Paragraph Alignment="Right" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" OutlineLevel="1" RightIndent="7.50" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Title Paragraph" id="8f0f25af-65ea-429f-8d7b-09415dfe1ac2">
+        <Text Font="Courier Final Draft" Size="12">line 1
+line 2
+line 3
+line 4
+line 5
+line 6
+line 7
+line 8
+line 9
+line 10
+line 11
+lie 12
+line 13
+line 14
+line 15</Text>
+      </Paragraph>
+    </Content>
+  </TitlePage>
+  <MoresAndContinueds>
+    <FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="12" Style=""/>
+    <DialogueBreaks AutomaticCharacterContinueds="Yes" BottomOfPage="Yes" DialogueBottom="(MORE)" DialogueTop="(CONT&apos;D)" TopOfNext="Yes"/>
+    <SceneBreaks ContinuedNumber="No" SceneBottom="(CONTINUED)" SceneBottomOfPage="No" SceneTop="CONTINUED:" SceneTopOfNext="No"/>
+  </MoresAndContinueds>
+  <SceneNumberOptions LeftLocation="0.75" RightLocation="7.38" ShowNumbersOnLeft="No" ShowNumbersOnRight="No" NumberScheme="1A" AutoHideNumbersOnRight="No">
+    <FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="12" Style=""/>
+  </SceneNumberOptions>
+</FinalDraft>
