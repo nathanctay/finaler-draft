@@ -147,11 +147,16 @@ export interface RevisionStore {
    */
   getRevision(actorId: string, screenplayId: string, revisionId: string): Promise<GetResult>;
   /**
-   * `kind: 'named'` requires owner/editor membership -- an authored label is a deliberate act, the
-   * same bar `renameScreenplay`/`deleteScreenplay` already set for this project. `kind: 'export'`
-   * requires only membership (any role, reviewer included): plan.md is explicit that a lapsed or
-   * read-only account still "keeps every screenplay readable and exportable," so exporting must
-   * never be gated behind edit rights that reading and exporting themselves never required.
+   * `kind: 'named'` requires owner/editor membership -- an authored label is a deliberate act,
+   * the same bar every other write in this project uses (`canEdit`/`roleCanEdit`). `renameScreenplay`
+   * and `deleteScreenplay` (`projects.ts`) used to share this exact bar too, until the
+   * owner-only-rename slice (progress/owner-only-rename.md) narrowed both of those specifically
+   * to owner-only; naming a revision was not part of that slice and is deliberately unaffected by
+   * it -- an editor may still save a milestone, just not rename or delete the screenplay itself.
+   * `kind: 'export'` requires only membership (any role, reviewer included): plan.md is explicit
+   * that a lapsed or read-only account still "keeps every screenplay readable and exportable," so
+   * exporting must never be gated behind edit rights that reading and exporting themselves never
+   * required.
    */
   createRevision(
     actorId: string,

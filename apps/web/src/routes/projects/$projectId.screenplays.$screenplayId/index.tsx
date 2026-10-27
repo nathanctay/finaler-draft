@@ -130,6 +130,21 @@ function ScreenplayPage() {
         entitlementReadOnly={entitlementReadOnly}
         initial={screenplay.data as PersistedScreenplay}
         {...(mayShare ? { onOpenSharing: () => setSharingOpen(true) } : {})}
+        // Renaming from the title bar updates the editor's own displayed title locally, which is
+        // all the editor itself needs; these invalidations are for everything *else* that has the
+        // old title cached. `['screenplay', screenplayId]` matters because this route's own fetch
+        // seeds `initial` -- without it, a remount (a restore's epoch cutover, say) would show the
+        // stale name again. `['screenplays', projectId]` and `['projects']` are the two listings a
+        // writer reaches by navigating back, and they are keyed independently of this route.
+        //
+        // Deliberately not `await`ed and not blocking the rename's own success: the write already
+        // succeeded server-side by the time this runs, and a refetch failing is not a reason to
+        // tell the writer their rename did not happen.
+        onScreenplayRenamed={() => {
+          void queryClient.invalidateQueries({ queryKey: ['screenplay', screenplayId] });
+          void queryClient.invalidateQueries({ queryKey: ['screenplays', projectId] });
+          void queryClient.invalidateQueries({ queryKey: ['projects'] });
+        }}
         // Collaboration slice 5: the epoch is part of the key, not just the screenplay id. A restore
         // (performed here or by a collaborator) changes `currentEpoch`, and `App` must then be a fresh
         // mount -- new `HocuspocusProvider` for the new document name, new (empty) `y-indexeddb`

@@ -8,6 +8,18 @@ export const PASSWORD_MAX_LENGTH = 128;
 export const PASSWORD_REQUIREMENTS_MESSAGE = `Password must be ${PASSWORD_MIN_LENGTH}–${PASSWORD_MAX_LENGTH} characters.`;
 
 /**
+ * The maximum length of a project or screenplay title -- shared between `apps/api`'s
+ * `projectTitle` zod schema (`z.string().trim().min(1).max(RESOURCE_TITLE_MAX_LENGTH)`, matching
+ * the `varchar(200)` columns both tables actually use) and the rename dialog's own client-side
+ * validation (`apps/web`'s `renameDialog.tsx`). One constant, not two literal `200`s independently
+ * maintained in a server package and a browser package: the dialog's validation exists purely to
+ * give a writer an inline answer before a round trip, and a bound that drifted from the server's
+ * own would mean a title the dialog accepted still coming back 400, or the dialog rejecting a
+ * title the server would have allowed.
+ */
+export const RESOURCE_TITLE_MAX_LENGTH = 200;
+
+/**
  * The port `apps/collab` (the Hocuspocus collaboration server) binds to in a real local
  * `pnpm dev` run, absent an explicit `COLLAB_PORT` override (`apps/collab/src/environment.ts`'s
  * `resolveCollabPort`) -- and the port `apps/web`'s dev server points its own default

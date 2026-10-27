@@ -715,7 +715,7 @@ describe('persisted project API', () => {
           payload: { title: 'New Title' },
         });
         expect(forbidden.statusCode).toBe(403);
-        expect(forbidden.json()).toEqual({ error: 'Project editor access required' });
+        expect(forbidden.json()).toEqual({ error: 'Project owner access required' });
       } finally {
         renameProjectResult = { id: projectId, title: 'Renamed' };
         await app.close();
@@ -853,7 +853,7 @@ describe('persisted project API', () => {
           payload: { title: 'New Title' },
         });
         expect(forbidden.statusCode).toBe(403);
-        expect(forbidden.json()).toEqual({ error: 'Screenplay editor access required' });
+        expect(forbidden.json()).toEqual({ error: 'Screenplay owner access required' });
       } finally {
         renameScreenplayResult = { id: screenplayId, title: 'Renamed' };
         await app.close();
@@ -879,7 +879,7 @@ describe('persisted project API', () => {
           headers,
         });
         expect(forbidden.statusCode).toBe(403);
-        expect(forbidden.json()).toEqual({ error: 'Screenplay editor access required' });
+        expect(forbidden.json()).toEqual({ error: 'Screenplay owner access required' });
 
         deleteScreenplayResult = 'missing';
         const missing = await app.inject({
@@ -914,7 +914,7 @@ describe('persisted project API', () => {
           headers,
         });
         expect(forbidden.statusCode).toBe(403);
-        expect(forbidden.json()).toEqual({ error: 'Screenplay editor access required' });
+        expect(forbidden.json()).toEqual({ error: 'Screenplay owner access required' });
 
         restoreScreenplayResult = 'missing';
         const missing = await app.inject({

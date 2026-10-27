@@ -42,6 +42,7 @@ export {
   MEMBERSHIP_CHANGED_NOTIFY_CHANNEL,
   parseMembershipChangedNotification,
   roleCanEdit,
+  roleIsOwner,
   ROLE_PRECEDENCE_SQL,
   screenplayRoleLateral,
   type EffectiveRole,

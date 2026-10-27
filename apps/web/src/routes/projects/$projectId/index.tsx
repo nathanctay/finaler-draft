@@ -84,6 +84,11 @@ const UpgradeDialog = lazy(async () => ({
 const SharingDialog = lazy(async () => ({
   default: (await import('../../../sharingDialog.js')).SharingDialog,
 }));
+// Lazy for the same reason: the rename dialog (owner-only-rename slice) is only needed once an
+// owner actually opens it.
+const RenameDialog = lazy(async () => ({
+  default: (await import('../../../renameDialog.js')).RenameDialog,
+}));
 // Lazy for the same reason: only needed once a writer has actually chosen a file to import.
 const FdxImportConfirmDialog = lazy(async () => ({
   default: (await import('../../../fdxImportConfirmDialog.js')).FdxImportConfirmDialog,
@@ -185,21 +190,32 @@ function ScreenplayRow({
   projectId: string;
   screenplay: ScreenplaySummary;
 }) {
+  const queryClient = useQueryClient();
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteScreenplay(screenplay.id),
     onSuccess: onDeleted,
   });
   const [sharingOpen, setSharingOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
   // The second of the slice's three entry points, and the one the owner asked for specifically:
   // "the 3 dot menu on both the project or just the screenplay if thats all they want to share."
   // Offered to an owner or an editor, matching the bar the server enforces, so it is never a
   // control that answers 403. `screenplay.role` is the viewer's own effective role on this
   // screenplay, resolved by the same lateral that authorized the listing.
-  //
-  // Note this gates only the new item. Delete is left exactly as it was -- it has always been
-  // shown unconditionally here, and narrowing it is a separate behaviour change this slice is not
-  // the place for.
   const canShare = screenplay.role === 'owner' || screenplay.role === 'editor';
+  // The owner-only-rename slice's two additions to this menu. `renameScreenplay` and
+  // `deleteScreenplay` are both owner-only server-side now (progress/owner-only-rename.md), so
+  // gating both on `screenplay.role === 'owner'` is what keeps this menu from ever offering a
+  // control that answers 403. Delete used to be shown here unconditionally -- including to a
+  // reviewer, who could open it and get a 403 -- which is the same "broken control" defect class
+  // `progress/paste-sanitization.md` already records for the export buttons that silently did
+  // nothing; this slice fixes it alongside adding Rename rather than leaving it for later.
+  const isOwner = screenplay.role === 'owner';
+  // The menu itself now only renders when there is at least one item to put in it -- a reviewer
+  // is neither a sharer nor an owner, so without this guard they would be shown an empty,
+  // pointless menu button instead of no menu at all (ProjectRow in routes/projects/index.tsx
+  // already follows this same rule for its own menu).
+  const hasMenuItems = canShare || isOwner;
   return (
     <div className="project-row">
       <Link
@@ -209,19 +225,39 @@ function ScreenplayRow({
       >
         {screenplay.title}
       </Link>
-      <OverflowMenu
-        items={[
-          ...(canShare ? [{ label: 'Share…', onSelect: () => setSharingOpen(true) }] : []),
-          { label: 'Delete', onSelect: () => deleteMutation.mutate() },
-        ]}
-        label={`Screenplay actions for ${screenplay.title}`}
-      />
+      {hasMenuItems && (
+        <OverflowMenu
+          items={[
+            ...(canShare ? [{ label: 'Share…', onSelect: () => setSharingOpen(true) }] : []),
+            ...(isOwner
+              ? [
+                  { label: 'Rename…', onSelect: () => setRenameOpen(true) },
+                  { label: 'Delete', onSelect: () => deleteMutation.mutate() },
+                ]
+              : []),
+          ]}
+          label={`Screenplay actions for ${screenplay.title}`}
+        />
+      )}
       {sharingOpen && (
         <Suspense fallback={null}>
           <SharingDialog
             onClose={() => setSharingOpen(false)}
             scope={{ kind: 'screenplay', screenplayId: screenplay.id }}
             title={screenplay.title}
+          />
+        </Suspense>
+      )}
+      {renameOpen && (
+        <Suspense fallback={null}>
+          <RenameDialog
+            initialTitle={screenplay.title}
+            kind="screenplay"
+            onClose={() => setRenameOpen(false)}
+            onRename={async (title) => {
+              await api.renameScreenplay(screenplay.id, title);
+              await queryClient.invalidateQueries({ queryKey: ['screenplays', projectId] });
+            }}
           />
         </Suspense>
       )}

@@ -12,6 +12,11 @@ import { OverflowMenu } from '../../components/OverflowMenu.js';
 const SharingDialog = lazy(async () => ({
   default: (await import('../../sharingDialog.js')).SharingDialog,
 }));
+// Lazy for the same reason: the rename dialog (owner-only-rename slice) is only needed once an
+// owner actually opens it.
+const RenameDialog = lazy(async () => ({
+  default: (await import('../../renameDialog.js')).RenameDialog,
+}));
 
 export const Route = createFileRoute('/projects/')({
   beforeLoad: async ({ context }) => {
@@ -27,18 +32,21 @@ export const Route = createFileRoute('/projects/')({
  * rather than rendering both, so a just-deleted row never keeps a live Link into the project it
  * no longer has access to, or a menu whose only action (Delete) no longer applies.
  *
- * The menu itself only renders for an owner. `deleteProject` is owner-only server-side, so
- * showing Delete to an editor or reviewer would be a control that always 403s -- the exact
- * "broken control" class of defect called out for a Restore button that can't succeed. Non-owner
- * members still get a real, if empty, menu affordance in Rename/Edit's eventual home; there is
- * nothing else to put there yet, so the menu is simply omitted rather than rendered disabled.
+ * The menu itself only renders for an owner or editor (`canShare` below, Share…'s own bar), but
+ * **Rename…** and **Delete** inside it are owner-only -- `renameProject` and `deleteProject` are
+ * both owner-only server-side (the owner-only-rename slice, progress/owner-only-rename.md),
+ * so showing either to an editor would be a control that always 403s, the exact "broken control"
+ * class of defect called out for a Restore button that can't succeed. An editor's menu therefore
+ * carries Share… alone; a reviewer gets no menu at all.
  */
 function ProjectRow({ onDeleted, project }: { onDeleted: () => void; project: Project }) {
+  const queryClient = useQueryClient();
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteProject(project.id),
     onSuccess: onDeleted,
   });
   const [sharingOpen, setSharingOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
   // The first of the slice's three entry points. Offered to an owner *or* an editor, which is
   // exactly the bar the server enforces (`sharing.ts`: owner-or-editor on the project, for both
   // scopes) -- so this is never a control that answers 403, and never one withheld from someone
@@ -58,10 +66,14 @@ function ProjectRow({ onDeleted, project }: { onDeleted: () => void; project: Pr
         <OverflowMenu
           items={[
             { label: 'Share…', onSelect: () => setSharingOpen(true) },
-            // Still owner-only -- `deleteProject` is owner-only server-side, so showing it to an
-            // editor would be the broken control this file's own comment already warns about.
+            // Owner-only -- `renameProject`/`deleteProject` are both owner-only server-side, so
+            // showing either to an editor would be the broken control this file's own comment
+            // already warns about.
             ...(project.role === 'owner'
-              ? [{ label: 'Delete', onSelect: () => deleteMutation.mutate() }]
+              ? [
+                  { label: 'Rename…', onSelect: () => setRenameOpen(true) },
+                  { label: 'Delete', onSelect: () => deleteMutation.mutate() },
+                ]
               : []),
           ]}
           label={`Project actions for ${project.title}`}
@@ -73,6 +85,19 @@ function ProjectRow({ onDeleted, project }: { onDeleted: () => void; project: Pr
             onClose={() => setSharingOpen(false)}
             scope={{ kind: 'project', projectId: project.id }}
             title={project.title}
+          />
+        </Suspense>
+      )}
+      {renameOpen && (
+        <Suspense fallback={null}>
+          <RenameDialog
+            initialTitle={project.title}
+            kind="project"
+            onClose={() => setRenameOpen(false)}
+            onRename={async (title) => {
+              await api.renameProject(project.id, title);
+              await queryClient.invalidateQueries({ queryKey: ['projects'] });
+            }}
           />
         </Suspense>
       )}

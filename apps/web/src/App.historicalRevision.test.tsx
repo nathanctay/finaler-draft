@@ -76,6 +76,30 @@ describe('historical revision preview', () => {
     expect(indexeddbPersistenceConstructor).not.toHaveBeenCalled();
   });
 
+  it('offers no title-bar rename, even to the owner, because a stored snapshot has no title to change', async () => {
+    // `viewerRole="owner"` deliberately: the owner is the role most likely to be looking at
+    // revision history in the first place, so the owner check alone does not exclude this screen --
+    // `historicalRevision === undefined` is what does, and without this case that clause is
+    // untested (removing it leaves every other test in this file and App.test.tsx green).
+    //
+    // Renaming here would be meaningless at best: this view renders a stored revision, and the
+    // name belongs to the live screenplay row, not to the snapshot being previewed.
+    render(
+      <App
+        historicalRevision={{ label: 'Historical revision from March 4, 2026, 3:04 PM' }}
+        initial={historicalPersistedScreenplay()}
+        viewerRole="owner"
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    expect(
+      screen.queryByRole('button', {
+        name: `Rename "${historicalPersistedScreenplay().title}"`,
+      }),
+    ).toBeNull();
+  });
+
   it('renders visibly read-only, with the revision content itself still legible', async () => {
     render(
       <App

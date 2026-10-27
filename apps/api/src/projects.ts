@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Screenplay } from '@finaler-draft/screenplay';
 import { screenplaySchema } from '@finaler-draft/screenplay';
+import { RESOURCE_TITLE_MAX_LENGTH } from '@finaler-draft/config';
 import {
   roleCanEdit,
+  roleIsOwner,
   ROLE_PRECEDENCE_SQL,
   screenplayRoleLateral,
   type EffectiveRole,
@@ -10,7 +12,7 @@ import {
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
 
-const projectTitle = z.string().trim().min(1).max(200);
+const projectTitle = z.string().trim().min(1).max(RESOURCE_TITLE_MAX_LENGTH);
 export const createProjectInput = z.object({ title: projectTitle }).strict();
 // Rename shares the exact same title constraints as create (`z.string().trim().min(1).max(200)`,
 // matching the `varchar(200)` columns) and is used for both projects and screenplays: the two
@@ -81,6 +83,11 @@ export interface ProjectStore {
     }>
   >;
   createProject(actorId: string, title: string): Promise<{ id: string; title: string }>;
+  // Owner-only -- see the owner-only-rename slice (progress/owner-only-rename.md). Was `canEdit`
+  // (owner or editor) before that slice; narrowed to match `deleteProject`/`restoreProject`'s
+  // existing owner-only bar, since the 3-dot-menu rename item this backs is owner-only in the UI
+  // on both the project and screenplay screens, and the server is this product's one enforcement
+  // point for that (RLS is deliberately deferred).
   renameProject(actorId: string, projectId: string, title: string): Promise<RenameResult>;
   // Soft delete only: nothing this store adds ever removes a row. Owner-only, because deleting a
   // project is the one action here whose blast radius is the whole project and everything under it.
@@ -126,18 +133,31 @@ export interface ProjectStore {
   // Renames only the screenplay row's `title` (the listing/display field). It deliberately never
   // touches `canonicalScreenplay` or `canonicalHash` — see the comment on `renameScreenplay` below
   // for why the two title fields are intentionally independent.
+  //
+  // Owner-only, like `renameProject` above -- see the owner-only-rename slice (progress/owner-
+  // only-rename.md). Was `canEdit` (owner or editor) before that slice; narrowed to match.
   renameScreenplay(actorId: string, screenplayId: string, title: string): Promise<RenameResult>;
-  // Soft delete only. Same authorisation as editing the screenplay (owner or editor), since
-  // deletion here is reversible and sits within a project both roles already collaborate on.
+  // Soft delete only. Owner-only -- see the owner-only-rename slice (progress/owner-only-
+  // rename.md). Was `canEdit` (owner or editor) before that slice, which let an editor delete a
+  // screenplay they did not own; narrowed to match `deleteProject`'s own owner-only bar, since
+  // deletion (even though reversible) is a blast-radius decision this product reserves for the
+  // owner on both resources now, not just the project.
   deleteScreenplay(actorId: string, screenplayId: string): Promise<DeleteResult>;
-  // Authorised identically to deleteScreenplay. A screenplay cannot be restored while its parent
-  // project is itself soft-deleted (the project must be restored first) — the lookup this shares
-  // with every other screenplay operation enforces that by construction.
+  // Authorised identically to deleteScreenplay -- owner-only, narrowed from `canEdit` by the same
+  // slice. A screenplay cannot be restored while its parent project is itself soft-deleted (the
+  // project must be restored first) — the lookup this shares with every other screenplay
+  // operation enforces that by construction.
   restoreScreenplay(actorId: string, screenplayId: string): Promise<RestoreResult>;
   // Powers the Deleted page. Each collection is scoped to what the actor may actually restore —
-  // projects to owner membership (restoreProject is owner-only), screenplays to owner-or-editor
-  // membership (restoreScreenplay's canEdit check) — so a listed row's Restore button can never
-  // come back 403. Deleted screenplays additionally require their project to be active
+  // both now owner membership only (restoreProject and restoreScreenplay are both owner-only,
+  // see the owner-only-rename slice) — so a listed row's Restore button can never come back 403.
+  // Before that slice, the screenplay collection was scoped to owner-or-editor, matching
+  // restoreScreenplay's then-wider `canEdit` check; narrowing restoreScreenplay without narrowing
+  // this query would have shown an editor a Restore button for their own just-deleted screenplay
+  // that would then 403 -- exactly the broken-control defect this comment already warns about for
+  // the opposite direction. The consequence, recorded in the progress doc: an editor who deleted a
+  // screenplay under the old rules can no longer restore it, and no longer sees it listed here.
+  // Deleted screenplays additionally require their project to be active
   // (`p.deleted_at is null`): a screenplay independently deleted before its project was, and
   // still sitting under that now-deleted project, is not restorable by id yet (restoreScreenplay
   // shares lockScreenplayRow's project-active requirement), so listing it here would be the same
@@ -321,7 +341,7 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
           await client.query('rollback');
           return 'missing';
         }
-        if (!canEdit(membership.rows[0]?.role)) {
+        if (!isOwner(membership.rows[0]?.role)) {
           await client.query('rollback');
           return 'forbidden';
         }
@@ -358,7 +378,7 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
           await client.query('rollback');
           return 'missing';
         }
-        if (membership.rows[0]?.role !== 'owner') {
+        if (!isOwner(membership.rows[0]?.role)) {
           await client.query('rollback');
           return 'forbidden';
         }
@@ -392,7 +412,7 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
           await client.query('rollback');
           return 'missing';
         }
-        if (membership.rows[0]?.role !== 'owner') {
+        if (!isOwner(membership.rows[0]?.role)) {
           await client.query('rollback');
           return 'forbidden';
         }
@@ -521,17 +541,28 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
           await client.query('rollback');
           return 'missing';
         }
-        if (!canEdit(screenplay.role)) {
+        if (!isOwner(screenplay.role)) {
           await client.query('rollback');
           return 'forbidden';
         }
         // Deliberately touches only the screenplay row's `title`, not `canonicalScreenplay` or
-        // `canonicalHash`. Those two title fields are intentionally independent: the row title is
-        // listing/display metadata, while any in-document title lives inside the canonical
-        // document, which is now a projection of the Yjs document `apps/collab` maintains (see
-        // `progress/collaboration-slice-1.md`) and is never written from this REST path. Coupling
-        // them would mean this metadata-only rename could race the collaboration server's own
-        // debounced projection write.
+        // `canonicalHash`, for two independent reasons -- and the product one binds harder than
+        // the technical one.
+        //
+        // **They are different values, not two copies of one.** The row title is the writer's
+        // working label for the file and may deliberately differ from the film's title: the
+        // owner's own example is a draft marker, as in "Mercury Rising - second draft", where the
+        // title page still has to print just "Mercury Rising". Coupling them would destroy
+        // information a writer put there on purpose. This is settled -- asked and answered during
+        // the owner-only-rename slice (`progress/owner-only-rename.md`) -- so renaming from the
+        // row menu or the editor's title bar leaving the title page untouched is correct behaviour
+        // and not a defect, however much it differs from a tool with only one title.
+        //
+        // **And the in-document title is not this path's to write anyway.** It lives inside the
+        // canonical document, which is a projection of the Yjs document `apps/collab` maintains
+        // (see `progress/collaboration-slice-1.md`), so coupling them would also let this
+        // metadata-only rename race that server's debounced projection write. Solving that race
+        // would still not make coupling correct -- see above.
         const result = await client.query(
           'update screenplays set title = $1, updated_at = now() where id = $2 returning id, title',
           [title, screenplayId],
@@ -554,7 +585,7 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
           await client.query('rollback');
           return 'missing';
         }
-        if (!canEdit(screenplay.role)) {
+        if (!isOwner(screenplay.role)) {
           await client.query('rollback');
           return 'forbidden';
         }
@@ -579,7 +610,7 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
           await client.query('rollback');
           return 'missing';
         }
-        if (!canEdit(screenplay.role)) {
+        if (!isOwner(screenplay.role)) {
           await client.query('rollback');
           return 'forbidden';
         }
@@ -624,17 +655,25 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
         // Resolved per screenplay through `screenplayRoleLateral`, matching `restoreScreenplay`'s
         // own authorization exactly -- which is the whole point of this collection (a listed row's
         // Restore button must never come back 403, see the interface comment). Both directions
-        // matter: a screenplay-scoped editor's deleted screenplay now appears here, because they
+        // matter: a screenplay-scoped owner's deleted screenplay appears here, because they
         // genuinely can restore it; and a screenplay-scoped member's deleted *sibling* screenplays
         // do not, because they genuinely cannot. The former `join project_members ... and m.role in
         // (...)` would have shown them every deleted screenplay in the project.
+        //
+        // `m.role = 'owner'` alone, not `in ('owner', 'editor')` -- narrowed by the owner-only-
+        // rename slice (progress/owner-only-rename.md) alongside restoreScreenplay's own narrowing
+        // to owner-only, for exactly the reason given above: this collection's whole purpose is
+        // "never show a Restore button that would 403," so it cannot list anyone restoreScreenplay
+        // itself has stopped admitting. An editor who deleted a screenplay under the old rules can
+        // no longer restore it, and -- as of this change -- no longer sees it listed here either;
+        // see the progress doc for the full accounting of that consequence.
         const screenplays = await client.query(
           `select s.id, s.title, s.updated_at as "updatedAt", s.deleted_at as "deletedAt",
                   s.project_id as "projectId", p.title as "projectTitle"
              from screenplays s
              join projects p on p.id = s.project_id
              cross join lateral ${screenplayRoleLateral('$1')} m
-            where m.role in ('owner', 'editor')
+            where m.role = 'owner'
               and s.deleted_at is not null and p.deleted_at is null
             order by s.deleted_at desc`,
           [actorId],
@@ -668,6 +707,18 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
 // services. The local name is kept because every call site in this file reads better with it.
 function canEdit(role: unknown) {
   return roleCanEdit(role);
+}
+
+// Delegates to `@finaler-draft/database`'s `roleIsOwner`, for the same reason `canEdit` above
+// delegates to `roleCanEdit`: a role reaching this function can come from either `project_members`
+// or `screenplay_members`, and "who may rename, delete, or restore" must mean the same thing
+// everywhere it is asked. Backs all six of `renameProject`, `deleteProject`, `restoreProject`,
+// `renameScreenplay`, `deleteScreenplay`, and `restoreScreenplay` -- see the owner-only-rename
+// slice (progress/owner-only-rename.md) for why the three screenplay operations moved from
+// `canEdit` to this, and why `deleteProject`/`restoreProject` moved here from an inline
+// `role !== 'owner'` comparison rather than changing behaviour.
+function isOwner(role: unknown) {
+  return roleIsOwner(role);
 }
 
 export class ForbiddenError extends Error {}

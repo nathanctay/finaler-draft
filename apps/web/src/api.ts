@@ -567,10 +567,25 @@ export const api = {
     json(`/api/projects/${id}`, deleteResponseSchema, { method: 'DELETE' }),
   restoreProject: (id: string) =>
     json(`/api/projects/${id}/restore`, renameResponseSchema, { method: 'POST' }),
+  // `jsonWithServerMessage`, not the plain `json` helper: `renameDialog.tsx` surfaces a 403 here
+  // (owner-only, see the owner-only-rename slice) as the server's own sentence rather than a bare
+  // "Request failed (403)" -- the one detail `renameDialog.tsx`'s own doc comment calls out as
+  // required of this slice.
+  renameProject: (id: string, title: string) =>
+    jsonWithServerMessage(`/api/projects/${id}`, renameResponseSchema, {
+      body: JSON.stringify({ title }),
+      method: 'PATCH',
+    }),
   deleteScreenplay: (id: string) =>
     json(`/api/screenplays/${id}`, deleteResponseSchema, { method: 'DELETE' }),
   restoreScreenplay: (id: string) =>
     json(`/api/screenplays/${id}/restore`, renameResponseSchema, { method: 'POST' }),
+  // Matches `renameProject` above, including why it needs `jsonWithServerMessage`.
+  renameScreenplay: (id: string, title: string) =>
+    jsonWithServerMessage(`/api/screenplays/${id}`, renameResponseSchema, {
+      body: JSON.stringify({ title }),
+      method: 'PATCH',
+    }),
   deletedItems: () => json('/api/deleted', deletedResponseSchema),
   entitlement: () => json('/api/entitlement', entitlementSchema),
   // `jsonWithServerMessage`, matching `createScreenplay` above: a refusal here carries a real

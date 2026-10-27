@@ -19,7 +19,10 @@ import {
   type ScreenplayBlock,
 } from '@finaler-draft/screenplay';
 import { PAGE_HEIGHT_IN, PAGE_WIDTH_IN } from '@finaler-draft/screenplay/pageFormat';
-import { TRANSIENT_SYNC_AUTH_FAILURE_REASON } from '@finaler-draft/config';
+import {
+  RESOURCE_TITLE_MAX_LENGTH,
+  TRANSIENT_SYNC_AUTH_FAILURE_REASON,
+} from '@finaler-draft/config';
 import type { Editor } from '@tiptap/core';
 import { EditorContent, useEditor } from '@tiptap/react';
 import { formatCollabDocumentName, parseCollabRestoredMessage } from '@finaler-draft/config';
@@ -58,7 +61,11 @@ import { SmartTypeGhostExtension } from './smartTypeGhost.js';
 import { SmartTypeList, SmartTypeListExtension } from './smartTypeList.js';
 import { ElementMenu, ElementMenuExtension } from './elementMenu.js';
 import { ApplicationMenubar } from './applicationMenubar.js';
-import { ApplicationShell, ApplicationTitlebar } from './applicationShell.js';
+import {
+  ApplicationShell,
+  ApplicationTitlebar,
+  type TitleRenameCapability,
+} from './applicationShell.js';
 import { ApplicationToolbar } from './applicationToolbar.js';
 import { InspectorPanel } from './inspectorPanel.js';
 import { NavigatorPanel } from './navigatorPanel.js';
@@ -341,6 +348,7 @@ export function App({
   onOpenRevisionHistory,
   onOpenSharing,
   onReloadRestoredDocument,
+  onScreenplayRenamed,
   viewerRole,
 }: {
   entitlementReadOnly?: EntitlementReadOnly | undefined;
@@ -378,6 +386,27 @@ export function App({
    * a provider in place.
    */
   onReloadRestoredDocument?: () => void;
+  /**
+   * The inline double-click-to-rename affordance's own counterpart to
+   * `onReloadRestoredDocument` immediately above, for the same reason: this component owns the
+   * `api.renameScreenplay` mutation itself (see `renameTitle`'s own doc comment for why it lives
+   * here and not in `ApplicationTitlebar`), but it has no `@tanstack/react-query` dependency of
+   * its own and must not grow one just to keep another route's cache honest -- `App`'s own
+   * standalone test suite renders it with no `QueryClientProvider` ancestor at all, and giving it
+   * a hard dependency on one would break every one of those renders for a feature that does not
+   * need the query client to do its own job.
+   *
+   * Called with the new title once a rename this component drove has actually succeeded (never on
+   * failure -- see `renameTitle`'s own comment on why there is nothing to revert there). The live
+   * screenplay route uses it to bring its own `['screenplay', screenplayId]` query cache -- the
+   * very query `initial` was read from, frozen on purpose, see that route's "intentionally
+   * consumed once" comment -- and the project's `['screenplays', projectId]` listing back into
+   * agreement with what the chrome now shows, exactly as `onReloadRestoredDocument` does for a
+   * restore. Omitted by every caller that never supplies `viewerRole: 'owner'` in the first
+   * place, which raises no objection of its own since `renameTitle` below is then always
+   * `undefined` and this is never called.
+   */
+  onScreenplayRenamed?: (title: string) => void;
   /**
    * The viewer's own effective role on this screenplay, from the same
    * `GET /api/screenplays/:id` response that authorized the read (api.ts's
@@ -515,6 +544,15 @@ export function App({
     'connecting' | 'synced' | 'offline' | 'denied' | 'timedOut'
   >(COLLAB_WS_URL && historicalRevision === undefined ? 'connecting' : 'synced');
 
+  // The one floating-toast slot this screen has (`.toast` is `position: fixed`, one spot, bottom
+  // right -- two independent error states each rendering their own `<Toast>` at once would stack
+  // exactly on top of each other). Originally just the export failure below; the inline
+  // double-click-to-rename affordance (`renameTitle` below) needed a second source of toast-worthy
+  // failures and there is nowhere else for one to go, so this is `{title, message}` rather than a
+  // bare export-only string now -- whichever happened most recently occupies the one slot, which
+  // is `Toast`'s own doc comment's "stays until dismissed or superseded" read literally, not as
+  // "superseded by another export specifically."
+  //
   // An export that fails *after* the projection was valid -- today, only `@finaler-draft/pdf`
   // rejecting on a character PDF's un-embedded standard Courier cannot encode (Cyrillic, Greek,
   // emoji: all of which paste, save, and export to FDX and DOCX perfectly well). `disabled` does
@@ -522,7 +560,7 @@ export function App({
   // the click genuinely runs. Without this the rejection reached `console.error` alone and the
   // writer saw a click that did nothing -- the same silent failure this scope exists to remove,
   // arriving through a different door.
-  const [exportError, setExportError] = useState<string>();
+  const [toast, setToast] = useState<{ title: string; message: string }>();
   // The read-only banner's own "Make this one editable" action (below). It describes
   // `entitlementReadOnly.onMakeEditable`'s own outcome, which can fail (a cooldown, or the
   // account no longer being a candidate) independently of anything else on this screen, and the
@@ -656,6 +694,27 @@ export function App({
   const [documentSettings, setDocumentSettings] = useState<DocumentSettings>(
     () => initial.screenplay.documentSettings,
   );
+  // The screenplay's row title -- listing/display metadata, deliberately independent of the title
+  // page's own `title` field inside the canonical document (see `renameTitle` below, and
+  // `apps/api/src/projects.ts`'s `renameScreenplay`, for why that independence is permanent and by
+  // design, not a gap). Unlike `titlePageState`/`documentSettings` above, this is the one piece of
+  // per-screenplay state that is *not* frozen to its `initial` seed for the component's whole
+  // life: the inline double-click-to-rename affordance the owner asked for ("similar to the
+  // google docs mechanic") updates it directly, on a successful `api.renameScreenplay` call, so
+  // every place in this component that displays the screenplay's name -- the titlebar, the
+  // canvas's own accessible name, the recovery-copy filename -- shows the new one immediately,
+  // without the live screenplay route having to hand this component a changed `initial` prop (it
+  // deliberately never does; see that route's own "intentionally consumed once" comment). Seeded
+  // with a plain initializer, not the lazy form `titlePageState`/`documentSettings` use: reading
+  // `initial.title` costs nothing, so there is no recomputation to avoid deferring.
+  const [displayedTitle, setDisplayedTitle] = useState(initial.title);
+  // The inline rename's own in-flight guard, the same shape `saveRecoveryCopy`'s
+  // `recoveryState === 'pending'` check below uses: `renameTitle.onRename` (below) is handed to
+  // `ApplicationTitlebar`, which exits edit mode the instant a commit is attempted rather than
+  // waiting for the network (see that component's own comment on why), so a second double-click
+  // or Enter before the first request settles could otherwise fire a second, overlapping
+  // `renameScreenplay` call for the same screenplay.
+  const [renamePending, setRenamePending] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   // Collaboration slice 4a's "named milestones" revision trigger (plan.md). See
   // `namedRevisionDialog.tsx`'s own comment for why this has a real pending/error state, unlike
@@ -707,7 +766,7 @@ export function App({
     const nextProjection = projectLocalScreenplay(editorInstance, {
       documentSettings,
       id: initial.id,
-      title: initial.title,
+      title: displayedTitle,
       titlePages: titlePageState ? [titlePageFromState(titlePageState)] : [],
     });
     applyProjection(nextProjection);
@@ -1508,7 +1567,7 @@ export function App({
     const nextProjection = projectLocalScreenplay(editor, {
       documentSettings,
       id: initial.id,
-      title: initial.title,
+      title: displayedTitle,
       titlePages: titlePageState ? [titlePageFromState(titlePageState)] : [],
     });
     latestProjection.current = nextProjection;
@@ -1518,7 +1577,11 @@ export function App({
     // becomes available (the same moment `onCreate` also does), but including them keeps that
     // honest if either ever changes before then, rather than asserting -- via an exhaustive-deps
     // suppression -- a timing guarantee this effect does not actually need to rely on.
-  }, [documentSettings, editor, initial.id, initial.title, titlePageState]);
+    // `displayedTitle`, not `initial.title`: a successful inline rename (`renameTitle` below)
+    // changes the former, never the latter, and this effect has to re-run then too, or the row
+    // title shown everywhere `projection.title` feeds would keep reporting the name the screenplay
+    // had when this component mounted.
+  }, [displayedTitle, documentSettings, editor, initial.id, titlePageState]);
 
   // Title-page edits happen in separate React state, never inside the ProseMirror document (see
   // the `titlePageState` comment above), so they never fire `onUpdate`/`onTransaction` the way
@@ -1705,12 +1768,14 @@ export function App({
   // in the toast below -- rather than becoming an unhandled promise rejection for FDX/DOCX or
   // silently varying by format.
   const runExport = (label: 'DOCX' | 'FDX' | 'PDF', run: () => Promise<void>) => {
-    setExportError(undefined);
+    setToast(undefined);
     run().catch((error: unknown) => {
       console.error(`${label} export failed:`, error);
-      setExportError(
-        error instanceof Error ? error.message : `${label} export failed for an unknown reason.`,
-      );
+      setToast({
+        message:
+          error instanceof Error ? error.message : `${label} export failed for an unknown reason.`,
+        title: 'Export failed',
+      });
     });
     // Collaboration slice 4a's "revisions are created at ... exports" trigger (plan.md).
     // Deliberately fire-and-forget, on its own, never awaited by -- or allowed to affect -- the
@@ -1781,7 +1846,7 @@ export function App({
     if (!projection.valid || recoveryState === 'pending') return;
     setRecoveryState('pending');
     setRecoveryError(undefined);
-    const title = `${initial.title} (recovered)`;
+    const title = `${displayedTitle} (recovered)`;
     api.createScreenplay(initial.projectId, title, { ...projection.screenplay, title }).then(
       () => setRecoveryState('saved'),
       (error: unknown) => {
@@ -1800,6 +1865,77 @@ export function App({
       },
     );
   };
+
+  /**
+   * The owner's own ask, directly: "if you double click on the name inside the editor, it lets
+   * you change it, similar to the google docs mechanic." `undefined` for everyone except the
+   * screenplay's owner -- `ApplicationTitlebar`'s `rename` prop is an *optional* capability for
+   * exactly this reason (see that module's own doc comment on the seam): a caller that passes
+   * nothing gets back the plain, inert title text it always rendered, never a disabled-looking
+   * control for a viewer with nothing to act on. `historicalRevision !== undefined` is excluded
+   * too, defensively rather than because it is reachable today -- the historical-revision preview
+   * route never supplies `viewerRole: 'owner'` in the first place (its own `viewerRole` doc
+   * comment: `undefined` for that route, always), but a rename affordance on an immutable
+   * snapshot would be a contradiction in terms if that route's wiring ever changed, and this
+   * guard is what keeps that true by construction rather than by one route's current choice.
+   *
+   * This is where the mutation itself lives, not in `ApplicationTitlebar` -- that module is
+   * router-agnostic and rendered by both this editor and the read-only revision-diff route, which
+   * must never gain a rename affordance at all (see its own top-of-file comment). `App` already
+   * imports `api` and `MessageApiError` for every other write this screen makes, and already
+   * knows `viewerRole`, so it is the one place that can own this without teaching the chrome
+   * itself about ownership, the server, or any of it.
+   *
+   * The row title is renamed here -- `api.renameScreenplay`, the exact function the 3-dot menu's
+   * own `Rename…` item already calls (`routes/projects/$projectId/index.tsx`'s `ScreenplayRow`) --
+   * and nothing else. It never touches the title page's own `title` field inside the canonical
+   * document, on purpose and permanently: the two are not two copies of one value, they are two
+   * different values a writer may deliberately want to differ (a working label such as "Mercury
+   * Rising - second draft" versus the film's actual printed title). The Google Docs analogy the
+   * owner invoked breaks exactly here -- Docs has one title; this product has two, by design --
+   * so a writer renaming the chrome and then finding the title page unchanged is this feature
+   * working as intended, not a defect to fix later. (`apps/api/src/projects.ts`'s
+   * `renameScreenplay` carries the same point beside its own technical reason -- the debounced
+   * projection write a coupled write would race -- since that reason alone could read as an
+   * implementation constraint someone might engineer around; the product reason holds even if the
+   * race were solved.)
+   */
+  const renameTitle: TitleRenameCapability | undefined =
+    viewerRole === 'owner' && historicalRevision === undefined
+      ? {
+          maxLength: RESOURCE_TITLE_MAX_LENGTH,
+          onRename: async (title: string) => {
+            // See `renamePending`'s own comment: the titlebar has already exited edit mode by the
+            // time this runs, so without this guard a second commit fired before the first
+            // request settles would send two concurrent `renameScreenplay` calls for the same
+            // screenplay rather than being dropped.
+            if (renamePending) return;
+            setRenamePending(true);
+            try {
+              await api.renameScreenplay(initial.id, title);
+              setDisplayedTitle(title);
+              onScreenplayRenamed?.(title);
+            } catch (error) {
+              // `serverMessage`, not `message` -- the identical idiom `handleMakeEditable` and
+              // `saveRecoveryCopy` above both use, so a 403 (the owner's role changed underneath
+              // them, mid-session) reads as `app.ts`'s own sentence rather than a bare
+              // `Request failed (403)`. `displayedTitle` is deliberately left untouched here: it
+              // was never optimistically updated above, so the titlebar is already showing the
+              // one title that is actually true -- this toast is purely the explanation, not a
+              // revert, because there is nothing to revert.
+              setToast({
+                message:
+                  error instanceof MessageApiError
+                    ? error.serverMessage
+                    : 'This screenplay could not be renamed. Try again.',
+                title: 'Rename failed',
+              });
+            } finally {
+              setRenamePending(false);
+            }
+          },
+        }
+      : undefined;
 
   // The sync gate's own banner reason, mutually exclusive with `entitlementReadOnly`'s (a
   // screenplay already blocked by entitlement is not also shown a redundant "connecting" notice --
@@ -1874,7 +2010,7 @@ export function App({
             )}
             {recoveryState === 'saved' && (
               <p className="readonly-banner-cooldown">
-                Saved as “{initial.title} (recovered)” in this project. The restored screenplay was
+                Saved as “{displayedTitle} (recovered)” in this project. The restored screenplay was
                 not changed.
               </p>
             )}
@@ -2205,16 +2341,20 @@ export function App({
               }}
             />
           )}
-          {exportError !== undefined && (
-            // A toast rather than a line in the status bar: this message names the block and element
-            // the writer has to go and fix, which the bar has no room for -- it already carries the
-            // save state, the word count and the page count, and collapses to 30px below 600px. It is
-            // also the wrong home for it in kind: the bar describes the document's ongoing state,
-            // while this describes one completed attempt that failed.
+          {toast !== undefined && (
+            // A toast rather than a line in the status bar: an export failure names the block and
+            // element the writer has to go and fix, which the bar has no room for -- it already
+            // carries the save state, the word count and the page count, and collapses to 30px
+            // below 600px. It is also the wrong home for it in kind: the bar describes the
+            // document's ongoing state, while this describes one completed attempt that failed --
+            // true of the inline rename affordance's own failure (`renameTitle` below) exactly as
+            // much as it is of an export's, which is why both now share this one state and this
+            // one `<Toast>` rather than each carrying its own (see `toast`'s own comment on why
+            // two independent slots would stack on top of each other).
             <Toast
-              message={exportError}
-              onDismiss={() => setExportError(undefined)}
-              title="Export failed"
+              message={toast.message}
+              onDismiss={() => setToast(undefined)}
+              title={toast.title}
             />
           )}
           {/* SmartType's candidate list (smartTypeList.tsx). Mounted here, at the application root and
@@ -2279,7 +2419,7 @@ export function App({
       }
       titlebar={
         <ApplicationTitlebar
-          documentTitle={initial.title}
+          documentTitle={displayedTitle}
           documentType="Screenplay"
           indicator={
             <span
@@ -2287,6 +2427,7 @@ export function App({
               className={projection.valid ? 'save-dot' : 'save-dot attention'}
             />
           }
+          rename={renameTitle}
         />
       }
       toolbar={
@@ -2435,7 +2576,7 @@ export function App({
                     '--fd-page-stack-min-height': `${pageStackMinHeightIn(pageCount)}in`,
                   } as CSSProperties
                 }
-                aria-label={`${initial.title} screenplay canvas`}
+                aria-label={`${displayedTitle} screenplay canvas`}
                 onMouseDown={handlePageMouseDown}
               >
                 <div className="page-number">DRAFT</div>
