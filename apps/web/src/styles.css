@@ -340,7 +340,56 @@ select:focus-visible,
   font-weight: 600;
 }
 
+/*
+ * The owner's inline rename trigger (`applicationShell.tsx`). At rest it must be *exactly* the
+ * text it replaced -- the owner's report: "I don't like that its always in a white box now. When
+ * editing the title, this is fine, but when its just displayed, I like how it was before."
+ *
+ * A `<button>` is still the right element: focusability, keyboard activation and an accessible
+ * name all come from it rather than being assembled out of `role` and `tabIndex`. But a button
+ * also carries the user agent's own background, border and padding, and this stylesheet resets
+ * only `font` and `cursor` on buttons (see the `button, input, select` rule above). That is where
+ * the box came from, so the reset belongs here -- the component should not have to know what a UA
+ * default looks like.
+ *
+ * `cursor: text`, overriding the global `pointer`: a single click deliberately does nothing here,
+ * and a pointer cursor promises otherwise.
+ *
+ * The focus ring is deliberately **not** suppressed. `button:focus-visible` above is the only
+ * thing that makes this control discoverable to a keyboard writer, and at rest it costs a mouse
+ * user nothing. `apps/web/e2e/title-rename-appearance.spec.ts` measures the resting state in a
+ * real browser, because jsdom resolves no stylesheet and so cannot tell plain text from a box.
+ */
+.document-title-rename {
+  /*
+   * Padding for the hit area, negative margin cancelling it for layout. The owner's second report:
+   * "I click at the end of the name, as if I was moving my cursor to the end, but instead of
+   * opening up that name change box, it highlights the word 'screenplay'. In order to get it to
+   * open the box, I have to be at least halfway through that last letter."
+   *
+   * With `padding: 0` the target was exactly as wide as the glyphs, so the natural "just past the
+   * end of the name" click landed in the gap before `.title-type` and double-clicking there
+   * selected the word "Screenplay" instead. Padding is the fix and costs nothing visually --
+   * with no background and no border there is nothing for it to make visible, which is also why
+   * the original rule had no reason to zero it.
+   *
+   * The negative margin is what keeps this invisible *in layout* too: the outer footprint still
+   * measures exactly the text, so `.title-type` and the centring in `.document-title` are both
+   * undisturbed. Only the clickable region grows.
+   */
+  margin: -3px -6px;
+  padding: 3px 6px;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: text;
+}
+
 .title-type {
+  /* Not selectable: this is a type label, not document content, and a double-click that lands here
+     while reaching for the end of the title used to highlight the word rather than doing nothing.
+     The rename trigger's own padding above now covers most of that gap; this handles the rest. */
+  user-select: none;
   margin-left: 8px;
   color: var(--text-03);
   font-size: 11px;

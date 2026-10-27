@@ -2817,6 +2817,26 @@ describe('role-driven read-only', () => {
     );
   });
 
+  it.each(['editor', 'reviewer'] as const)(
+    'withholds the title-bar rename affordance from %s, who may not rename server-side',
+    async (role) => {
+      // Renaming is owner-only (`roleIsOwner`, apps/api/src/projects.ts). The affordance's absence
+      // here is a convenience, not the security boundary -- the server refuses these roles
+      // regardless -- but offering a control that answers 403 is the broken-control pattern
+      // `progress/paste-sanitization.md` exists to stop.
+      render(<App initial={script} viewerRole={role} />);
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+      expect(screen.queryByRole('button', { name: `Rename "${script.title}"` })).toBeNull();
+      expect(screen.getByText(new RegExp(script.title, 'u'))).toBeVisible();
+    },
+  );
+
+  it('offers the owner the title-bar rename affordance', async () => {
+    render(<App initial={script} viewerRole="owner" />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    expect(screen.getByRole('button', { name: `Rename "${script.title}"` })).toBeVisible();
+  });
+
   it('refuses a reviewer the element-conversion path that bypasses the disabled attribute', async () => {
     // The companion to the entitlement suite's own version of this: `changeElement`'s
     // `!editingAllowed` guard, not the `<select disabled>`, is what actually stops a ProseMirror

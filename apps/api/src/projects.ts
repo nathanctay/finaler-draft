@@ -546,12 +546,23 @@ export function createPostgresProjectStore(pool: Pool): ProjectStore {
           return 'forbidden';
         }
         // Deliberately touches only the screenplay row's `title`, not `canonicalScreenplay` or
-        // `canonicalHash`. Those two title fields are intentionally independent: the row title is
-        // listing/display metadata, while any in-document title lives inside the canonical
-        // document, which is now a projection of the Yjs document `apps/collab` maintains (see
-        // `progress/collaboration-slice-1.md`) and is never written from this REST path. Coupling
-        // them would mean this metadata-only rename could race the collaboration server's own
-        // debounced projection write.
+        // `canonicalHash`, for two independent reasons -- and the product one binds harder than
+        // the technical one.
+        //
+        // **They are different values, not two copies of one.** The row title is the writer's
+        // working label for the file and may deliberately differ from the film's title: the
+        // owner's own example is a draft marker, as in "Mercury Rising - second draft", where the
+        // title page still has to print just "Mercury Rising". Coupling them would destroy
+        // information a writer put there on purpose. This is settled -- asked and answered during
+        // the owner-only-rename slice (`progress/owner-only-rename.md`) -- so renaming from the
+        // row menu or the editor's title bar leaving the title page untouched is correct behaviour
+        // and not a defect, however much it differs from a tool with only one title.
+        //
+        // **And the in-document title is not this path's to write anyway.** It lives inside the
+        // canonical document, which is a projection of the Yjs document `apps/collab` maintains
+        // (see `progress/collaboration-slice-1.md`), so coupling them would also let this
+        // metadata-only rename race that server's debounced projection write. Solving that race
+        // would still not make coupling correct -- see above.
         const result = await client.query(
           'update screenplays set title = $1, updated_at = now() where id = $2 returning id, title',
           [title, screenplayId],

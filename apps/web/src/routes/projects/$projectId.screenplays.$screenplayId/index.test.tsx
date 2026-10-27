@@ -512,4 +512,37 @@ describe('screenplay page', () => {
       expect(screen.queryByTestId('cooldown-until')).not.toBeInTheDocument();
     });
   });
+
+  it('refreshes every listing that caches the old title when the editor reports a rename', async () => {
+    // The editor keeps its own displayed title locally, so this callback is entirely about what
+    // *else* holds the stale name. `['screenplay', screenplayId]` is this route's own fetch, which
+    // seeds `initial` -- without invalidating it, a remount (a restore's epoch cutover) would show
+    // the old title again. The other two are the listings a writer reaches by navigating back.
+    //
+    // This exists because the callback originally shipped declared on `App` and supplied by
+    // nobody: every cached listing kept the old name, and no test could have noticed.
+    setQueries({
+      id: screenplayId,
+      projectId,
+      screenplay: {
+        annotations: [],
+        blocks: [],
+        id: screenplayId,
+        schemaVersion: 1,
+        title: 'A Working Draft',
+        titlePages: [],
+      },
+      title: 'A Working Draft',
+      version: 1,
+    });
+    render(<ScreenplayPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Simulate rename' }));
+
+    await waitFor(() =>
+      expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ['screenplay', screenplayId] }),
+    );
+    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ['screenplays', projectId] });
+    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ['projects'] });
+  });
 });

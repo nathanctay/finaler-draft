@@ -503,3 +503,200 @@ docker rm -f rename-test-pg  # cleanup, run after the integration/persistence ga
   touching code outside what this slice needed.
 - The `screenplay-diff-persistence.spec.ts` flake documented above is pre-existing and already
   diagnosed in that file's own comment; it is not something this slice can or should fix.
+
+## Inline rename from the editor's title bar
+
+> "Can we also have it so if you double click on the name inside the editor, it lets you change it,
+> similar to the google docs mechanic"
+
+A second commit on this same branch. The implementing agent was terminated mid-task when the machine
+slept, leaving the implementation substantially written but with no tests, no documentation, a
+typecheck error, an orphaned callback and a comment citing a test that did not exist. The lead
+finished it; what follows distinguishes what was inherited from what was added, because the division
+matters for judging the verification.
+
+### The seam: why the mutation is not in the title bar
+
+`ApplicationTitlebar` (`applicationShell.tsx`) now takes an **optional** `TitleRenameCapability`
+(`maxLength`, plus an `onRename` the component calls only with a trimmed, non-blank, actually-changed
+value). It owns the interaction and nothing else.
+
+That shape is forced by two existing facts, both recorded in that module's own comments. The titlebar
+is deliberately router-agnostic -- the lazily-loaded editor's standalone test suite renders it with
+no router and no query client -- and it is also used by the **read-only revision-diff route**, which
+must never offer a rename. An optional capability satisfies both: a caller that supplies nothing gets
+back exactly the inert text the element always rendered, which is what every non-owner viewer and the
+diff route rely on. `App.tsx` supplies it, because `App.tsx` is where the query client, the viewer's
+role and the error surface already are.
+
+`viewerRole === 'owner' && historicalRevision === undefined` is the gate. The second clause is not
+redundant: the owner is the role _most_ likely to be reading revision history, so an owner-only check
+alone would have offered a rename on a stored snapshot.
+
+### Interaction
+
+Double-click enters edit mode; a **single** click deliberately does not, so clicking near the title
+while writing never swallows the next keystrokes. Enter or Space on the focused title also enters
+edit mode -- a keyboard has no "double-press", and a mouse-only affordance was rejected here for the
+same reason it was rejected for the Download submenu (`progress/download-submenu.md`). The control is
+a real `<button>`, so focusability, activation and an accessible name come from one element rather
+than being assembled from `role` and `tabIndex`.
+
+In edit mode the field is pre-filled and selected, so typing replaces. Enter commits, Escape discards
+and restores, and blurring commits -- the Docs behaviour. A blank, whitespace-only or unchanged value
+is discarded silently rather than raised as a validation error: there is nothing for the server to do
+in any of them and the writer's existing name survives either way.
+
+Validation and the write are **shared, not reimplemented**: `maxLength` comes from
+`RESOURCE_TITLE_MAX_LENGTH` (the same constant `renameInput`'s schema and `RenameDialog` use) and the
+mutation is the same `api.renameScreenplay` the row menus call. A 403 surfaces through the editor's
+existing toast with the server's own message, and the previous title is restored.
+
+### Finished by the lead, and why each was necessary
+
+- **A typecheck error.** `rename?: TitleRenameCapability` under `exactOptionalPropertyTypes` means
+  "may be absent", but the editor computes the capability conditionally and genuinely passes
+  `undefined`. Now `?: TitleRenameCapability | undefined`, matching `OverflowMenuItem`'s
+  `disabledReason?: string | undefined`.
+- **An orphaned callback.** `onScreenplayRenamed` was declared on `App` and supplied by nobody, so
+  every cached listing kept the old title. The editor route now invalidates
+  `['screenplay', screenplayId]`, `['screenplays', projectId]` and `['projects']` -- the first
+  because this route's own fetch seeds `initial`, so a remount (a restore's epoch cutover) would
+  otherwise show the stale name.
+- **A comment citing a test that did not exist** (`app-shell.spec.ts`). Replaced with what is
+  actually true; see "Unproven" below.
+- **All tests.** None had been written.
+
+### Verification
+
+Fourteen titlebar cases, plus three in `App.test.tsx` (owner offered it, editor and reviewer not) and
+one in `App.historicalRevision.test.tsx`.
+
+| mutation                                   | result                            |
+| ------------------------------------------ | --------------------------------- |
+| single click also enters edit mode         | 1 failure (the single-click case) |
+| Escape branch removed                      | 1 failure                         |
+| blank/unchanged guard removed              | 3 failures                        |
+| Enter/Space activation removed             | 2 failures (keyboard parity)      |
+| owner gate widened to any role             | 2 failures (editor, reviewer)     |
+| `historicalRevision === undefined` removed | 1 failure                         |
+
+**One mutation killed nothing, and that is recorded rather than hidden.** Deleting the component's
+`exitingRef` double-commit guard left every test green. jsdom fires no `blur` when a focused element
+unmounts, which is the only sequence that guard defends against, so a "commits once" test passes
+whether the guard exists or not. The vacuous test was **removed** -- a test that cannot fail reports
+coverage that does not exist -- and replaced with a note saying so, in both the test file and the
+guard's own comment. The guard is kept because a spurious second commit would write the writer's own
+value harmlessly, whereas deleting it on one environment's behaviour bets on every other engine
+agreeing. It is not covered; do not assume otherwise.
+
+### Unproven
+
+That a real click landing in the manuscript both commits the rename **and** reaches the editor is not
+covered by any automated test. It needs a real browser with a loaded, authorized editor, which means
+the database-backed persistence harness, and no such case was written. The commit-on-blur behaviour
+itself is asserted in jsdom; the non-interception half rests on the handler calling neither
+`preventDefault` nor `stopPropagation`, which is code inspection rather than measurement.
+
+### The two titles: settled, not open
+
+The row title and the title page's `title` remain independent, and this is now a decision rather
+than a question. The owner's reasoning: they are two different values, not two copies of one. The row
+title is a working label that may carry a draft marker ("Mercury Rising - second draft") while the
+title page prints only the film's title. Coupling them would destroy information the writer added
+deliberately.
+
+So the Google Docs analogy breaks here, and that is intended: Docs has one title, this product has
+two. A title page unchanged after a title-bar rename is **correct**. Both reasons now sit in
+`renameScreenplay`'s own comment, with the product one marked as binding -- the pre-existing comment
+gave only the technical reason (racing the collaboration server's projection write), which on its own
+reads like a constraint someone could engineer around.
+
+### The trigger rendered as a white box, and why nothing caught it
+
+The owner, after the inline rename worked: _"I don't like that its always in a white box now. When
+editing the title, this is fine, but when its just displayed, I like how it was before."_
+
+Correct, and the cause was an omission rather than a wrong value: **no CSS rule for
+`.document-title-rename` existed at all.** The trigger is a `<button>`, and this stylesheet resets
+only `font` and `cursor` on buttons (the `button, input, select` rule). Everything else came from
+the user agent -- in Chromium, a `rgb(239, 239, 239)` background plus a border and padding. The
+element was correct; it was simply unstyled.
+
+The reset lives in `styles.css`, not in the component: a component should not have to know what a
+UA button default looks like. `cursor: text` overrides the global `pointer`, because a single click
+deliberately does nothing here and a pointer cursor promises otherwise. The focus ring is
+**deliberately kept** -- `button:focus-visible` is the only thing that makes this control
+discoverable to a keyboard writer, and at rest it costs a mouse user nothing. The edit-mode
+`<input>` was left alone; the owner said that state was fine.
+
+**Why no unit test could have caught it, and what does now.** jsdom resolves no stylesheet, so
+`getComputedStyle` there reports nothing a rule set and a button that looks like a box is
+indistinguishable from one that looks like text. Every one of the fourteen titlebar tests passed
+against the boxed version. This is the third visual defect in this project to reach the owner's eye
+through a green unit suite -- after the submenu flyout rendering on top of its own menu, and the
+split-button dropdown it was written to prevent.
+
+`apps/web/e2e/title-rename-appearance.spec.ts` measures the resting state in real Chromium. It
+asserts against the plain `<span>` beside the trigger rather than hardcoded values, because the
+requirement is "indistinguishable from the surrounding text" -- a test pinning `rgba(0, 0, 0, 0)`
+would keep passing if that surrounding text's own treatment changed underneath it. It also asserts
+the inherited `font-weight: 600`, proving the reset did not strip the typography along with the box.
+
+| mutation                                        | result                                                    |
+| ----------------------------------------------- | --------------------------------------------------------- |
+| the whole `.document-title-rename` rule removed | fails, reproducing the exact defect: `rgb(239, 239, 239)` |
+| `cursor: text` removed, reset kept              | fails on `pointer`                                        |
+
+**The standing lesson, now three for three:** any control whose correctness is partly visual needs a
+real-browser assertion. jsdom cannot see it, and "the unit suite is green" has now been wrong about
+appearance three times in this repo. `test:system` is **80** passing.
+
+### The hit area ended at the last glyph
+
+The owner's follow-up: _"I click at the end of the name, as if I was moving my cursor to the end,
+but instead of opening up that name change box, it highlights the word 'screenplay'. In order to
+get it to open the box, I have to be at least halfway through that last letter."_
+
+**The appearance fix above caused this, and so did its test.** `padding: 0` made the trigger's
+clickable region exactly as wide as the glyphs, so the natural "just past the end of the name"
+click fell outside it -- into the gap, or onto `.title-type`, where a double-click selected the
+word instead.
+
+Zeroing the padding was never necessary. With no background and no border there is nothing for
+padding to make visible; it was zeroed only because the rule was written as a reset of everything a
+user-agent button supplies. The test then **pinned that mistake**: it asserted
+`paddingTop === '0px'`, which encodes an implementation detail rather than the requirement. The
+requirement was "indistinguishable from the surrounding text", and padding does not affect that.
+A test that pins more than the requirement makes the correct fix look like a regression.
+
+The fix is `padding: 3px 6px` with `margin: -3px -6px` cancelling it. The border box grows, so the
+target is comfortably larger than the text; the margin box is unchanged, so `.title-type` and the
+centring in `.document-title` are both undisturbed. `.title-type` also gained `user-select: none`:
+it is a type label, not document content, and a stray double-click there should do nothing rather
+than highlight a word.
+
+**The test now probes the owner's actual gesture** -- `document.elementFromPoint` a few pixels past
+the final glyph, vertically centred -- and asserts the layout half _self-referentially_, by
+measuring the label's position with the padding applied and again with it switched off inline. Two
+earlier attempts at that assertion were wrong and are worth recording, because both failed for
+reasons that look like product bugs and are not:
+
+- comparing the trigger's `getBoundingClientRect()` to its text: the border box legitimately grows
+  with the padding, so this can never hold;
+- pinning the gap to the label at 8px: the markup carries a literal inter-element space between the
+  title and the label (present in the component too), so the real gap is 8px plus a font-dependent
+  space width.
+
+Only "does the following element move" is both meaningful and font-independent.
+
+| mutation                                       | result                                                                   |
+| ---------------------------------------------- | ------------------------------------------------------------------------ |
+| `padding` back to `0`                          | fails: the probe click lands on `document-title`, reproducing the report |
+| padding kept, cancelling margin removed        | fails: the label shifts 6px                                              |
+| whole `.document-title-rename` rule removed    | fails: `rgb(239, 239, 239)` returns                                      |
+| `user-select: none` removed from `.title-type` | fails: `auto`                                                            |
+
+The case also now asserts the padded width exceeds the text width, so `labelShift` cannot pass for
+the trivial reason that there is no padding to cancel -- without that, the whole case would go green
+against the very defect it exists to catch.

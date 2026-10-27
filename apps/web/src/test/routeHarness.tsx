@@ -192,6 +192,7 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
       onOpenRevisionHistory,
       onOpenSharing,
       onReloadRestoredDocument,
+      onScreenplayRenamed,
       viewerRole,
     }: {
       entitlementReadOnly?: {
@@ -208,6 +209,7 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
       onOpenRevisionHistory?: () => void;
       onOpenSharing?: () => void;
       onReloadRestoredDocument?: () => void;
+      onScreenplayRenamed?: (title: string) => void;
       viewerRole?: 'owner' | 'editor' | 'reviewer';
     }) => {
       const [mountId] = react.useState(() => ++routeState.editorMounts);
@@ -221,6 +223,16 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
               otherwise leave every App-level assertion green. `App.test.tsx` owns what the real
               component does with it. */}
           {viewerRole !== undefined && <span data-testid="viewer-role">{viewerRole}</span>}
+          {/* The title-bar inline rename (progress/owner-only-rename.md). The real `App` calls
+              this after a successful rename; surfaced here so a route test can prove the *route*
+              invalidates the listings that cache the old title. Without it the route's callback
+              would be unreachable from any test, which is exactly how it first shipped declared
+              and supplied by nobody at all. */}
+          {onScreenplayRenamed && (
+            <button onClick={() => onScreenplayRenamed('Renamed by the editor')} type="button">
+              Simulate rename
+            </button>
+          )}
           {entitlementReadOnly && (
             <div data-testid="entitlement-readonly">
               <p>{entitlementReadOnly.message}</p>
