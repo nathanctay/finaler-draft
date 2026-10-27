@@ -192,12 +192,29 @@ describe.skipIf(!databaseUrl)('Screenplay invitations and membership (PostgreSQL
     // *** here against the sibling screenplay the invitee was never invited to.
     await expectNoRestAccess(invitee, siblingScreenplayId, projectId);
 
-    // The one thing a screenplay-scoped editor genuinely may do to their own screenplay, so the
-    // negatives above are not passing merely because this account can do nothing at all.
+    // A thing a screenplay-scoped editor genuinely may do to their own screenplay, so the
+    // negatives above are not passing merely because this account can do nothing at all --
+    // creating a named revision is still `canEdit` (owner or editor), unaffected by the
+    // owner-only-rename slice (see the updated comment on `RevisionStore.createRevision`).
     expect(await revisions!.listRevisions(invitee, screenplayId)).toEqual([]);
-    expect(
-      await projects!.renameScreenplay(invitee, screenplayId, 'Renamed by invitee'),
-    ).toMatchObject({ id: screenplayId, title: 'Renamed by invitee' });
+    const namedRevision = await revisions!.createRevision(invitee, screenplayId, {
+      epoch: 0,
+      kind: 'named',
+      label: 'Milestone by invitee',
+    });
+    expect(namedRevision).not.toBe('forbidden');
+    expect(namedRevision).not.toBe('missing');
+    expect(namedRevision).not.toBe('stale-epoch');
+
+    // `renameScreenplay`, by contrast, is owner-only as of the owner-only-rename slice
+    // (progress/owner-only-rename.md) -- narrowed from `canEdit` -- so this screenplay-scoped
+    // editor is refused it even though they hold the one role `shared_role` permits above
+    // `reviewer`. Proven here, through the invitation-acceptance path specifically, alongside the
+    // dedicated project_members/screenplay_members matrix in
+    // `projectsAuthorization.integration.test.ts`.
+    expect(await projects!.renameScreenplay(invitee, screenplayId, 'Renamed by invitee')).toBe(
+      'forbidden',
+    );
   });
 
   it('a pending invitation grants no access at all -- the same refusals a stranger gets', async () => {
@@ -602,7 +619,18 @@ describe.skipIf(!databaseUrl)('Screenplay invitations and membership (PostgreSQL
     expect(await sharing!.listInvitationsForUser(invitee)).toHaveLength(1);
   });
 
-  it('a screenplay-scoped member sees only their own screenplay in the deleted list, never a deleted sibling', async () => {
+  // `restoreScreenplay` is owner-only as of the owner-only-rename slice
+  // (progress/owner-only-rename.md), and `listDeleted`'s screenplay collection was narrowed in
+  // lockstep (its own interface comment in projects.ts). A screenplay-scoped member can never
+  // hold the `owner` role at all -- `shared_role` has no such value (see the migration test
+  // "the database itself refuses a screenplay membership that names the owner role" above) -- so
+  // there is no longer a screenplay-scoped case that sees *anything* in this collection. Before
+  // that slice, a screenplay-scoped editor saw and could restore their own invited screenplay
+  // while a deleted sibling stayed invisible; this test used to assert exactly that. Now the
+  // scoping property collapses to the simpler "never anything at all," which this asserts for
+  // both the invited screenplay and the sibling, and the owner's own view is checked separately to
+  // prove the deletion genuinely happened and the collection genuinely scopes to the owner.
+  it('a screenplay-scoped editor sees nothing in the deleted list, neither their own invited screenplay nor a sibling', async () => {
     const owner = await createUser();
     const { screenplayId, siblingScreenplayId } = await createProjectWithScreenplays(owner, [
       'Shared one',
@@ -615,9 +643,14 @@ describe.skipIf(!databaseUrl)('Screenplay invitations and membership (PostgreSQL
     expect((await projects!.listDeleted(invitee)).screenplays).toEqual([]);
 
     await projects!.deleteScreenplay(owner, screenplayId);
-    const deleted = await projects!.listDeleted(invitee);
-    expect(deleted.screenplays.map((row) => row.id)).toEqual([screenplayId]);
-    expect(deleted.projects).toEqual([]);
+    const invitedDeleted = await projects!.listDeleted(invitee);
+    expect(invitedDeleted.screenplays).toEqual([]);
+    expect(invitedDeleted.projects).toEqual([]);
+
+    const ownerDeleted = await projects!.listDeleted(owner);
+    expect(ownerDeleted.screenplays.map((row) => row.id)).toEqual(
+      expect.arrayContaining([screenplayId, siblingScreenplayId]),
+    );
   });
 });
 

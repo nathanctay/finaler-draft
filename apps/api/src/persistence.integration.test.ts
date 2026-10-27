@@ -403,8 +403,10 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     });
     expect(afterDelete.statusCode).toBe(404);
 
-    // Restore is authorised the same way delete is: an editor can do both, a reviewer can do
-    // neither, and both outcomes are proven against the real database and real sessions here.
+    // Restore is owner-only (the owner-only-rename slice, progress/owner-only-rename.md): neither
+    // an editor nor a reviewer may do it, and both refusals are proven against the real database
+    // and real sessions here. Before that slice an editor could restore too; that is the behaviour
+    // this test used to assert and the slice deliberately narrowed.
     const editor = await signUp('screenplay-delete-editor@example.test');
     const editorId = await userIdFor('screenplay-delete-editor@example.test');
     await pool!.query(
@@ -430,8 +432,15 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       url: `/api/screenplays/${screenplayId}/restore`,
       headers: { cookie: editor.cookie, origin: 'https://app.example.test' },
     });
-    expect(editorRestore.statusCode).toBe(200);
-    expect(editorRestore.json()).toEqual({ id: screenplayId, title: 'Renamed Draft' });
+    expect(editorRestore.statusCode).toBe(403);
+
+    const ownerRestore = await app!.inject({
+      method: 'POST',
+      url: `/api/screenplays/${screenplayId}/restore`,
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
+    });
+    expect(ownerRestore.statusCode).toBe(200);
+    expect(ownerRestore.json()).toEqual({ id: screenplayId, title: 'Renamed Draft' });
 
     const afterRestore = await app!.inject({
       method: 'GET',
@@ -553,7 +562,12 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     expect(screenplayRestore.statusCode).toBe(404);
   });
 
-  it('authorises project deletion to the owner only, distinct from screenplay deletion which an editor may also do', async () => {
+  // Project and screenplay deletion are both owner-only as of the owner-only-rename slice
+  // (progress/owner-only-rename.md). Before that slice this test's own title recorded them as
+  // deliberately *different* bars -- project deletion owner-only, screenplay deletion open to an
+  // editor too -- and asserted the editor's screenplay delete as a 200. That asymmetry is exactly
+  // what the slice removed.
+  it('authorises both project deletion and screenplay deletion to the owner only', async () => {
     const owner = await signUp('owner-only-owner@example.test');
     const editor = await signUp('owner-only-editor@example.test');
     const editorId = await userIdFor('owner-only-editor@example.test');
@@ -588,7 +602,14 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       url: `/api/screenplays/${screenplayId}`,
       headers: { cookie: editor.cookie, origin: 'https://app.example.test' },
     });
-    expect(editorDeletesScreenplay.statusCode).toBe(200);
+    expect(editorDeletesScreenplay.statusCode).toBe(403);
+
+    const ownerDeletesScreenplay = await app!.inject({
+      method: 'DELETE',
+      url: `/api/screenplays/${screenplayId}`,
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
+    });
+    expect(ownerDeletesScreenplay.statusCode).toBe(200);
 
     const ownerDeletesProject = await app!.inject({
       method: 'DELETE',
@@ -791,15 +812,17 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     });
     expect(strangerDelete.statusCode).toBe(404);
 
-    // An editor may rename (canEdit) but not delete (owner-only) — the two operations are
-    // deliberately authorised differently.
+    // An editor may neither rename nor delete -- both owner-only as of the owner-only-rename
+    // slice (progress/owner-only-rename.md). Before that slice rename was `canEdit` (owner or
+    // editor) while delete was already owner-only, and this test recorded that as a deliberate
+    // asymmetry; the slice removed it, so both now answer 403 identically.
     const editorRename = await app!.inject({
       method: 'PATCH',
       url: `/api/projects/${projectId}`,
       headers: { cookie: editor.cookie, origin: 'https://app.example.test' },
       payload: { title: 'Renamed by editor' },
     });
-    expect(editorRename.statusCode).toBe(200);
+    expect(editorRename.statusCode).toBe(403);
     const editorDelete = await app!.inject({
       method: 'DELETE',
       url: `/api/projects/${projectId}`,
@@ -1017,10 +1040,16 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
 
     // Scoping, checked from the editor's own session while `screenplayId` is still genuinely
     // deleted -- not after it has already been restored, which would make "the editor sees
-    // nothing" trivially true regardless of whether the scoping rule actually works. The editor
-    // must see exactly the one screenplay they are eligible to restore, and their listing of
-    // deleted projects must stay empty (they are not `projectId`'s owner, and not a member of
-    // `cascadeProjectId` at all).
+    // nothing" trivially true regardless of whether the scoping rule actually works.
+    //
+    // `restoreScreenplay` is owner-only as of the owner-only-rename slice
+    // (progress/owner-only-rename.md), narrowed from "owner or editor". `listDeleted`'s
+    // screenplay collection was narrowed in lockstep (see the interface comment on
+    // `ProjectStore.listDeleted` in projects.ts): before that slice an editor saw and could
+    // restore this screenplay, which is what this test used to assert. Now they see nothing, the
+    // same as the reviewer below, and a restore attempt of their own answers 403 -- a consequence
+    // the progress doc records explicitly: an editor who deleted a screenplay under the old rules
+    // can no longer restore it, and no longer sees it listed.
     const editorListedBeforeRestore = await app!.inject({
       method: 'GET',
       url: '/api/deleted',
@@ -1031,19 +1060,36 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
       screenplays: Array<{ id: string }>;
     }>();
     expect(editorBodyBeforeRestore.projects).toEqual([]);
-    expect(editorBodyBeforeRestore.screenplays.map((s) => s.id)).toEqual([screenplayId]);
+    expect(editorBodyBeforeRestore.screenplays).toEqual([]);
 
-    // The editor restores it themselves, proving they can act on what they can see -- the same
-    // "owner or editor" rule restoreScreenplay itself enforces, not just what listDeleted returns.
-    const screenplayRestore = await app!.inject({
+    const editorRestoreAttempt = await app!.inject({
       method: 'POST',
       url: `/api/screenplays/${screenplayId}/restore`,
       headers: { cookie: editor.cookie, origin: 'https://app.example.test' },
     });
+    expect(editorRestoreAttempt.statusCode).toBe(403);
+
+    // The owner both sees it and can restore it -- the only role this collection ever scopes to
+    // now, matching `restoreScreenplay`'s own owner-only bar exactly.
+    const ownerListedBeforeRestore = await app!.inject({
+      method: 'GET',
+      url: '/api/deleted',
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
+    });
+    expect(
+      ownerListedBeforeRestore.json<{ screenplays: Array<{ id: string }> }>().screenplays,
+    ).toEqual(expect.arrayContaining([expect.objectContaining({ id: screenplayId })]));
+
+    const screenplayRestore = await app!.inject({
+      method: 'POST',
+      url: `/api/screenplays/${screenplayId}/restore`,
+      headers: { cookie: owner.cookie, origin: 'https://app.example.test' },
+    });
     expect(screenplayRestore.statusCode).toBe(200);
 
-    // After restoring, the editor's deleted-screenplays list is empty again, and a reviewer --
-    // who can restore neither a project nor a screenplay -- sees nothing at all, at any point.
+    // After restoring, the editor's deleted-screenplays list is still empty (as it already was),
+    // and a reviewer -- who can restore neither a project nor a screenplay -- sees nothing at all,
+    // at any point.
     const editorListedAfterRestore = await app!.inject({
       method: 'GET',
       url: '/api/deleted',

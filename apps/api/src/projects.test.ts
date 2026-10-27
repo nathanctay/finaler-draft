@@ -112,7 +112,13 @@ describe('PostgreSQL project store', () => {
     expect(deniedClient.query).toHaveBeenCalledWith('rollback');
   });
 
-  it('renames a project only for an owner or editor, and reports missing without leaking existence details', async () => {
+  // Owner-only as of the owner-only-rename slice (progress/owner-only-rename.md) -- an editor
+  // used to be allowed here too, matching `canEdit`; narrowed to match `deleteProject`/
+  // `restoreProject`'s existing owner-only bar. Mutation check: loosening the `isOwner` guard in
+  // `renameProject` back to `canEdit` (or removing it) makes the editor assertion below fail,
+  // since an editor would then receive `{ id: projectId, title: 'New Title' }` instead of
+  // `'forbidden'`.
+  it('renames a project only for its owner, and reports missing without leaking existence details', async () => {
     const missingProjectClient = fakeClient([empty(), empty()]);
     await expect(
       createPostgresProjectStore(fakePool([], missingProjectClient)).renameProject(
@@ -150,7 +156,6 @@ describe('PostgreSQL project store', () => {
       empty(),
       rows([{ id: projectId }]),
       rows([{ role: 'editor' }]),
-      rows([{ id: projectId, title: 'New Title' }]),
     ]);
     await expect(
       createPostgresProjectStore(fakePool([], editorClient)).renameProject(
@@ -158,15 +163,39 @@ describe('PostgreSQL project store', () => {
         projectId,
         'New Title',
       ),
-    ).resolves.toEqual({ id: projectId, title: 'New Title' });
-    expect(editorClient.query).toHaveBeenCalledWith('commit');
+    ).resolves.toBe('forbidden');
+    expect(editorClient.query).toHaveBeenCalledWith('rollback');
 
-    for (const client of [missingProjectClient, noMemberClient, reviewerClient, editorClient]) {
+    const ownerClient = fakeClient([
+      empty(),
+      rows([{ id: projectId }]),
+      rows([{ role: 'owner' }]),
+      rows([{ id: projectId, title: 'New Title' }]),
+    ]);
+    await expect(
+      createPostgresProjectStore(fakePool([], ownerClient)).renameProject(
+        actorId,
+        projectId,
+        'New Title',
+      ),
+    ).resolves.toEqual({ id: projectId, title: 'New Title' });
+    expect(ownerClient.query).toHaveBeenCalledWith('commit');
+
+    for (const client of [
+      missingProjectClient,
+      noMemberClient,
+      reviewerClient,
+      editorClient,
+      ownerClient,
+    ]) {
       expect(client.release).toHaveBeenCalledOnce();
     }
   });
 
-  it('deletes a project only for its owner, unlike rename which also allows an editor', async () => {
+  // Mutation check: loosening `deleteProject`'s `isOwner` guard back to `canEdit` (or removing it)
+  // makes the editor assertion below fail, since an editor would then receive `{ id: projectId }`
+  // instead of `'forbidden'`.
+  it('deletes a project only for its owner', async () => {
     const missingClient = fakeClient([empty(), empty()]);
     await expect(
       createPostgresProjectStore(fakePool([], missingClient)).deleteProject(actorId, projectId),
@@ -205,6 +234,9 @@ describe('PostgreSQL project store', () => {
     }
   });
 
+  // Mutation check: loosening `restoreProject`'s `isOwner` guard back to `canEdit` (or removing
+  // it) makes the editor assertion below fail, since an editor would then receive
+  // `{ id: projectId, title: 'Project' }` instead of `'forbidden'`.
   it('restores a project only for its owner, mirroring delete authorisation exactly', async () => {
     const notDeletedClient = fakeClient([empty(), empty()]);
     await expect(
@@ -236,7 +268,14 @@ describe('PostgreSQL project store', () => {
     }
   });
 
-  it('renames a screenplay for an owner or editor and reports missing for a nonexistent or already-deleted one', async () => {
+  // Owner-only as of the owner-only-rename slice (progress/owner-only-rename.md) -- an editor
+  // used to be allowed here too, matching `canEdit`. Mutation check: loosening `renameScreenplay`'s
+  // `isOwner` guard back to `canEdit` (or removing it) makes the editor assertion below fail,
+  // since an editor would then receive `{ id: screenplayId, title: 'New Title' }` instead of
+  // `'forbidden'`. The same owner-vs-editor decision is additionally proven against a real
+  // database, for both `project_members` and `screenplay_members`, in
+  // `projectsAuthorization.integration.test.ts`.
+  it('renames a screenplay only for its owner, and reports missing for a nonexistent or already-deleted one', async () => {
     const missingClient = fakeClient([empty(), empty()]);
     await expect(
       createPostgresProjectStore(fakePool([], missingClient)).renameScreenplay(
@@ -249,10 +288,7 @@ describe('PostgreSQL project store', () => {
     // One queued result for the lock-and-resolve-role query, not two: since the
     // screenplay-invitations slice `lockScreenplayRow` resolves the actor's effective role in the
     // same statement that locks the row (through `screenplayRoleLateral`), rather than this store
-    // running a second `select role from project_members`. The authorization asserted here is
-    // unchanged -- a reviewer is still refused, an editor still succeeds -- and the same decisions
-    // are additionally proven against a real database, for both kinds of membership, in
-    // `sharing.integration.test.ts`.
+    // running a second `select role from project_members`.
     const reviewerClient = fakeClient([empty(), rows([{ projectId, role: 'reviewer' }])]);
     await expect(
       createPostgresProjectStore(fakePool([], reviewerClient)).renameScreenplay(
@@ -262,37 +298,56 @@ describe('PostgreSQL project store', () => {
       ),
     ).resolves.toBe('forbidden');
 
-    const editorClient = fakeClient([
-      empty(),
-      rows([{ projectId, role: 'editor' }]),
-      rows([{ id: screenplayId, title: 'New Title' }]),
-    ]);
+    const editorClient = fakeClient([empty(), rows([{ projectId, role: 'editor' }])]);
     await expect(
       createPostgresProjectStore(fakePool([], editorClient)).renameScreenplay(
         actorId,
         screenplayId,
         'New Title',
       ),
+    ).resolves.toBe('forbidden');
+
+    const ownerClient = fakeClient([
+      empty(),
+      rows([{ projectId, role: 'owner' }]),
+      rows([{ id: screenplayId, title: 'New Title' }]),
+    ]);
+    await expect(
+      createPostgresProjectStore(fakePool([], ownerClient)).renameScreenplay(
+        actorId,
+        screenplayId,
+        'New Title',
+      ),
     ).resolves.toEqual({ id: screenplayId, title: 'New Title' });
 
-    for (const client of [missingClient, reviewerClient, editorClient]) {
+    for (const client of [missingClient, reviewerClient, editorClient, ownerClient]) {
       expect(client.release).toHaveBeenCalledOnce();
     }
   });
 
-  it('deletes a screenplay for an owner or editor, unlike project deletion which requires the owner', async () => {
-    // See the note in the rename test above on why there is one fewer queued result here.
+  // Owner-only as of the owner-only-rename slice -- an editor used to be allowed here too,
+  // matching `canEdit`, which this test's old title ("unlike project deletion which requires the
+  // owner") called out as the asymmetry this slice removed: both resources now require the owner.
+  // Mutation check: loosening `deleteScreenplay`'s `isOwner` guard back to `canEdit` (or removing
+  // it) makes the editor assertion below fail, since an editor would then receive
+  // `{ id: screenplayId }` instead of `'forbidden'`.
+  it('deletes a screenplay only for its owner, matching project deletion', async () => {
+    const ownerClient = fakeClient([empty(), rows([{ projectId, role: 'owner' }])]);
+    await expect(
+      createPostgresProjectStore(fakePool([], ownerClient)).deleteScreenplay(actorId, screenplayId),
+    ).resolves.toEqual({ id: screenplayId });
+    expect(ownerClient.query).toHaveBeenCalledWith(
+      'update screenplays set deleted_at = now() where id = $1',
+      [screenplayId],
+    );
+
     const editorClient = fakeClient([empty(), rows([{ projectId, role: 'editor' }])]);
     await expect(
       createPostgresProjectStore(fakePool([], editorClient)).deleteScreenplay(
         actorId,
         screenplayId,
       ),
-    ).resolves.toEqual({ id: screenplayId });
-    expect(editorClient.query).toHaveBeenCalledWith(
-      'update screenplays set deleted_at = now() where id = $1',
-      [screenplayId],
-    );
+    ).resolves.toBe('forbidden');
 
     const reviewerClient = fakeClient([empty(), rows([{ projectId, role: 'reviewer' }])]);
     await expect(
@@ -302,7 +357,7 @@ describe('PostgreSQL project store', () => {
       ),
     ).resolves.toBe('forbidden');
 
-    for (const client of [editorClient, reviewerClient]) {
+    for (const client of [ownerClient, editorClient, reviewerClient]) {
       expect(client.release).toHaveBeenCalledOnce();
     }
   });
@@ -364,12 +419,22 @@ describe('PostgreSQL project store', () => {
     // if the fixture rows happen not to expose it.
     expect(projectsQuery).toContain("m.role = 'owner'");
     expect(projectsQuery).toContain('p.deleted_at is not null');
-    expect(screenplaysQuery).toContain("m.role in ('owner', 'editor')");
+    // Owner-only as of the owner-only-rename slice (progress/owner-only-rename.md) -- this was
+    // `m.role in ('owner', 'editor')` before that slice narrowed `restoreScreenplay` itself to
+    // owner-only. Mutation check: widening this predicate back to `in ('owner', 'editor')` without
+    // also narrowing `restoreScreenplay` would make this test's string assertion fail, which is
+    // exactly the drift this assertion exists to catch -- the listing and the restore it backs
+    // must agree, or a listed row's Restore button can come back 403.
+    expect(screenplaysQuery).toContain("m.role = 'owner'");
     expect(screenplaysQuery).toContain('s.deleted_at is not null');
     expect(screenplaysQuery).toContain('p.deleted_at is null');
   });
 
-  it('restores a screenplay for an owner or editor, and reports missing when it is not currently deleted', async () => {
+  // Owner-only as of the owner-only-rename slice -- an editor used to be allowed here too,
+  // matching `canEdit`. Mutation check: loosening `restoreScreenplay`'s `isOwner` guard back to
+  // `canEdit` (or removing it) makes the editor assertion below fail, since an editor would then
+  // receive `{ id: screenplayId, title: 'Draft' }` instead of `'forbidden'`.
+  it('restores a screenplay only for its owner, and reports missing when it is not currently deleted', async () => {
     const notDeletedClient = fakeClient([empty(), empty()]);
     await expect(
       createPostgresProjectStore(fakePool([], notDeletedClient)).restoreScreenplay(
@@ -391,20 +456,28 @@ describe('PostgreSQL project store', () => {
       ),
     ).resolves.toBe('missing');
 
-    const editorClient = fakeClient([
-      empty(),
-      rows([{ projectId, role: 'editor' }]),
-      rows([{ id: screenplayId, title: 'Draft' }]),
-    ]);
+    const editorClient = fakeClient([empty(), rows([{ projectId, role: 'editor' }])]);
     await expect(
       createPostgresProjectStore(fakePool([], editorClient)).restoreScreenplay(
         actorId,
         screenplayId,
       ),
-    ).resolves.toEqual({ id: screenplayId, title: 'Draft' });
-    expect(editorClient.query).toHaveBeenCalledWith('commit');
+    ).resolves.toBe('forbidden');
 
-    for (const client of [notDeletedClient, noMemberClient, editorClient]) {
+    const ownerClient = fakeClient([
+      empty(),
+      rows([{ projectId, role: 'owner' }]),
+      rows([{ id: screenplayId, title: 'Draft' }]),
+    ]);
+    await expect(
+      createPostgresProjectStore(fakePool([], ownerClient)).restoreScreenplay(
+        actorId,
+        screenplayId,
+      ),
+    ).resolves.toEqual({ id: screenplayId, title: 'Draft' });
+    expect(ownerClient.query).toHaveBeenCalledWith('commit');
+
+    for (const client of [notDeletedClient, noMemberClient, editorClient, ownerClient]) {
       expect(client.release).toHaveBeenCalledOnce();
     }
   });

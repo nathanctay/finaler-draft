@@ -3,6 +3,7 @@ import {
   MEMBERSHIP_CHANGED_NOTIFY_CHANNEL,
   parseMembershipChangedNotification,
   roleCanEdit,
+  roleIsOwner,
   ROLE_PRECEDENCE_SQL,
   screenplayRoleLateral,
 } from './membership.js';
@@ -83,6 +84,24 @@ describe('roleCanEdit', () => {
     expect(roleCanEdit(null)).toBe(false);
     expect(roleCanEdit('')).toBe(false);
     expect(roleCanEdit('OWNER')).toBe(false);
+  });
+});
+
+describe('roleIsOwner', () => {
+  it('admits only owner', () => {
+    expect(roleIsOwner('owner')).toBe(true);
+  });
+
+  it('refuses editor, reviewer, and anything that is not a role at all', () => {
+    // Editor is the case that matters most: this is the predicate the owner-only-rename slice
+    // introduced specifically to stop an editor from reaching rename/delete/restore, which
+    // `roleCanEdit` alone would still admit.
+    expect(roleIsOwner('editor')).toBe(false);
+    expect(roleIsOwner('reviewer')).toBe(false);
+    expect(roleIsOwner(undefined)).toBe(false);
+    expect(roleIsOwner(null)).toBe(false);
+    expect(roleIsOwner('')).toBe(false);
+    expect(roleIsOwner('OWNER')).toBe(false);
   });
 });
 

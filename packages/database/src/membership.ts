@@ -91,6 +91,26 @@ export function roleCanEdit(role: unknown): boolean {
 }
 
 /**
+ * The one role that may rename, delete, or restore -- project or screenplay. Exists for exactly
+ * the reason `roleCanEdit` above does: a role reaching this predicate can come from either
+ * `project_members` or `screenplay_members` (see `screenplayRoleLateral`), and "who may do this"
+ * must mean the same thing regardless of which table resolved it.
+ *
+ * Before the owner-only-rename slice, `apps/api/src/projects.ts` wrote `role !== 'owner'` inline
+ * at two call sites (`deleteProject`, `restoreProject`) and used `roleCanEdit` -- owner *or*
+ * editor -- at four more (`renameProject`, `renameScreenplay`, `deleteScreenplay`,
+ * `restoreScreenplay`), which let an editor rename, delete, or restore a project or screenplay
+ * they did not own. That slice narrowed all six to this one predicate: a reviewer could already
+ * never reach any of them, and now neither can an editor. Declared here rather than left as six
+ * independently-maintained comparisons for the same reason `roleCanEdit` is declared once rather
+ * than six times -- a security predicate repeated at every call site is one that can drift at any
+ * one of them without the others noticing.
+ */
+export function roleIsOwner(role: unknown): boolean {
+  return role === 'owner';
+}
+
+/**
  * The Postgres `NOTIFY` channel a committed membership change (a role change, or a removal) is
  * announced on, and which `apps/collab` listens to.
  *

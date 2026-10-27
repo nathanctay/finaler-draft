@@ -114,11 +114,14 @@ describe('projects page: delete and undo', () => {
     const menuTrigger = screen.getByRole('button', { name: 'Project actions for Feature' });
     menuTrigger.focus();
     await user.keyboard('{Enter}');
-    // Opening focuses the first item, which since the screenplay-invitations slice is "Share…"
-    // rather than Delete -- an owner's menu now holds two actions. ArrowDown to Delete, which is
-    // itself worth exercising: `OverflowMenu`'s arrow-key handling is what makes a two-item menu
-    // keyboard-operable at all, and this is the only test here that reaches Delete without a mouse.
+    // Opening focuses the first item, "Share…". An owner's menu now holds three actions --
+    // Share…, then Rename… (added by the owner-only-rename slice), then Delete -- so two
+    // ArrowDowns reach it. This is itself worth exercising: `OverflowMenu`'s arrow-key handling is
+    // what makes a multi-item menu keyboard-operable at all, and this is the only test here that
+    // reaches Delete without a mouse.
     expect(screen.getByRole('menuitem', { name: 'Share…' })).toHaveFocus();
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getByRole('menuitem', { name: 'Rename…' })).toHaveFocus();
     await user.keyboard('{ArrowDown}');
     expect(screen.getByRole('menuitem', { name: 'Delete' })).toHaveFocus();
     await user.keyboard('{Enter}');

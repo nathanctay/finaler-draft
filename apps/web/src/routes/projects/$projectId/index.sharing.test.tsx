@@ -46,16 +46,19 @@ describe('the screenplay row’s Share entry point', () => {
     }
   });
 
-  it('is withheld from a reviewer, who keeps the rest of the menu', async () => {
-    // A reviewer cannot share server-side (`sharing.ts` requires owner-or-editor on the project),
-    // so offering it would be a control that always answers 403 -- the broken-control mistake this
-    // codebase already names. The menu itself stays, so nothing else about the row changes.
-    const user = userEvent.setup();
+  // A reviewer cannot share server-side (`sharing.ts` requires owner-or-editor on the project),
+  // and -- as of the owner-only-rename slice (progress/owner-only-rename.md) -- can neither rename
+  // nor delete either (`renameScreenplay`/`deleteScreenplay` are both owner-only now). A reviewer
+  // therefore has nothing this menu could offer, so there is no menu at all, matching ProjectRow's
+  // own rule in routes/projects/index.tsx. Before that slice, Delete was shown here unconditionally
+  // -- this test used to assert the menu "stays" with Delete still in it, which was itself the
+  // broken-control defect the owner-only-rename slice's Task 3 fixed.
+  it('is withheld entirely from a reviewer, who can neither share, rename, nor delete', () => {
     setScreenplays('reviewer');
     render(<ProjectPage />);
-    await user.click(screen.getByRole('button', { name: 'Screenplay actions for Act One' }));
-    expect(screen.queryByRole('menuitem', { name: 'Share…' })).not.toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Screenplay actions for Act One' }),
+    ).not.toBeInTheDocument();
   });
 
   it('opens the dialog scoped to this screenplay, not to its project', async () => {

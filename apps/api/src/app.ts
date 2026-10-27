@@ -1272,8 +1272,12 @@ export async function buildApp(options: BuildAppOptions = {}) {
           request.body.title,
         );
         if (result === 'missing') return reply.code(404).send({ error: 'Project not found' });
+        // 'Project owner access required', not 'editor': the owner-only-rename slice
+        // (progress/owner-only-rename.md) narrowed renameProject from owner-or-editor to
+        // owner-only, matching deleteProject/restoreProject below -- this message must say so, or
+        // an editor refused here would read a sentence that names a bar they actually clear.
         if (result === 'forbidden')
-          return reply.code(403).send({ error: 'Project editor access required' });
+          return reply.code(403).send({ error: 'Project owner access required' });
         return result;
       },
     );
@@ -1414,8 +1418,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
           request.body.title,
         );
         if (result === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
+        // 'Screenplay owner access required', not 'editor': narrowed from owner-or-editor by the
+        // owner-only-rename slice (progress/owner-only-rename.md) -- see renameProject's own
+        // comment above for the full reasoning, which applies identically here.
         if (result === 'forbidden')
-          return reply.code(403).send({ error: 'Screenplay editor access required' });
+          return reply.code(403).send({ error: 'Screenplay owner access required' });
         return result;
       },
     );
@@ -1437,8 +1444,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
           request.params.id,
         );
         if (result === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
+        // Owner-only, narrowed by the owner-only-rename slice -- see renameScreenplay above.
         if (result === 'forbidden')
-          return reply.code(403).send({ error: 'Screenplay editor access required' });
+          return reply.code(403).send({ error: 'Screenplay owner access required' });
         return result;
       },
     );
@@ -1460,8 +1468,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
           request.params.id,
         );
         if (result === 'missing') return reply.code(404).send({ error: 'Screenplay not found' });
+        // Owner-only, narrowed by the owner-only-rename slice -- see renameScreenplay above.
         if (result === 'forbidden')
-          return reply.code(403).send({ error: 'Screenplay editor access required' });
+          return reply.code(403).send({ error: 'Screenplay owner access required' });
         return result;
       },
     );
