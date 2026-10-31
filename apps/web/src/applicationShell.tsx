@@ -406,7 +406,18 @@ export function ApplicationTitlebar({
             <span className="brand-mark">F</span>
             <span>Finaler Draft</span>
           </span>
-          <span className="brand-wipe-label">{brand.wipeLabel}</span>
+          <span className="brand-wipe-label">
+            {/*
+              `aria-hidden`, and a separate element rather than part of `wipeLabel` itself: the
+              string is also this control's accessible name (see the `aria-label` above), and
+              "Finaler Draft — ← Return to project" is not something anyone should hear. Same
+              treatment the overflow menu's own `›` disclosure glyph gets, for the same reason.
+            */}
+            <span aria-hidden="true" className="brand-wipe-arrow">
+              &#8592;
+            </span>
+            {brand.wipeLabel}
+          </span>
         </a>
       )}
       {/*

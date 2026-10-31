@@ -256,3 +256,205 @@ there says so.
 The route test was inverted rather than deleted: it now asserts the editor is handed **no**
 breadcrumb, so restoring one is a deliberate act that fails a test first instead of drifting back in
 unnoticed. Mutation: re-adding the prop fails exactly that test, named for the decision.
+
+## The hover reveal became a clipping edge, not a slide
+
+The owner, after living with the sliding version: _"What I was imagining was more where both start
+in place, but only the logo is visible, and on hover it wipes so the visibility on the logo goes
+away from right to left on hover, like one of those image comparers where you can drag a line in
+the middle to reveal one image or the other."_
+
+Entirely doable, and cheaper than the slide it replaced. The markup was already two panels stacked
+in one box, so this is a CSS change plus its specs — deliberately nothing else, so reverting it is
+reverting two files.
+
+**Neither panel moves now.** `clip-path: inset()` on both, with complementary insets so there is one
+boundary rather than two reveals: the logo's _right_ inset grows 0 to 100%, cutting it away from its
+right edge leftward, while the label's _left_ inset shrinks 100% to 0, bringing it in from the same
+edge. At any moment the logo holds everything left of the boundary and the label everything right of
+it — the draggable-divider mechanic the owner described.
+
+Rejected alternatives, both of which were tried as mutations and fail the specs: `transform`, which
+is what this replaced — translating the panels slides them past the box, so the logo's leftmost
+characters leave first and the two never share a boundary; and `opacity`, which cross-fades in place
+with no edge at all. `clip-path` is compositor-animated, so it costs no more than the transform did.
+
+### A test of mine that claimed more than it proved
+
+The first version of the spec asserted that the two panels' visible fractions sum to the whole box
+at both ends of the transition, and its comment claimed this caught a regression that clipped both
+panels from the same side. **It did not.** Clipping both from the same side still leaves the logo
+whole at rest and the label whole on hover, so the sums agree at exactly the two moments a test can
+sample reliably; the arrangements differ only mid-transition. The mutation passed, which is how the
+overclaim surfaced.
+
+Fixed by asserting the _direction_ each panel is clipped from — the logo must retreat from its right
+edge, the label must arrive from its left — which is deterministic and needs no timing. The sum check
+stayed, with an honest comment: it catches a clip cutting from the right side by the wrong amount,
+which the direction check alone would not.
+
+A second self-inflicted bug worth recording: `getComputedStyle(...).clipPath` does **not** resolve
+percentages to pixels. An authored `inset(0 0 0 100%)` comes back as `inset(0px 0px 0px 100%)`,
+mixing units in one value, so parsing every side with a bare `parseFloat` read `100%` as `100px` and
+reported a fully-clipped panel as roughly half-visible. The helper is unit-aware now.
+
+| mutation                                 | result                                                                        |
+| ---------------------------------------- | ----------------------------------------------------------------------------- |
+| back to `transform` (the previous slide) | 4 of 5 specs fail                                                             |
+| `opacity` cross-fade instead of a clip   | 3 of 5 specs fail                                                             |
+| both panels clipped from the same side   | 1 spec fails — only after the direction assertion was added; it passed before |
+
+Gates: `lint` 0, `typecheck` 0, `pnpm test` 0, `test:system` **90**, `test:integration` 0
+(11 + 101 + 32), `check:bundle-budget` 0, `format:check` 0 bare and last. Reduced motion and the
+accessible-name behaviour are unchanged and still covered — the name states the destination before
+any hover, and `prefers-reduced-motion` removes the transition while the swap still happens.
+
+### Then sequenced: the logo leaves before the label arrives
+
+> "Is there a way we could have the logo fully wipe away before the 'return to projects' wipes in"
+
+Yes, and it is a timing change rather than a mechanism one — the clipping stays exactly as above,
+each panel just gets its own phase. `--fd-brand-wipe-phase` (100ms) is both panels' duration _and_
+the trailing one's delay, so the whole gesture is 200ms in two halves.
+
+**The delays live on the resting rules as well as the hovered ones, so the order reverses with the
+direction.** Hovering: the logo clips away first, the label waits out that phase. Leaving: the label
+clips away first, the logo returns after it. Without the resting delays, moving the pointer off
+would play both halves simultaneously and look nothing like the entrance — a detail easy to miss,
+because the entrance is the only half anyone tests by hand.
+
+One custom property rather than two literals because the delay must _equal_ the duration: shorter
+overlaps the halves back into the single edge, longer leaves a visible gap of empty bar between
+them. Two numbers could drift; one cannot.
+
+The reduced-motion block now lists the hovered selectors too, at matching specificity, and zeroes
+the delay explicitly. `transition: none` on the base rules alone is in fact sufficient — with no
+transition property there is nothing for a delay to postpone — but `.brand-wipe:hover .brand-face`
+is two classes to that block's one, so its delay still wins the cascade, and stating both is cheaper
+than making the next reader deduce that the delay is inert.
+
+**The endpoint states are identical to the single-edge version**, which is precisely why this needed
+a test of its own: every other case in `app-bar-logo.spec.ts` passed unchanged after the sequencing
+landed, because none of them can see timing. The new case reads computed `transition-duration` and
+`transition-delay` in both states rather than sampling the clip mid-animation, which would have to
+race a 200ms gesture and would flake.
+
+| mutation                                      | result                                        |
+| --------------------------------------------- | --------------------------------------------- |
+| all delays zeroed (back to one shared edge)   | fails: hover label delay 0, expected >= 100   |
+| resting delays not reversed                   | fails: leaving would play both halves at once |
+| duration raised to 300ms, delay left at 100ms | fails: the halves overlap                     |
+
+### And slowed down, because 200ms was imperceptible
+
+> "Can we try making them a bit longer. Its hard to even tell whats happening. I wasn't sure it was
+> doing what I asked until I screen recorded and watched it slower."
+
+`--fd-brand-wipe-phase` is 200ms rather than 100ms, so the whole gesture is 400ms in two halves.
+
+The diagnosis matters more than the number. 100ms sits around the floor at which motion registers
+as motion at all, so a _staged_ animation assembled from two of them cannot read as staged — the
+ordering was correct the whole time and simply invisible. Needing a screen recording to confirm the
+behaviour is the symptom of a tempo problem, not of a mechanism one, which is why nothing about the
+clipping changed here.
+
+The spec now fences the tempo on both sides instead of only capping it:
+
+- a **floor** of 150ms per phase, so a future tuning cannot quietly return it to a blur — the thing
+  that was wrong, and that no previous assertion could have caught;
+- a **ceiling** of 600ms on the whole gesture, raised from 400ms, which the doubling would otherwise
+  have sat exactly on. A ceiling is still right: nothing depends on the animation completing, since
+  the destination is in the control's accessible name either way, so a reveal on a brand mark can
+  afford a longer gesture than a functional control could — but not an unbounded one.
+
+**A test bug the change exposed.** Three specs waited a hardcoded `300ms` for the gesture to settle.
+That was already only just sufficient at 200ms total and became wrong at 400ms, so they failed on a
+partially-complete clip rather than on anything real. They now derive the wait from the elements'
+own computed duration and delay, which is the only form that survives the custom property being
+tuned — and being tunable from one declaration is the point of it.
+
+| mutation              | result                        |
+| --------------------- | ----------------------------- |
+| phase back to 100ms   | fails the floor: 100 < 150    |
+| phase raised to 400ms | fails the ceiling: 1200 > 600 |
+
+## Both reveals kept, the slide active
+
+> "I like both the slide and sequenced transitions so much... Could we do the slide transition for
+> now, but include the sequenced transition in the code, perhaps commented out, so switching is as
+> easy as switching which line(s) is commented"
+
+Done, and it is a **deliberate, bounded exception** to this project's "keep only active code" rule
+rather than an oversight. What keeps it bounded: exactly one of the two blocks in `styles.css` is
+ever live, they are the only place either mechanism is expressed, and the specs do not know which
+is which.
+
+**That last part is what makes it a genuine one-edit switch, and it required restructuring the
+tests.** `app-bar-logo.spec.ts` previously asserted the staged clip's own mechanics -- clip
+directions, transition delays, a tempo floor and ceiling. Leaving those in place would have meant
+flipping the comment also broke four specs, which is precisely the friction the toggle exists to
+remove. They now assert only what both mechanisms share:
+
+- the logo in view at rest, the label in view on hover **and** on keyboard focus
+- reversible: leaving puts the logo back
+- geometric, never a cross-fade (opacity untouched in both states)
+- neither panel growing the bar it sits in
+
+Measured by **hit-testing across the brand's box** rather than by computed styles, because that is
+the one measure both mechanisms move: a region translated out of the box and a region clipped away
+are equally absent from it, and `clip-path` removes a region from hit-testing just as
+`overflow: hidden` removes a translated one.
+
+**Verified in both directions**: the full suite passes with either block live. That was run, not
+assumed -- the comments were flipped, the suite re-run clean, and the slide restored.
+
+The staged clip's own timing assertions are gone with it. That is the honest cost of the toggle: the
+inactive mechanism is not covered by anything, so switching back means re-adding its floor/ceiling
+and delay-order assertions from this document or from its own commit. Recorded so nobody assumes
+the alternative is still under test.
+
+`--fd-brand-wipe-phase` is now read only by the commented block, and its own comment says so, so a
+reader finding it apparently unused knows why before deleting it.
+
+**When one is settled on, delete the other.** Both are recorded here in full and each shipped as its
+own commit, so removing the loser loses nothing.
+
+## A back-arrow on the label
+
+> "an arrow to the left of 'Return to project'"
+
+A separate `aria-hidden` element inside the label rather than part of the `wipeLabel` string,
+because that string doubles as the control's accessible name -- "Finaler Draft — ← Return to
+project" is not something anyone should hear. Same treatment the overflow menu's `›` disclosure
+glyph already gets, for the same reason.
+
+The e2e fixture's markup was updated to mirror the component's, since a fixture that drifts from
+what ships stops testing it.
+
+| mutation                              | result                                                     |
+| ------------------------------------- | ---------------------------------------------------------- |
+| arrow folded into `wipeLabel` instead | fails the editor's accessible-name test in `App.test.tsx`  |
+| `aria-hidden` dropped from the arrow  | fails the new contract test in `applicationShell.test.tsx` |
+
+## The reveal window narrowed to 175px
+
+> "I don't want to shorten the time. I want to shorten the length. It looks like its about 190 px
+> wide on my current screen. I think 175 px would be a little better"
+
+`.brand`'s `min-width`, 190px to 175px. The owner's measurement was exact -- that was the value.
+
+Worth naming why this is a motion change and not only a size one: `.brand-wipe` clips to this box,
+so the box _is_ the distance the incoming label travels. At 190px the arrow appeared at the far edge
+well before its text followed it across, which is what read as "coming from somewhat far to the
+right". Narrowing the window shortens the journey without touching the 180ms.
+
+**A floor now guards it.** `app-bar-logo.spec.ts` asserts both panels' content fits the box, from
+each panel's own `scrollWidth` rather than a pinned pixel figure -- so it stays correct if the
+wordmark, the label or the type scale change, any of which moves where the real floor sits. The
+panels are `position: absolute; inset: 0`, so `scrollWidth` equals the box until content actually
+overflows, which is exactly the signal a truncation check wants.
+
+Verified by sweeping the width rather than reasoning about it: **150px and 130px pass, 110px and
+90px fail.** So the true floor is near 130px (the label "Return to project" plus its arrow is the
+binding panel, not the wordmark), and 175px leaves roughly 45px of headroom. Anything tighter than
+about 130px starts cutting real words and fails that spec instead of silently truncating.

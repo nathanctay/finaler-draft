@@ -254,6 +254,25 @@ describe('ApplicationTitlebar brand: returning to a project, not the dashboard',
     expect(document.querySelector('.brand-wipe-label')).toHaveTextContent('Return to project');
     expect(document.querySelector('.brand-face')).toHaveTextContent('Finaler Draft');
   });
+
+  it('hides the back-arrow from assistive technology, keeping it out of the accessible name', () => {
+    render(
+      <ApplicationTitlebar
+        brand={{ href: '/projects/project-1', wipeLabel: 'Return to project' }}
+        documentTitle="Hollow Heart"
+      />,
+    );
+
+    const arrow = document.querySelector('.brand-wipe-arrow');
+    expect(arrow).not.toBeNull();
+    expect(arrow).toHaveAttribute('aria-hidden', 'true');
+
+    // The point of hiding it: the label doubles as this control's accessible name, and an arrow
+    // folded into that string would be read aloud. Asserted on the name itself, not just on the
+    // attribute, so putting the glyph back into `wipeLabel` fails here rather than only sounding
+    // wrong to someone who happens to listen.
+    expect(screen.getByRole('link')).toHaveAccessibleName('Finaler Draft — Return to project');
+  });
 });
 
 /**

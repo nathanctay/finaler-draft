@@ -10,6 +10,27 @@
    * The other `--fd-shell-*-row` tracks stay on `.application`: nothing outside the shell renders
    * a menubar, toolbar, banner or status bar, so they have no second context to be shared with.
    */
+  /*
+   * One half of the brand's hover reveal. The logo clips away for this long, then the label clips
+   * in for the same again, so the whole gesture is twice this. Read by both panels' duration *and*
+   * their delay -- see `.brand-face` on why those two must be the same number.
+   *
+   * 200ms, not the 100ms this started at. At 100ms each the two phases ran back to back inside
+   * 200ms total and read as a single blur rather than a sequence -- the owner could not tell the
+   * staging was happening without screen-recording it and slowing the playback down. 100ms is
+   * around the floor at which motion registers at all, so a staged animation built from two of
+   * them has no chance of reading as staged.
+   *
+   * Tunable from here alone: this is the only number either phase reads, so trying a different
+   * tempo is editing this one declaration.
+   *
+   * **Read only by the staged-clip reveal, which is currently the commented-out alternative** --
+   * see the two-blocks comment above `.brand-face`. Deliberately kept rather than deleted with the
+   * rest of that block: uncommenting it has to be the whole switch, and a reader finding the
+   * variable apparently unused should know why before removing it. It goes when that alternative
+   * does.
+   */
+  --fd-brand-wipe-phase: 200ms;
   --fd-shell-titlebar-row: 38px;
   --surface-01: #fff;
   --surface-02: #fbfbf7;
@@ -345,7 +366,18 @@ select:focus-visible,
   align-items: center;
   gap: 8px;
   font-weight: 650;
-  min-width: 190px;
+  /*
+   * The width of the window the two reveal panels travel through, not just the brand's own
+   * footprint: `.brand-wipe` clips to this box, so the wider it is the further the incoming label
+   * has to come from. At 190px the owner found the label read as arriving from too far to the
+   * right -- the arrow appears at the far edge well before its text follows it across.
+   *
+   * 175px is the narrowest this can go while both panels still fit without being cut off, which is
+   * measured rather than guessed: `app-bar-logo.spec.ts` asserts each panel's natural width against
+   * this box in a real browser, so taking it lower fails there instead of silently truncating
+   * either "Finaler Draft" or "Return to project".
+   */
+  min-width: 175px;
   color: inherit;
   text-decoration: none;
 }
@@ -370,9 +402,26 @@ select:focus-visible,
  * collapses to zero height, and `.brand`'s usual height (the single line `display: flex` sizes
  * to) would disappear along with it.
  *
- * `overflow: hidden` is what makes the sliding motion read as a wipe rather than as the second
- * panel sliding in over the first, or the bar momentarily growing wider: both panels are exactly
- * as wide as `.brand`'s own `min-width`, and only the portion inside that box is ever visible.
+ * `overflow: hidden` bounds both panels to `.brand`'s own `min-width`, so neither can widen the
+ * bar while it animates.
+ *
+ * **Neither panel ever moves.** They are stacked in the same box and revealed by a single
+ * travelling edge, which is what the owner asked for: "both start in place, but only the logo is
+ * visible, and on hover it wipes so the visibility on the logo goes away from right to left on
+ * hover, like one of those image comparers where you can drag a line in the middle to reveal one
+ * image or the other."
+ *
+ * `clip-path: inset()` does that, and the two insets are complementary so there is exactly one
+ * boundary rather than two independent reveals. The logo's *right* inset grows 0 to 100%, so it is
+ * cut away from its right edge leftward; the label's *left* inset shrinks 100% to 0, so it appears
+ * from the right edge leftward. At any moment the logo occupies everything left of the edge and the
+ * label everything right of it.
+ *
+ * Deliberately not `transform`, which is what this replaced: translating the panels slides them
+ * past the box, so the logo's leftmost characters leave first and the two never share a boundary.
+ * Deliberately not `opacity`, which would cross-fade both in place with no edge at all. Only
+ * clipping gives a draggable-divider reveal. `clip-path` is also compositor-animated, so this costs
+ * no more than the transform version did.
  */
 .brand-wipe {
   position: relative;
@@ -387,8 +436,54 @@ select:focus-visible,
   inset: 0;
   align-items: center;
   gap: 8px;
-  transition: transform 180ms ease;
   white-space: nowrap;
+}
+
+/*
+ * ===========================================================================
+ *  TWO REVEALS, ONE ACTIVE. Switching is commenting one block and uncommenting
+ *  the other -- nothing else, and no test changes.
+ * ===========================================================================
+ *
+ * The owner liked both and asked to keep the unused one to hand: "include the sequenced transition
+ * in the code, perhaps commented out, so switching is as easy as switching which line(s) is
+ * commented."
+ *
+ * A deliberate, bounded exception to this project's "keep only active code" rule, not an
+ * oversight. One of the two blocks below is always live; they are the only place either mechanism
+ * is expressed; and `apps/web/e2e/app-bar-logo.spec.ts` asserts only the behaviour the two share --
+ * the logo in view at rest, the label in view on hover *and* on keyboard focus, reversible on
+ * leaving, geometric rather than a cross-fade, and neither panel growing the bar. It measures that
+ * by hit-testing across the brand's box, which is the one thing both mechanisms affect: a region
+ * translated out of the box and a region clipped away are equally absent from it.
+ *
+ * That is what makes this a genuine one-edit switch, and it was verified in both directions -- the
+ * whole suite passes with either block live. A spec pinning `transform` or `clip-path` would have
+ * meant flipping the comments also broke the tests, which is the friction the toggle exists to
+ * avoid.
+ *
+ * When one is settled on, delete the other. `progress/app-bar-navigation.md` records both in full
+ * and each shipped as its own commit, so removing the loser loses nothing.
+ */
+
+/* The label's back-arrow. Its own element so it can be hidden from assistive technology while
+   the label text stays the accessible name -- see `applicationShell.tsx`. Sized and coloured off
+   the label's own text rather than given a literal, so it tracks the bar if that changes. */
+.brand-wipe-arrow {
+  flex: 0 0 auto;
+  font-size: 1em;
+  line-height: 1;
+  opacity: 0.75;
+}
+
+/* --- ACTIVE: slide. Both panels translate; the logo leaves as the label arrives. --- */
+.brand-face,
+.brand-wipe-label {
+  transition: transform 180ms ease;
+}
+
+.brand-face {
+  transform: translateX(0);
 }
 
 .brand-wipe-label {
@@ -405,17 +500,64 @@ select:focus-visible,
   transform: translateX(0);
 }
 
+/* --- ALTERNATIVE: staged clip. The logo clips fully away, then the label clips in. The delays sit
+       on the resting rules as well as the hovered ones, so leaving reverses the order rather than
+       replaying it. `--fd-brand-wipe-phase` is both the duration and the trailing delay and must
+       stay one value: shorter overlaps the halves back into a single travelling edge, longer
+       leaves a gap of empty bar between them.
+
+.brand-face,
+.brand-wipe-label {
+  transition: clip-path var(--fd-brand-wipe-phase) ease;
+}
+
+.brand-face {
+  clip-path: inset(0 0 0 0);
+  transition-delay: var(--fd-brand-wipe-phase);
+}
+
+.brand-wipe-label {
+  clip-path: inset(0 0 0 100%);
+  transition-delay: 0s;
+}
+
+.brand-wipe:hover .brand-face,
+.brand-wipe:focus-visible .brand-face {
+  clip-path: inset(0 100% 0 0);
+  transition-delay: 0s;
+}
+
+.brand-wipe:hover .brand-wipe-label,
+.brand-wipe:focus-visible .brand-wipe-label {
+  clip-path: inset(0 0 0 0);
+  transition-delay: var(--fd-brand-wipe-phase);
+}
+--- */
+
 /*
  * The owner was specific about the motion itself ("wipe"), which is exactly the kind of movement
  * `prefers-reduced-motion` exists to suppress for a reader who has asked for it -- the label
  * still swaps on hover/focus (that is the control's actual behaviour, and the accessible name was
  * never animation-dependent in the first place, see `ApplicationTitlebar`'s own comment), only
- * the sliding transition between the two states is removed.
+ * the transition between the two states is removed.
+ *
+ * The hovered selectors are listed as well as the resting ones, at matching specificity, and the
+ * delay is zeroed explicitly. `transition: none` on the base rules alone would in fact be enough --
+ * with no transition property there is nothing for a delay to postpone -- but
+ * `.brand-wipe:hover .brand-face` is two classes to this block's one, so its `transition-delay`
+ * would still win the cascade and leave a reader deducing that the delay is inert from the property
+ * reset. Saying both is cheaper than that deduction, and survives someone later giving these panels
+ * a transition that reduced motion is meant to keep.
  */
 @media (prefers-reduced-motion: reduce) {
   .brand-face,
-  .brand-wipe-label {
+  .brand-wipe-label,
+  .brand-wipe:hover .brand-face,
+  .brand-wipe:focus-visible .brand-face,
+  .brand-wipe:hover .brand-wipe-label,
+  .brand-wipe:focus-visible .brand-wipe-label {
     transition: none;
+    transition-delay: 0s;
   }
 }
 

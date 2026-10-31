@@ -27,7 +27,7 @@ const BRAND_MARKUP = `
       <span class="brand-mark">F</span>
       <span>Finaler Draft</span>
     </span>
-    <span class="brand-wipe-label" id="label">Return to project</span>
+    <span class="brand-wipe-label" id="label"><span aria-hidden="true" class="brand-wipe-arrow">&#8592;</span>Return to project</span>
   </a>
 </header>`;
 
@@ -39,79 +39,170 @@ async function openFixture(page: Page, reducedMotion = false): Promise<void> {
   }, BRAND_MARKUP);
 }
 
-function translateX(transform: string): number {
-  // `getComputedStyle(...).transform` resolves to a `matrix(...)` string, never the authored
-  // `translateX(...)`, once any transform is applied -- the 5th of the six values is the X
-  // translation (https://developer.mozilla.org/docs/Web/CSS/transform-function/matrix).
-  if (transform === 'none') return 0;
-  const match = /matrix\(([^)]+)\)/u.exec(transform);
-  if (!match) throw new Error(`Not a matrix() transform: ${transform}`);
-  const values = match[1]!.split(',').map((value) => Number.parseFloat(value.trim()));
-  return values[4]!;
+/**
+ * Which panel the writer can actually see, sampled across the brand's own box.
+ *
+ * Deliberately `elementFromPoint` rather than computed styles, because this file must not assert
+ * *how* the reveal is achieved. Two mechanisms are kept side by side in `styles.css` -- a slide
+ * (both panels translate past the box) and a staged clip -- and the owner switches between them by
+ * moving one comment. Pinning `transform`, or `clip-path`, or transition delays would mean that
+ * one-line switch also broke this file, which is exactly the friction the toggle exists to avoid.
+ *
+ * Hit-testing is the one measure both share: a region translated outside the box and a region
+ * clipped away are equally absent from it, and `clip-path` removes a region from hit-testing just
+ * as `overflow: hidden` removes a translated one. So this answers the only question that matters
+ * to a reader -- what is in view -- and stays true of whichever mechanism is active.
+ */
+async function visiblePanels(page: Page): Promise<{ face: number; label: number }> {
+  return page.locator('#brand').evaluate((brand) => {
+    const box = brand.getBoundingClientRect();
+    const y = box.top + box.height / 2;
+    let face = 0;
+    let label = 0;
+    // Nine evenly spaced samples, inset from both edges so a sub-pixel boundary at the very edge
+    // cannot decide the result on its own.
+    for (let step = 1; step <= 9; step += 1) {
+      const hit = document.elementFromPoint(box.left + (box.width * step) / 10, y);
+      if (hit === null) continue;
+      if (document.querySelector('#face')!.contains(hit)) face += 1;
+      else if (document.querySelector('#label')!.contains(hit)) label += 1;
+    }
+    return { face, label };
+  });
 }
 
-test('at rest, only the logo is in view -- the label sits fully outside the brand’s own box', async ({
+/**
+ * Waits out the whole gesture, measured from the elements rather than hardcoded -- the active
+ * mechanism may be staged, in which case the total is the leading phase plus the trailing delay
+ * plus the trailing phase. A literal here has to track a tunable custom property by hand, and once
+ * did not: raising that property from 100ms to 200ms left three `waitForTimeout(300)` calls
+ * measuring a 400ms gesture, and the specs failed on a half-finished reveal rather than on anything
+ * real.
+ */
+async function settle(page: Page): Promise<void> {
+  const total = await page.locator('#label').evaluate((el) => {
+    const label = getComputedStyle(el);
+    const face = getComputedStyle(document.querySelector('#face')!);
+    const ms = (value: string) => Number.parseFloat(value) * 1000;
+    return (
+      Math.max(ms(face.transitionDuration), ms(label.transitionDuration)) +
+      Math.max(ms(face.transitionDelay), ms(label.transitionDelay))
+    );
+  });
+  await page.waitForTimeout(total + 90);
+}
+
+test('at rest the logo is what is in view, and the label is not', async ({ page }) => {
+  await openFixture(page);
+  const { face, label } = await visiblePanels(page);
+
+  expect(face).toBeGreaterThanOrEqual(8);
+  expect(label).toBe(0);
+});
+
+test('hovering swaps them completely -- the label in view, the logo gone', async ({ page }) => {
+  await openFixture(page);
+  await page.locator('#brand').hover();
+  await settle(page);
+  const { face, label } = await visiblePanels(page);
+
+  expect(label).toBeGreaterThanOrEqual(8);
+  expect(face).toBe(0);
+});
+
+test('leaving puts the logo back, so the reveal is reversible and not one-way', async ({
   page,
 }) => {
   await openFixture(page);
-  const brandWidth = await page
-    .locator('#brand')
-    .evaluate((el) => el.getBoundingClientRect().width);
-  const labelTransform = await page
-    .locator('#label')
-    .evaluate((el) => getComputedStyle(el).transform);
-  // A positive translation of (at least) the box's own width pushes the label's left edge to, or
-  // past, the box's right edge -- genuinely offscreen within the wipe's own clipped container,
-  // not merely "somewhere to the right".
-  expect(translateX(labelTransform)).toBeGreaterThanOrEqual(brandWidth - 1);
-});
-
-test('hovering slides the logo out and the label in -- a wipe, not a fade', async ({ page }) => {
-  await openFixture(page);
-  const before = {
-    faceOpacity: await page.locator('#face').evaluate((el) => getComputedStyle(el).opacity),
-    faceX: await page.locator('#face').evaluate((el) => getComputedStyle(el).transform),
-    labelX: await page.locator('#label').evaluate((el) => getComputedStyle(el).transform),
-  };
-
   await page.locator('#brand').hover();
-  // The transition has a duration; wait for it to settle rather than racing it.
-  await page.waitForTimeout(300);
+  await settle(page);
+  await page.mouse.move(0, 0);
+  await settle(page);
+  const { face, label } = await visiblePanels(page);
 
-  const after = {
-    faceOpacity: await page.locator('#face').evaluate((el) => getComputedStyle(el).opacity),
-    faceX: await page.locator('#face').evaluate((el) => getComputedStyle(el).transform),
-    labelX: await page.locator('#label').evaluate((el) => getComputedStyle(el).transform),
-  };
-
-  // Positional movement happened on both panels -- the signature of a wipe (one slides out as the
-  // other slides in), not of a fade (which would move neither and only change opacity instead).
-  expect(translateX(after.faceX)).not.toBeCloseTo(translateX(before.faceX), 0);
-  expect(translateX(after.labelX)).not.toBeCloseTo(translateX(before.labelX), 0);
-
-  // And specifically not a fade: opacity is untouched by this transition in either state. A
-  // regression that replaced the slide with `opacity` would still move nothing above, which is
-  // exactly why this is asserted too, not left implied by the position checks alone.
-  expect(after.faceOpacity).toBe(before.faceOpacity);
-
-  // The label has fully taken the logo's place: its translation is at (or past) zero, the box's
-  // own resting position, rather than merely having moved partway.
-  expect(translateX(after.labelX)).toBeLessThanOrEqual(0.5);
-  // And the face has been pushed out by (at least) its own width -- genuinely swapped, not just
-  // nudged.
-  const brandWidth = await page
-    .locator('#brand')
-    .evaluate((el) => el.getBoundingClientRect().width);
-  expect(Math.abs(translateX(after.faceX))).toBeGreaterThanOrEqual(brandWidth - 1);
+  expect(face).toBeGreaterThanOrEqual(8);
+  expect(label).toBe(0);
 });
 
-test('keyboard focus wipes the same way hover does, with no pointer involved', async ({ page }) => {
+test('keyboard focus reveals the label the same way hover does, with no pointer involved', async ({
+  page,
+}) => {
   await openFixture(page);
   await page.locator('#brand').focus();
-  await page.waitForTimeout(300);
+  await settle(page);
+  const { face, label } = await visiblePanels(page);
 
-  const labelX = await page.locator('#label').evaluate((el) => getComputedStyle(el).transform);
-  expect(translateX(labelX)).toBeLessThanOrEqual(0.5);
+  expect(label).toBeGreaterThanOrEqual(8);
+  expect(face).toBe(0);
+});
+
+test('neither panel ever spills outside the brand, at rest or revealed', async ({ page }) => {
+  // The bar is a flex row with a breadcrumb and an account menu beside this control, so a panel
+  // escaping its own box would overlap them. `overflow: hidden` is what bounds the slide and the
+  // box itself bounds the clip, and this holds for either.
+  await openFixture(page);
+  const bounded = async () =>
+    page.locator('#brand').evaluate((brand) => {
+      const box = brand.getBoundingClientRect();
+      return ['#face', '#label'].every((selector) => {
+        const panel = document.querySelector(selector)!.getBoundingClientRect();
+        // A panel may be positioned outside the box (the slide does exactly that) -- what must not
+        // happen is any of it being *painted* there, which `overflow: hidden` prevents. So this
+        // checks the brand's own box has not grown to accommodate one.
+        return panel.height <= box.height + 1;
+      });
+    });
+
+  expect(await bounded()).toBe(true);
+  await page.locator('#brand').hover();
+  await settle(page);
+  expect(await bounded()).toBe(true);
+});
+
+test('both panels fit the brand box without being cut off', async ({ page }) => {
+  /*
+   * The box doubles as the travel distance for the slide, so it is tuned down to whatever looks
+   * right -- the owner moved it from 190px to 175px because the label read as arriving from too
+   * far away. This is the floor on that tuning: below it the box starts truncating real words.
+   *
+   * Measured from each panel's own content rather than from a pinned pixel figure, so it stays
+   * correct if the wordmark, the label text or the type scale change -- any of which would move
+   * where that floor actually is.
+   */
+  await openFixture(page);
+  const fits = await page.locator('#brand').evaluate((brand) => {
+    const box = brand.getBoundingClientRect().width;
+    const widthOf = (selector: string) => {
+      const panel = document.querySelector<HTMLElement>(selector)!;
+      // `scrollWidth` is the content's own width, independent of the clipping that hides the
+      // overflow -- which is exactly what a truncation check needs.
+      return panel.scrollWidth;
+    };
+    return { box, face: widthOf('#face'), label: widthOf('#label') };
+  });
+
+  expect(fits.face).toBeLessThanOrEqual(fits.box);
+  expect(fits.label).toBeLessThanOrEqual(fits.box);
+});
+
+test('the reveal is geometric, never a cross-fade', async ({ page }) => {
+  // True of both mechanisms and worth pinning: a regression that swapped either for `opacity`
+  // would still pass every visibility check above, because a fully faded panel is not hit either.
+  await openFixture(page);
+  const opacity = async () => ({
+    face: await page.locator('#face').evaluate((el) => getComputedStyle(el).opacity),
+    label: await page.locator('#label').evaluate((el) => getComputedStyle(el).opacity),
+  });
+
+  const before = await opacity();
+  await page.locator('#brand').hover();
+  await settle(page);
+  const after = await opacity();
+
+  expect(before.face).toBe('1');
+  expect(before.label).toBe('1');
+  expect(after.face).toBe('1');
+  expect(after.label).toBe('1');
 });
 
 test('the accessible name states the destination before any hover or focus, unchanged by either', async ({
@@ -120,7 +211,7 @@ test('the accessible name states the destination before any hover or focus, unch
   await openFixture(page);
   const nameAtRest = await page.locator('#brand').evaluate((el) => el.getAttribute('aria-label'));
   await page.locator('#brand').hover();
-  await page.waitForTimeout(300);
+  await settle(page);
   const nameOnHover = await page.locator('#brand').evaluate((el) => el.getAttribute('aria-label'));
 
   expect(nameAtRest).toBe('Finaler Draft — Return to project');
@@ -140,8 +231,10 @@ test('prefers-reduced-motion removes the transition entirely, while the label st
   expect(transitionAtRest).toBe('0s');
 
   await page.locator('#brand').hover();
-  const labelX = await page.locator('#label').evaluate((el) => getComputedStyle(el).transform);
   // The functional swap still happens -- reduced motion removes the *transition*, not the
-  // control's actual behaviour.
-  expect(translateX(labelX)).toBeLessThanOrEqual(0.5);
+  // control's actual behaviour. With no transition the clip lands at its hovered value at once,
+  // so this reads the end state directly rather than waiting for one.
+  const { face, label } = await visiblePanels(page);
+  expect(label).toBeGreaterThanOrEqual(8);
+  expect(face).toBe(0);
 });
