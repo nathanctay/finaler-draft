@@ -1,8 +1,10 @@
 import { createFileRoute, useNavigate, useParams } from '@tanstack/react-router';
 import { z } from 'zod';
+import { AccountMenu } from '../../../accountMenu.js';
 import { api, type FetchedScreenplay, type PersistedScreenplay } from '../../../api.js';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { lazy, Suspense, useState } from 'react';
+import { RouteBreadcrumb } from '../../../routeBreadcrumb.js';
 import type { EntitlementReadOnly } from '../../../App.js';
 
 // Lazy for the same reason `EditorWorkspace` is: the dialog is only needed once a writer opens it.
@@ -127,6 +129,8 @@ function ScreenplayPage() {
         </Suspense>
       )}
       <EditorWorkspace
+        accountMenu={<AccountMenu />}
+        breadcrumb={<RouteBreadcrumb />}
         entitlementReadOnly={entitlementReadOnly}
         initial={screenplay.data as PersistedScreenplay}
         {...(mayShare ? { onOpenSharing: () => setSharingOpen(true) } : {})}

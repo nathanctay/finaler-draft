@@ -334,9 +334,118 @@ select:focus-visible,
   font-size: 10px;
 }
 
-.document-title {
+/*
+ * The editor's and the revision-diff view's own brand (`applicationShell.tsx`'s `brand.wipeLabel`
+ * branch): the owner's "wipe from the logo to 'return to project'" -- a slide, where one panel
+ * replaces the other by sliding out as its replacement slides in, not the fade the owner did not
+ * ask for. `height` is explicit because the two panels below are both `position: absolute`,
+ * which takes them out of flow -- a `position: relative` box with no in-flow content of its own
+ * collapses to zero height, and `.brand`'s usual height (the single line `display: flex` sizes
+ * to) would disappear along with it.
+ *
+ * `overflow: hidden` is what makes the sliding motion read as a wipe rather than as the second
+ * panel sliding in over the first, or the bar momentarily growing wider: both panels are exactly
+ * as wide as `.brand`'s own `min-width`, and only the portion inside that box is ever visible.
+ */
+.brand-wipe {
+  position: relative;
+  overflow: hidden;
+  height: 22px;
+}
+
+.brand-face,
+.brand-wipe-label {
+  display: flex;
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  gap: 8px;
+  transition: transform 180ms ease;
+  white-space: nowrap;
+}
+
+.brand-wipe-label {
+  transform: translateX(100%);
+}
+
+.brand-wipe:hover .brand-face,
+.brand-wipe:focus-visible .brand-face {
+  transform: translateX(-100%);
+}
+
+.brand-wipe:hover .brand-wipe-label,
+.brand-wipe:focus-visible .brand-wipe-label {
+  transform: translateX(0);
+}
+
+/*
+ * The owner was specific about the motion itself ("wipe"), which is exactly the kind of movement
+ * `prefers-reduced-motion` exists to suppress for a reader who has asked for it -- the label
+ * still swaps on hover/focus (that is the control's actual behaviour, and the accessible name was
+ * never animation-dependent in the first place, see `ApplicationTitlebar`'s own comment), only
+ * the sliding transition between the two states is removed.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .brand-face,
+  .brand-wipe-label {
+    transition: none;
+  }
+}
+
+/*
+ * The breadcrumb trail (`applicationShell.tsx`'s `nav.breadcrumb`), centred in the bar exactly as
+ * `.document-title` alone used to be -- `flex: 1` and the centring both moved here from that rule
+ * (below) when the trail was added in front of it, so the whole nav (every ancestor link plus the
+ * current title) centres as one unit rather than the current title alone drifting off-centre
+ * whenever a screen has ancestors to show.
+ */
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex: 1;
-  text-align: center;
+  min-width: 0;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.breadcrumb-segment {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/*
+ * Rendered as either an `<a>` (a router-agnostic caller's `href`) or a `<button>` (a router-aware
+ * caller's `onSelect`) -- see `BreadcrumbAncestor`'s own comment -- styled identically either way,
+ * so a reader cannot tell which kind of caller built this trail from looking at it. `--text-02`,
+ * not the current segment's `--text-01` (inherited from `.titlebar`): a visibly different colour is
+ * what tells a reader this word is a link and the one after the last separator is not, since
+ * nothing else here (no underline at rest, matching every other chrome control's resting state)
+ * says so.
+ */
+.breadcrumb-link {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-02);
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.breadcrumb-link:hover,
+.breadcrumb-link:focus-visible {
+  text-decoration: underline;
+}
+
+.breadcrumb-separator {
+  color: var(--text-03);
+  user-select: none;
+}
+
+.document-title {
   font-weight: 600;
 }
 
@@ -416,16 +525,54 @@ select:focus-visible,
   background: var(--feedback-error);
 }
 
-.account-button {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 1px solid var(--border-04);
-  border-radius: 50%;
+/*
+ * The account menu's wrapper (`AccountMenu`, accountMenu.tsx), rendered inside `.titlebar` on
+ * every screen now -- the working control the dead `<span className="account-button">` badge
+ * (the "FD" circle, never a real control) is gone in favour of. `position: relative` gives the
+ * sign-out failure message below a box to anchor to.
+ */
+.account-menu {
+  position: relative;
+}
+
+/*
+ * `OverflowMenu`'s own default trigger colour (`--text-09`, styles.css above) is tuned for the
+ * light surfaces every other instance of it sits on (the per-row menu, the File menu's
+ * `--surface-03`) and is close to unreadable against `.titlebar`'s dark `--surface-16` -- the same
+ * kind of override `.menu-file .overflow-menu-trigger` already applies for the (lighter, but still
+ * not white) menubar. `--text-01` matches the brand text and the current breadcrumb segment,
+ * which already sit on this exact background.
+ */
+.titlebar .overflow-menu-trigger {
+  color: var(--text-01);
+}
+
+.titlebar .overflow-menu-trigger:hover,
+.titlebar .overflow-menu-trigger[aria-expanded='true'] {
+  border-color: var(--border-07);
   background: var(--surface-15);
-  color: white;
-  font-size: 10px;
+}
+
+/*
+ * Floated below the trigger rather than given a layout row of its own: `.titlebar` is a fixed
+ * 38px grid track (`.application`'s own `--fd-shell-titlebar-row`), and the three plain routes
+ * that also now wear this bar have no spare block below it reserved for an error message either
+ * (the old `.sign-out-error` sat in the page body, below a header that was not in a fixed-height
+ * grid at all). `role="alert"` still announces it the instant it mounts regardless of where it is
+ * drawn.
+ */
+.account-menu .sign-out-error {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 200px;
+  margin: 0;
+  border: 1px solid var(--border-04);
+  border-radius: 2px;
+  background: var(--surface-01);
+  padding: 8px 10px;
+  white-space: normal;
 }
 
 .menubar,

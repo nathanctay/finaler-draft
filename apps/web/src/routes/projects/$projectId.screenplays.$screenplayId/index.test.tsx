@@ -139,6 +139,36 @@ describe('screenplay page', () => {
     expect(await screen.findByTestId('editor-instance')).toHaveTextContent('2:Route B');
   });
 
+  /**
+   * The app-bar-navigation slice: `App` (router-agnostic by design) never builds its own account
+   * menu or breadcrumb -- this route, which does have router and query-client context, mounts
+   * `<AccountMenu />` and `<RouteBreadcrumb />` itself and hands the result in. `editorModuleMock`'s
+   * own comment covers why the mock renders them as opaque markers rather than real chrome: this
+   * is a test of the *route*, proving it supplies both, not of what either renders -- that is
+   * `accountMenu.test.tsx` and `routeBreadcrumb.test.tsx`'s job.
+   */
+  it('hands the editor a real account menu and breadcrumb, not nothing', () => {
+    setQueries({
+      id: screenplayId,
+      projectId,
+      screenplay: {
+        annotations: [],
+        blocks: [],
+        id: screenplayId,
+        schemaVersion: 1,
+        title: 'A Working Draft',
+        titlePages: [],
+      },
+      title: 'A Working Draft',
+      version: 1,
+    });
+    render(<ScreenplayPage />);
+    expect(
+      screen.getByTestId('account-menu-slot').querySelector('button[aria-label="Account menu"]'),
+    ).not.toBeNull();
+    expect(screen.getByTestId('breadcrumb-slot')).toBeInTheDocument();
+  });
+
   it('navigates to the revision-history route when the editor requests it', async () => {
     setQueries({
       id: screenplayId,

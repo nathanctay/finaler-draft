@@ -2,6 +2,9 @@ import { useQuery } from '@tanstack/react-query';
 import { createFileRoute, Link, redirect, useParams } from '@tanstack/react-router';
 import { z } from 'zod';
 import { api, type RevisionListItem } from '../../../api.js';
+import { AccountMenu } from '../../../accountMenu.js';
+import { ApplicationTitlebar } from '../../../applicationShell.js';
+import { RouteBreadcrumb } from '../../../routeBreadcrumb.js';
 import {
   formatRevisionCreatedAt,
   humanizeRevisionKind,
@@ -10,6 +13,30 @@ import {
 import { guardSessionUser } from '../../../session.js';
 
 export const Route = createFileRoute('/projects/$projectId/screenplays/$screenplayId/revisions/')({
+  // The screenplay's own crumb, resolved the same way `$projectId.tsx` resolves the project's --
+  // a loader priming the cache, and a label read off `loaderData`. `Projects` and the project
+  // title are inherited from that pathless layout and are deliberately not restated here.
+  //
+  // This crumb is what replaces the "Back to screenplay" link this header used to carry: the way
+  // back is now a segment of the trail rather than a second, separate affordance saying the same
+  // thing. `ensureQueryData` on the *same* `['screenplay', id]` key the editor route already uses,
+  // so arriving here from the editor is a cache hit rather than a second fetch.
+  loader: async ({ context, params }) => {
+    const { api } = await import('../../../api.js');
+    const screenplay = await context.queryClient.ensureQueryData({
+      queryKey: ['screenplay', params.screenplayId],
+      queryFn: () => api.screenplay(params.screenplayId),
+    });
+    return { screenplayTitle: screenplay.title };
+  },
+  staticData: {
+    breadcrumb: [
+      {
+        label: (ctx) => (ctx.loaderData as { screenplayTitle?: string }).screenplayTitle,
+        to: (ctx) => `/projects/${ctx.params.projectId}/screenplays/${ctx.params.screenplayId}`,
+      },
+    ],
+  },
   beforeLoad: async ({ context }) => {
     const user = await guardSessionUser(context.queryClient);
     if (!user) throw redirect({ to: '/sign-in' });
@@ -78,14 +105,14 @@ function RevisionHistoryPage() {
 
   return (
     <main className="project-screen">
-      <header className="project-header">
-        <Link
-          params={{ projectId, screenplayId }}
-          to="/projects/$projectId/screenplays/$screenplayId"
-        >
-          Back to screenplay
-        </Link>
-      </header>
+      <ApplicationTitlebar
+        accountMenu={<AccountMenu />}
+        // No `wipeLabel`: the owner's wipe ask was for the editor and the comparison. This screen
+        // reaches its screenplay through the breadcrumb's own segment instead.
+        brand={{ href: '/projects' }}
+        breadcrumb={<RouteBreadcrumb />}
+        documentTitle="Revision history"
+      />
       <section className="project-list">
         <p className="eyebrow">HISTORY</p>
         <h1>Revision history</h1>

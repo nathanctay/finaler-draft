@@ -4,6 +4,7 @@ import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from '
 import { z } from 'zod';
 import type { ScreenplayElementKind } from '@finaler-draft/screenplay/pageFormat';
 import type { TextDiffSegment } from '@finaler-draft/screenplay';
+import { AccountMenu } from '../../accountMenu.js';
 import { api, type RevisionDiffResult } from '../../api.js';
 import { ApplicationMenubar } from '../../applicationMenubar.js';
 import { ApplicationShell, ApplicationTitlebar } from '../../applicationShell.js';
@@ -27,6 +28,7 @@ import {
 } from '../../inlineScreenplayDiff.js';
 import { applyPageGeometryCssVariables } from '../../pageGeometryCss.js';
 import { humanizeRevisionDiffSide } from '../../revisionDisplay.js';
+import { RouteBreadcrumb } from '../../routeBreadcrumb.js';
 import { guardSessionUser } from '../../session.js';
 
 export const Route = createFileRoute(
@@ -397,8 +399,17 @@ function RevisionDiffPage() {
       titlebar={
         /* No save-dot `indicator`: the editor's dot reports whether this document is saving, and
          * nothing here is. The title names the newer side's document, which is the spine of the
-         * comparison (see `InlineManuscript`). */
+         * comparison (see `InlineManuscript`). `breadcrumb` needs no extra `staticData` of its own
+         * on this route -- it inherits "Projects" and this project's own title from the
+         * `/projects/$projectId` layout match every route under it shares (routeBreadcrumb.tsx's
+         * own comment on `StaticDataRouteOption.breadcrumb`). */
         <ApplicationTitlebar
+          accountMenu={<AccountMenu />}
+          // The owner's second ask, applying identically here: a comparison is "also inside a
+          // project" (this file's own module comment), so its logo returns there too, with the
+          // same wipe.
+          brand={{ href: `/projects/${projectId}`, wipeLabel: 'Return to project' }}
+          breadcrumb={<RouteBreadcrumb />}
           documentTitle={result?.newerScreenplay.title ?? ''}
           documentType="Comparison"
         />

@@ -3,7 +3,6 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionUser } from '../../api.js';
 import {
-  clearQueryCache,
   entitlementSnapshot,
   fetchMock,
   invalidateQueries,
@@ -42,46 +41,17 @@ describe('projects page', () => {
     await expect(beforeLoad(contextWithSession(sessionUser))).resolves.toBeUndefined();
   });
 
-  it('signs out from the account menu, clears the cache, and returns to /sign-in', async () => {
-    const user = userEvent.setup();
+  /**
+   * The account menu's own behaviour (sign-out, Deleted items, Manage Subscription, the
+   * sign-out-failure message) is `accountMenu.test.tsx`'s responsibility now -- see that file's
+   * own comment on why this page no longer carries a second copy of those assertions. What is
+   * still this page's own to prove: that the one real control mounted here *is* that shared
+   * component, and that Deleted items has no second, bare way in alongside it.
+   */
+  it('mounts the shared account menu, with no bare link to Deleted items alongside it', () => {
     render(<ProjectsPage />);
-    await user.click(screen.getByRole('button', { name: 'Account menu' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Sign out' }));
-    await vi.waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        '/api/auth/sign-out',
-        expect.objectContaining({ method: 'POST' }),
-      ),
-    );
-    await vi.waitFor(() => expect(clearQueryCache).toHaveBeenCalled());
-    expect(routeState.navigate).toHaveBeenCalledWith({ to: '/sign-in' });
-  });
-
-  it('reaches the Deleted page only through the account menu, never a bare link on the writing desk', async () => {
-    const user = userEvent.setup();
-    render(<ProjectsPage />);
+    expect(screen.getByRole('button', { name: 'Account menu' })).toBeVisible();
     expect(screen.queryByRole('link', { name: /deleted/i })).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Account menu' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Deleted items' }));
-    expect(routeState.navigate).toHaveBeenCalledWith({ to: '/deleted' });
-  });
-
-  it('reaches the Manage Subscription page from the account menu -- one entry regardless of tier', async () => {
-    const user = userEvent.setup();
-    render(<ProjectsPage />);
-    await user.click(screen.getByRole('button', { name: 'Account menu' }));
-    // No tier-conditional labelling or behaviour left in this menu (see the component's own
-    // comment for why): the destination page itself decides what a free, paid, or lapsed account
-    // sees, so the menu item is a single, always-present link.
-    await user.click(screen.getByRole('menuitem', { name: 'Manage Subscription' }));
-    expect(routeState.navigate).toHaveBeenCalledWith({ to: '/billing/subscription' });
-  });
-
-  it('surfaces feedback when sign-out fails, without pretending it succeeded', () => {
-    routeState.mutationError = true;
-    render(<ProjectsPage />);
-    expect(screen.getByRole('alert')).toHaveTextContent('Sign out failed');
-    expect(routeState.navigate).not.toHaveBeenCalled();
   });
 
   it('displays project loading, error, data, and creation states', async () => {

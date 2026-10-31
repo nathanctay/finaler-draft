@@ -129,13 +129,48 @@ describe('application shell: the rows it is given', () => {
 });
 
 describe('application title bar', () => {
-  it('is the same identity and the same way out on every screen that wears it', () => {
-    render(<ApplicationTitlebar documentTitle="Hollow Heart" documentType="Screenplay" />);
+  it('is a plain, static link to the brand’s own destination when the caller supplies one with no wipe', () => {
+    render(
+      <ApplicationTitlebar
+        brand={{ href: '/projects' }}
+        documentTitle="Hollow Heart"
+        documentType="Screenplay"
+      />,
+    );
 
     const brand = screen.getByRole('link', { name: 'Finaler Draft — back to your projects' });
     expect(brand).toHaveAttribute('href', '/projects');
     expect(brand).toHaveClass('brand');
-    expect(screen.getByLabelText('Signed-in writer')).toHaveTextContent('FD');
+    expect(brand).not.toHaveClass('brand-wipe');
+  });
+
+  it('is the current page’s own inert identity, not a link to anywhere, when no brand destination is supplied', () => {
+    // The writing desk's own shape (`routes/projects/index.tsx` passes no `brand` prop at all):
+    // a link to the page already on screen would be a control with nowhere to go.
+    render(<ApplicationTitlebar documentTitle="Projects" />);
+    expect(screen.queryByRole('link', { name: /Finaler Draft/ })).toBeNull();
+    const brand = document.querySelector('.brand');
+    expect(brand?.tagName).toBe('SPAN');
+    expect(brand).toHaveTextContent('Finaler Draft');
+  });
+
+  it('offers no account control at all when the caller supplies none', () => {
+    // No caller does this in production -- every screen mounts `AccountMenu` and hands it in --
+    // but this component's own contract is that the slot degrades to nothing, the same as
+    // `indicator`/`rename` below, rather than silently rendering a placeholder.
+    render(<ApplicationTitlebar documentTitle="Hollow Heart" documentType="Screenplay" />);
+    expect(screen.queryByRole('button', { name: 'Account menu' })).toBeNull();
+  });
+
+  it('renders whatever account control it is handed, without knowing what it is', () => {
+    render(
+      <ApplicationTitlebar
+        accountMenu={<button type="button">Account menu stand-in</button>}
+        documentTitle="Hollow Heart"
+        documentType="Screenplay"
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Account menu stand-in' })).toBeVisible();
   });
 
   it('names the document and what kind of view this is', () => {
@@ -144,6 +179,14 @@ describe('application title bar', () => {
     const title = document.querySelector('.document-title');
     expect(title?.textContent).toBe('Hollow Heart Comparison');
     expect(title?.querySelector('.title-type')?.textContent).toBe('Comparison');
+  });
+
+  it('omits the type suffix entirely for a screen with no "kind of view" to say -- not an empty one', () => {
+    render(<ApplicationTitlebar documentTitle="Projects" />);
+
+    const title = document.querySelector('.document-title');
+    expect(title?.textContent).toBe('Projects');
+    expect(title?.querySelector('.title-type')).toBeNull();
   });
 
   it('shows a document-state indicator only for a screen that has one', () => {
@@ -159,6 +202,112 @@ describe('application title bar', () => {
     rerender(<ApplicationTitlebar documentTitle="Hollow Heart" documentType="Comparison" />);
     expect(screen.queryByLabelText('Local draft')).toBeNull();
     expect(document.querySelector('.save-dot')).toBeNull();
+  });
+});
+
+/**
+ * The brand's second behaviour (`progress/app-bar-navigation.md`'s Task 2): in the editor and the
+ * revision-diff view, the logo returns to *that screenplay's project*, not the dashboard, and
+ * wipes over to say so on hover or focus. `BrandDestination`'s own comment covers the full
+ * reasoning; this suite proves the contract jsdom actually can -- the markup, the href, the
+ * accessible name, and that the label is real DOM content rather than something only the
+ * animation ever reveals. The wipe's own *visual* behaviour (a slide, not a fade; the motion
+ * itself; `prefers-reduced-motion`) is `app-bar-logo.spec.ts`'s job -- jsdom resolves no
+ * stylesheet and so cannot tell a CSS transition from its absence.
+ */
+describe('ApplicationTitlebar brand: returning to a project, not the dashboard', () => {
+  it('targets the given project, not /projects, when the caller supplies a wipe destination', () => {
+    render(
+      <ApplicationTitlebar
+        brand={{ href: '/projects/project-1', wipeLabel: 'Return to project' }}
+        documentTitle="Hollow Heart"
+        documentType="Screenplay"
+      />,
+    );
+    const brand = screen.getByRole('link', { name: 'Finaler Draft — Return to project' });
+    expect(brand).toHaveAttribute('href', '/projects/project-1');
+    expect(brand).toHaveClass('brand-wipe');
+  });
+
+  it('carries the destination in its accessible name regardless of hover or focus state', () => {
+    // The owner's own bar: a screen-reader user must be told where this goes without depending
+    // on the animation. jsdom runs no CSS transition at all, which is exactly the state this
+    // asserts against -- the name is already correct before any hover or focus could have run.
+    render(
+      <ApplicationTitlebar
+        brand={{ href: '/projects/project-1', wipeLabel: 'Return to project' }}
+        documentTitle="Hollow Heart"
+      />,
+    );
+    expect(screen.getByRole('link')).toHaveAccessibleName('Finaler Draft — Return to project');
+  });
+
+  it('renders the wipe label as real content, not something the animation alone would reveal', () => {
+    render(
+      <ApplicationTitlebar
+        brand={{ href: '/projects/project-1', wipeLabel: 'Return to project' }}
+        documentTitle="Hollow Heart"
+      />,
+    );
+    // Present in the DOM unconditionally -- CSS, not React state, drives whether it is the part
+    // of the control actually shown at a given moment (see `.brand-wipe-label` in styles.css).
+    expect(document.querySelector('.brand-wipe-label')).toHaveTextContent('Return to project');
+    expect(document.querySelector('.brand-face')).toHaveTextContent('Finaler Draft');
+  });
+});
+
+/**
+ * The breadcrumb trail (`progress/app-bar-navigation.md`): the one thing besides the account menu
+ * that now differs between screens wearing this chrome. `breadcrumb` is a plain `ReactNode` --
+ * in production always `<RouteBreadcrumb />` (routeBreadcrumb.tsx), which derives the ancestor
+ * trail from the matched route tree rather than being handed a hand-built list here. This
+ * component's own contract, proven without that router-aware component, is only: render whatever
+ * it is given ahead of the current title, and mark the current title as the trail's current page.
+ */
+describe('ApplicationTitlebar breadcrumb', () => {
+  it('renders no breadcrumb region content at all for the screen at the root of the trail', () => {
+    render(<ApplicationTitlebar documentTitle="Projects" />);
+    const nav = screen.getByRole('navigation', { name: 'Breadcrumb' });
+    expect(nav.querySelectorAll('.breadcrumb-link')).toHaveLength(0);
+    expect(nav).toHaveTextContent('Projects');
+  });
+
+  it('renders whatever ancestor trail it is handed, ahead of the current title', () => {
+    render(
+      <ApplicationTitlebar
+        breadcrumb={
+          <>
+            <a className="breadcrumb-link" href="/projects">
+              Projects
+            </a>
+            <a className="breadcrumb-link" href="/projects/project-1">
+              Hollow Heart
+            </a>
+          </>
+        }
+        documentTitle="Act One"
+        documentType="Screenplay"
+      />,
+    );
+    const links = screen.getAllByRole('link', { name: /Projects|Hollow Heart/ });
+    expect(links.map((link) => link.textContent)).toEqual(['Projects', 'Hollow Heart']);
+    // The current segment is not itself part of the handed-in trail -- it is still the plain
+    // title text/rename control this component has always rendered, just now inside the same nav.
+    expect(screen.queryByRole('link', { name: 'Act One' })).toBeNull();
+  });
+
+  it('marks the current segment for assistive technology, the way a breadcrumb trail should', () => {
+    render(
+      <ApplicationTitlebar
+        breadcrumb={
+          <a className="breadcrumb-link" href="/projects">
+            Projects
+          </a>
+        }
+        documentTitle="Hollow Heart"
+      />,
+    );
+    expect(document.querySelector('.document-title')).toHaveAttribute('aria-current', 'page');
   });
 });
 

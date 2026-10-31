@@ -442,10 +442,10 @@ test('a writer can delete a screenplay from its overflow menu and undo the delet
   await page.getByLabel('New screenplay title').fill('Delete-undo screenplay');
   await page.getByRole('button', { name: 'New screenplay' }).click();
   await expect(page.getByRole('textbox', { name: 'Screenplay editing canvas' })).toBeVisible();
-  // The editor shell (App.tsx) has no "Projects" breadcrumb -- that link lives only on the
-  // project's screenplay list (routes/projects/$projectId/index.tsx) -- so returning to it means
-  // navigating back through the push the "New screenplay" creation performed, not clicking a link
-  // that does not exist on this page.
+  // The editor now carries a breadcrumb back to this project (app-bar-navigation slice), but this
+  // still navigates back through the push the "New screenplay" creation performed rather than
+  // clicking it -- the point of this test is the delete/undo flow on the project's screenplay
+  // list, not which of two equivalent paths got there.
   await page.goBack();
   await expect(page.getByRole('link', { name: 'Delete-undo screenplay' })).toBeVisible();
 
@@ -467,7 +467,13 @@ test('a writer can delete a screenplay from its overflow menu and undo the delet
       response.url().includes('/restore') &&
       response.status() === 200,
   );
-  await page.getByRole('button', { name: 'Undo' }).click();
+  // The full accessible name, not the bare visible "Undo" text: this project is itself named
+  // "Delete-undo project" for this test's own purposes, and its breadcrumb ancestor link (the
+  // app-bar-navigation slice) now sits on this same page with that name -- which contains "undo"
+  // as a substring and would otherwise collide with a loose `{ name: 'Undo' }` match. The real
+  // control's own `aria-label` (DeletedRow.tsx) was always this full sentence; this was simply the
+  // first test to need the disambiguation.
+  await page.getByRole('button', { name: 'Undo delete of Delete-undo screenplay' }).click();
   await restoreResponse;
   await expect(page.getByText('Delete-undo screenplay — Deleted')).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'Delete-undo screenplay' })).toBeVisible();

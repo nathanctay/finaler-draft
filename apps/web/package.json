@@ -37,6 +37,7 @@
   "devDependencies": {
     "@fontsource/courier-prime": "5.3.0",
     "@fontsource/ibm-plex-sans": "5.3.0",
+    "@tanstack/router-core": "1.131.37",
     "@tanstack/router-plugin": "1.131.37",
     "@testing-library/jest-dom": "6.8.0",
     "@testing-library/react": "16.3.0",

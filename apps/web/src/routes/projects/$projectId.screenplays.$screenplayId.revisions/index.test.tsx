@@ -124,12 +124,64 @@ describe('revision history page', () => {
     );
   });
 
-  it('links back to the live screenplay', () => {
-    routeState.query = { data: [], isError: false, isLoading: false };
-    render(<RevisionHistoryPage />);
-    expect(screen.getByRole('link', { name: 'Back to screenplay' })).toHaveAttribute(
-      'href',
-      '/projects/$projectId/screenplays/$screenplayId',
-    );
+  describe('loader', () => {
+    /*
+     * Tested because the crumb tests below feed `loaderData` in directly and so never exercise
+     * this -- verified by mutation: replacing the loader's return with `{}` left every one of them
+     * green. The loader is the half that can silently cost the trail its screenplay segment.
+     */
+    const loader = Route.options.loader as (opts: {
+      context: { queryClient: { ensureQueryData: (options: unknown) => Promise<unknown> } };
+      params: { projectId: string; screenplayId: string };
+    }) => Promise<{ screenplayTitle: string | undefined }>;
+
+    it('reads the title from the same ["screenplay", id] query the editor route already primes', async () => {
+      // The shared key is the point: arriving here from the editor is a cache hit, not a refetch.
+      const ensureQueryData = vi.fn().mockResolvedValue({ id: screenplayId, title: 'Act One' });
+      const result = await loader({
+        context: { queryClient: { ensureQueryData } },
+        params: { projectId, screenplayId },
+      });
+
+      expect(ensureQueryData).toHaveBeenCalledWith(
+        expect.objectContaining({ queryKey: ['screenplay', screenplayId] }),
+      );
+      expect(result).toEqual({ screenplayTitle: 'Act One' });
+    });
+  });
+
+  describe('staticData.breadcrumb', () => {
+    /*
+     * The way back to the screenplay used to be a "Back to screenplay" link in this screen's own
+     * hand-rolled header. The app-bar slice replaced that header with the shared titlebar, and the
+     * way back became a *segment of the breadcrumb trail* rather than a second affordance saying
+     * the same thing -- so this asserts the declaration, exactly as the project layout's own test
+     * does for its two crumbs. `routeBreadcrumb.test.tsx` owns how a declaration becomes rendered
+     * links; this file's job is only to prove this route declares the right one.
+     *
+     * `Projects` and the project's own title are deliberately absent here: they are inherited from
+     * the `$projectId` pathless layout every project-scoped route nests under, and restating them
+     * is the duplication that layout exists to prevent.
+     */
+    const crumbs = Route.options.staticData!.breadcrumb!;
+
+    it('declares exactly one crumb -- the screenplay, not the ancestors it inherits', () => {
+      expect(crumbs).toHaveLength(1);
+    });
+
+    it('points back at the live screenplay, labelled with its real title', () => {
+      const context = {
+        loaderData: { screenplayTitle: 'Act One' },
+        params: { projectId, screenplayId },
+      };
+      expect(crumbs[0]!.label(context)).toBe('Act One');
+      expect(crumbs[0]!.to(context)).toBe(`/projects/${projectId}/screenplays/${screenplayId}`);
+    });
+
+    it('omits the label rather than inventing one when the loader resolved no title', () => {
+      // Same rule the project crumb follows: `undefined` drops the segment, never a placeholder.
+      const context = { loaderData: {}, params: { projectId, screenplayId } };
+      expect(crumbs[0]!.label(context)).toBeUndefined();
+    });
   });
 });

@@ -42,6 +42,19 @@ export function entitlementSnapshot(
  */
 export const routeState: {
   editorMounts: number;
+  /**
+   * Stands in for `useMatches()`'s own result -- see routeBreadcrumb.tsx, the one caller that
+   * needs it. Each entry only needs the fields that component reads (`id`, `params`,
+   * `loaderData`, `staticData`), not a real `RouteMatch`. Defaults to `[]` (no breadcrumb
+   * content at all); a test exercising `RouteBreadcrumb` sets this to the match stack it wants
+   * to prove the trail renders.
+   */
+  matches: Array<{
+    id: string;
+    loaderData?: unknown;
+    params: Record<string, string>;
+    staticData: { breadcrumb?: unknown };
+  }>;
   mutationError: boolean;
   mutationErrorValue: unknown;
   navigate: ReturnType<typeof vi.fn>;
@@ -59,6 +72,7 @@ export const routeState: {
   screenplayId: string;
 } = {
   editorMounts: 0,
+  matches: [],
   mutationError: false,
   mutationErrorValue: undefined,
   revisionId,
@@ -164,6 +178,7 @@ export async function reactRouterMock(
       <a href={to}>{children}</a>
     ),
     Outlet: () => <div>Outlet</div>,
+    useMatches: () => routeState.matches,
     useNavigate: () => routeState.navigate,
     useParams: () => ({
       projectId,
@@ -186,6 +201,8 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
   const react = await vi.importActual<typeof React>('react');
   return {
     App: ({
+      accountMenu,
+      breadcrumb,
       entitlementReadOnly,
       historicalRevision,
       initial,
@@ -195,6 +212,8 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
       onScreenplayRenamed,
       viewerRole,
     }: {
+      accountMenu?: React.ReactNode;
+      breadcrumb?: React.ReactNode;
       entitlementReadOnly?: {
         cooldownUntil?: string;
         message: string;
@@ -216,6 +235,15 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
       return (
         <div data-testid="editor-instance">
           <span>{`${mountId}:${initial.title}`}</span>
+          {/* The app-bar-navigation slice: `App` carries both straight through to
+              `ApplicationTitlebar` without rendering them itself (App.tsx's own comment on why).
+              Surfaced here, each in its own marker, so a route test can prove the route supplies
+              both without needing the real, router-agnostic `App` -- which is also why this mock
+              renders them as opaque markers rather than trying to interpret their content: this
+              mock has no opinion on what a breadcrumb or an account menu look like, only on
+              whether the route handed one in. */}
+          {accountMenu !== undefined && <div data-testid="account-menu-slot">{accountMenu}</div>}
+          {breadcrumb !== undefined && <div data-testid="breadcrumb-slot">{breadcrumb}</div>}
           {/* The screenplay-invitations slice's read-only fix: the route hands the editor the
               viewer's own effective role, and `App` ranks `'reviewer'` ahead of entitlement as a
               read-only reason (App.tsx's `viewerRole` and `readOnlyReason`). Surfaced here so a
@@ -306,6 +334,7 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
 
 export function resetRouteHarness() {
   routeState.editorMounts = 0;
+  routeState.matches = [];
   routeState.mutationError = false;
   routeState.mutationErrorValue = undefined;
   routeState.navigate.mockReset();

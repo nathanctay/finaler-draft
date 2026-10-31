@@ -611,9 +611,12 @@ describe('revision diff page: the editor’s chrome, not a plainer page', () => 
 
     const titlebar = main().querySelector('.titlebar');
     expect(titlebar).not.toBeNull();
-    expect(
-      screen.getByRole('link', { name: 'Finaler Draft — back to your projects' }),
-    ).toHaveAttribute('href', '/projects');
+    // The app-bar-navigation slice's Task 2: the comparison is "also inside a project" (this
+    // route's own module comment), so its brand returns there, with the wipe, same as the editor.
+    expect(screen.getByRole('link', { name: 'Finaler Draft — Return to project' })).toHaveAttribute(
+      'href',
+      `/projects/${projectId}`,
+    );
     expect(titlebar?.querySelector('.document-title')?.textContent).toBe('Hollow Heart Comparison');
     // No save dot: nothing on this screen is saving, so there is no document state for one to report.
     expect(titlebar?.querySelector('.save-dot')).toBeNull();
