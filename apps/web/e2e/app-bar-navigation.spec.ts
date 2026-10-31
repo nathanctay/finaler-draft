@@ -183,3 +183,47 @@ test('the account menu trigger clears WCAG 1.4.3 against the bar behind it', asy
   const background = toHexColor(measured.triggerBackground, 'account menu trigger background');
   expect(contrastRatio(color, background)).toBeGreaterThanOrEqual(4.5);
 });
+
+/**
+ * The bar's height on a screen that is not the editor.
+ *
+ * `.titlebar` takes its height from `grid-area: titlebar` inside `.application`, whose
+ * `grid-template-rows` reserves a track for it. The four plain routes wearing the same bar are not
+ * that grid, so the bar collapsed to content height there and read as a thin strip -- the owner's
+ * "much too thin. There does not seem to be any vertical padding."
+ *
+ * Measured rather than asserted from the stylesheet, because the first attempt at this fix set
+ * `min-height: var(--fd-shell-titlebar-row)` while that variable was still declared on
+ * `.application`. On a plain route it resolved to nothing, the declaration was invalid, and the
+ * bar kept collapsing -- with the rule sitting right there in the file looking correct. Only a
+ * real measurement distinguishes "the rule is present" from "the rule applies".
+ */
+test('the bar is the same height off the editor grid as on it', async ({ page }) => {
+  await page.goto('/sign-in');
+  const measured = await page.evaluate(() => {
+    document.body.innerHTML = '';
+
+    // The editor: the bar inside the shell grid that reserves a track for it.
+    const shell = document.createElement('div');
+    shell.innerHTML =
+      '<main class="application"><header class="titlebar" id="in-grid">' +
+      '<span class="brand">F</span></header></main>';
+    document.body.append(shell);
+
+    // A plain route: the same bar, no grid at all.
+    const plain = document.createElement('div');
+    plain.innerHTML =
+      '<main class="project-screen"><header class="titlebar" id="off-grid">' +
+      '<span class="brand">F</span></header></main>';
+    document.body.append(plain);
+
+    const read = (id: string) =>
+      document.querySelector<HTMLElement>(`#${id}`)!.getBoundingClientRect().height;
+    return { inGrid: read('in-grid'), offGrid: read('off-grid') };
+  });
+
+  // Both real, and equal: one variable drives the editor's track and the plain bar's min-height.
+  expect(measured.inGrid).toBeGreaterThan(30);
+  expect(measured.offGrid).toBeGreaterThan(30);
+  expect(measured.offGrid).toBeCloseTo(measured.inGrid, 0);
+});

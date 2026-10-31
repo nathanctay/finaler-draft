@@ -67,9 +67,19 @@ declare module '@tanstack/router-core' {
  * twice, not two coincidentally similar ones: a router-aware component, passed to a
  * dependency-free bar as a node.
  */
+/** Trailing slashes are not significant in a route path, and the router is not consistent about
+ * emitting them, so both sides of the self-reference comparison below are normalised before being
+ * compared. `/` itself is left alone rather than reduced to an empty string. */
+function normalisePath(path: string): string {
+  return path.length > 1 ? path.replace(/\/+$/u, '') : path;
+}
+
 export function RouteBreadcrumb() {
   const matches = useMatches();
   const navigate = useNavigate();
+
+  // The deepest match is, by definition, where the writer currently is.
+  const here = normalisePath(matches[matches.length - 1]?.pathname ?? '');
 
   const crumbs = matches.flatMap((match) => {
     const context: RouteBreadcrumbContext = {
@@ -79,7 +89,21 @@ export function RouteBreadcrumb() {
     return (match.staticData.breadcrumb ?? []).flatMap((crumb) => {
       const label = crumb.label(context);
       if (label === undefined) return [];
-      return [{ key: `${match.id}:${label}`, label, to: crumb.to(context) }];
+      const to = crumb.to(context);
+      // A crumb pointing at the current location is not an ancestor, so it is not part of the
+      // trail. Without this the project screen rendered "Projects / Project 2 / Project 2" -- the
+      // `$projectId` layout contributes the project's crumb for its descendants to inherit, and
+      // that screen *is* the project, so the crumb and its own `documentTitle` were the same thing
+      // twice, the first of them a link to the page already being viewed. The owner reported
+      // exactly that: "the first 'project2' seeming to be a link, but obviously it does not go
+      // anywhere different because thats where we are."
+      //
+      // Dropped here, in the one place that renders trails, rather than by having that screen pass
+      // no `documentTitle`: the duplication is a property of "an ancestor crumb resolving to the
+      // current page", which any future screen can reproduce -- the Beat Board and Outline Editor
+      // will both sit under a screenplay whose own crumb they inherit.
+      if (normalisePath(to) === here) return [];
+      return [{ key: `${match.id}:${label}`, label, to }];
     });
   });
 

@@ -53,6 +53,9 @@ export const routeState: {
     id: string;
     loaderData?: unknown;
     params: Record<string, string>;
+    /** The match's own resolved path. `RouteBreadcrumb` reads the deepest one to recognise, and
+     * drop, a crumb that points at the page already being viewed. */
+    pathname?: string;
     staticData: { breadcrumb?: unknown };
   }>;
   mutationError: boolean;

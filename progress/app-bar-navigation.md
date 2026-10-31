@@ -163,3 +163,73 @@ Run by the lead against the finished branch, after the two late conversions:
 How the dark bar reads on the three plain screens is a judgement no measurement settles. The specs
 prove it _is_ the dark surface everywhere and that the account trigger clears 4.5:1 against it;
 whether the projects list looks better for it is the owner's call on sight.
+
+## Two defects the owner found on sight
+
+### The project's own name rendered twice
+
+> "I click into a project called 'project 2' and the top bar is 'Projects/Project2/Project2', with
+> the first 'project2' seeming to be a link, but obviously it does not go anywhere different
+> because thats where we are."
+
+The `$projectId` layout contributes the project's crumb so that every descendant inherits it, and
+the project screen also passes `documentTitle={projectTitle}`. On that one screen those are the same
+thing, so the name appeared twice — once as a link to the page already open, once as the current
+segment.
+
+Fixed in `RouteBreadcrumb`, not on the screen: a crumb resolving to the current location is not an
+ancestor, so it is not part of the trail. Doing it on the screen (by passing no `documentTitle`)
+would have left a link to the current page in the trail and fixed only this instance. The property
+is "an inherited ancestor crumb resolved to the current page", which any future screen can
+reproduce — the Beat Board and Outline Editor will both sit beneath a screenplay whose crumb they
+inherit, and the screenplay screen itself has the same shape as the project screen does now.
+
+Paths are compared with trailing slashes normalised, since the router is not consistent about
+emitting them and one would put the duplicate straight back.
+
+### The bar collapsed to a thin strip off the editor grid
+
+> "The top bar is also much too thin. There does not seem to be any vertical padding."
+
+`.titlebar` has `padding: 0 12px` — no vertical padding at all — and no height of its own. Its only
+height came from `grid-area: titlebar` inside `.application`, whose `grid-template-rows` reserves
+`--fd-shell-titlebar-row` for it. The four plain routes now wearing the same bar are not that grid
+(`.project-screen` has no rule in the stylesheet at all), so there it sized to its content:
+**15px against the editor's 38px**, measured.
+
+Fixed with `min-height: var(--fd-shell-titlebar-row)` on `.titlebar`, so one variable drives both
+contexts and a future change to the shell's track moves them together. Vertical padding was the
+other option and is worse: it would need to be kept in step with the track by hand, and inside the
+grid it would add to the 38px rather than fill it.
+
+**The first attempt at this silently did nothing, which is the part worth keeping.**
+`--fd-shell-titlebar-row` was declared on `.application`, not `:root`. On a plain route it resolved
+to nothing, the `min-height` declaration was therefore invalid, and the bar kept collapsing — with
+the rule sitting in the file looking entirely correct. The variable is now on `:root`, with a
+comment saying why it lives there while the shell's other four row tracks do not: nothing outside
+the editor renders a menubar, toolbar, banner or status bar, so those have no second context to be
+shared with.
+
+### Verification
+
+`test:system` is **90**. The new case measures the bar in both contexts and asserts they are equal
+and both real, rather than reading the stylesheet — the only way to tell "the rule is present" from
+"the rule applies", which is exactly the distinction the failed first attempt turned on.
+
+| mutation                                               | result                                                       |
+| ------------------------------------------------------ | ------------------------------------------------------------ |
+| `--fd-shell-titlebar-row` moved back to `.application` | fails: off-grid height **15px**, the silent no-op reproduced |
+| `min-height` removed outright                          | fails: off-grid height **15px**                              |
+| self-referential crumbs no longer dropped              | 2 unit tests fail, including the trailing-slash case         |
+| trailing-slash normalisation removed                   | 1 unit test fails                                            |
+
+Gates after both fixes: `lint` 0, `typecheck` 0, `pnpm test` **1093** zero failures,
+`test:integration` 0, `test:system` **90**, `check:bundle-budget` 0.
+
+### Still open for the owner
+
+Whether the editor should show the whole trail or only the screenplay name. It is the same
+`ApplicationTitlebar` on every screen, so the trail is shared rather than bolted onto the editor —
+and with the duplicate gone the editor reads `Projects / <project> / <screenplay>`, where the middle
+segment is the same one-click way back to the project that the brand's wipe offers. Trimming it to
+the name alone is a one-line change if the owner still wants it after seeing it fixed.
