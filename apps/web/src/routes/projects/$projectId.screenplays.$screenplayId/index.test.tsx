@@ -142,12 +142,13 @@ describe('screenplay page', () => {
   /**
    * The app-bar-navigation slice: `App` (router-agnostic by design) never builds its own account
    * menu or breadcrumb -- this route, which does have router and query-client context, mounts
-   * `<AccountMenu />` and `<RouteBreadcrumb />` itself and hands the result in. `editorModuleMock`'s
+   * `<AccountMenu />` itself and hands the result in -- and, for the editor specifically, hands in no
+   * breadcrumb at all. `editorModuleMock`'s
    * own comment covers why the mock renders them as opaque markers rather than real chrome: this
    * is a test of the *route*, proving it supplies both, not of what either renders -- that is
    * `accountMenu.test.tsx` and `routeBreadcrumb.test.tsx`'s job.
    */
-  it('hands the editor a real account menu and breadcrumb, not nothing', () => {
+  it('hands the editor a real account menu, and deliberately no breadcrumb', () => {
     setQueries({
       id: screenplayId,
       projectId,
@@ -166,7 +167,10 @@ describe('screenplay page', () => {
     expect(
       screen.getByTestId('account-menu-slot').querySelector('button[aria-label="Account menu"]'),
     ).not.toBeNull();
-    expect(screen.getByTestId('breadcrumb-slot')).toBeInTheDocument();
+    // No trail here by the owner's decision: the editor's bar carries the screenplay's name
+    // alone, and the brand's "Return to project" wipe is the way back up. Asserted rather than
+    // merely omitted, so putting a trail back is a deliberate act that fails a test first.
+    expect(screen.queryByTestId('breadcrumb-slot')).not.toBeInTheDocument();
   });
 
   it('navigates to the revision-history route when the editor requests it', async () => {

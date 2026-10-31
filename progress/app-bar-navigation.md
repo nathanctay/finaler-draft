@@ -233,3 +233,26 @@ Whether the editor should show the whole trail or only the screenplay name. It i
 and with the duplicate gone the editor reads `Projects / <project> / <screenplay>`, where the middle
 segment is the same one-click way back to the project that the brand's wipe offers. Trimming it to
 the name alone is a one-line change if the owner still wants it after seeing it fixed.
+
+## The editor shows the screenplay's name alone
+
+The owner's call after seeing the trail working: _"Lets have just the screenplay name on the
+editor."_
+
+So the editor's bar is brand, screenplay title, account menu — no path. The editor route simply
+stops passing a `breadcrumb`, which is the whole change: `App` forwards whatever it is handed and
+builds nothing itself, so one line in one route decides it. The revision-comparison view next door
+keeps its own trail, independently, because it supplies its own.
+
+Nothing becomes unreachable. The project crumb's destination is the same place the brand's "Return
+to project" wipe goes, so removing the trail stops the editor's bar saying the same thing twice
+rather than removing a way out. That the two coincided is also why this was the right screen to trim
+and the plain screens were not: on those the brand goes to the dashboard, so the trail is the only
+way up one level.
+
+Reverting is adding `breadcrumb={<RouteBreadcrumb />}` back to the editor route, and the comment
+there says so.
+
+The route test was inverted rather than deleted: it now asserts the editor is handed **no**
+breadcrumb, so restoring one is a deliberate act that fails a test first instead of drifting back in
+unnoticed. Mutation: re-adding the prop fails exactly that test, named for the decision.
