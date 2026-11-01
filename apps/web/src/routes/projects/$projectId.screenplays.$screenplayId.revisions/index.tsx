@@ -4,7 +4,6 @@ import { z } from 'zod';
 import { api, type RevisionListItem } from '../../../api.js';
 import { AccountMenu } from '../../../accountMenu.js';
 import { ApplicationTitlebar } from '../../../applicationShell.js';
-import { RouteBreadcrumb } from '../../../routeBreadcrumb.js';
 import {
   formatRevisionCreatedAt,
   humanizeRevisionKind,
@@ -13,30 +12,6 @@ import {
 import { guardSessionUser } from '../../../session.js';
 
 export const Route = createFileRoute('/projects/$projectId/screenplays/$screenplayId/revisions/')({
-  // The screenplay's own crumb, resolved the same way `$projectId.tsx` resolves the project's --
-  // a loader priming the cache, and a label read off `loaderData`. `Projects` and the project
-  // title are inherited from that pathless layout and are deliberately not restated here.
-  //
-  // This crumb is what replaces the "Back to screenplay" link this header used to carry: the way
-  // back is now a segment of the trail rather than a second, separate affordance saying the same
-  // thing. `ensureQueryData` on the *same* `['screenplay', id]` key the editor route already uses,
-  // so arriving here from the editor is a cache hit rather than a second fetch.
-  loader: async ({ context, params }) => {
-    const { api } = await import('../../../api.js');
-    const screenplay = await context.queryClient.ensureQueryData({
-      queryKey: ['screenplay', params.screenplayId],
-      queryFn: () => api.screenplay(params.screenplayId),
-    });
-    return { screenplayTitle: screenplay.title };
-  },
-  staticData: {
-    breadcrumb: [
-      {
-        label: (ctx) => (ctx.loaderData as { screenplayTitle?: string }).screenplayTitle,
-        to: (ctx) => `/projects/${ctx.params.projectId}/screenplays/${ctx.params.screenplayId}`,
-      },
-    ],
-  },
   beforeLoad: async ({ context }) => {
     const user = await guardSessionUser(context.queryClient);
     if (!user) throw redirect({ to: '/sign-in' });
@@ -107,15 +82,39 @@ function RevisionHistoryPage() {
     <main className="project-screen">
       <ApplicationTitlebar
         accountMenu={<AccountMenu />}
-        // No `wipeLabel`: the owner's wipe ask was for the editor and the comparison. This screen
-        // reaches its screenplay through the breadcrumb's own segment instead.
+        /*
+         * No `breadcrumb`, for the same reason the editor and the comparison have none: this is a
+         * view of a screenplay, and a "Projects / project / screenplay" trail in front of its name
+         * claimed a hierarchy the owner judged noise rather than navigation.
+         *
+         * No `wipeLabel` either -- the brand still goes to the dashboard here, not to the
+         * screenplay. The way back to the screenplay is the explicit button beside the heading
+         * below, which is what makes removing the trail safe: without it this page would have had
+         * no route back to the screenplay it belongs to at all.
+         */
         brand={{ href: '/projects' }}
-        breadcrumb={<RouteBreadcrumb />}
         documentTitle="Revision history"
       />
       <section className="project-list">
         <p className="eyebrow">HISTORY</p>
-        <h1>Revision history</h1>
+        {/* The heading and the way back share one row, right-aligned, as the owner asked.
+            `primary-button` to match "Back to revisions" -- the comparison view's own way out,
+            which is the closest existing control and the one the owner pointed at.
+
+            Still a router `Link` wearing that class, exactly as that control is: it is a navigation
+            to a known route, so it should open in a new tab and preview its destination on hover,
+            which a `<button>` calling `navigate` gives up for nothing. Button appearance, link
+            semantics. */}
+        <div className="section-head">
+          <h1>Revision history</h1>
+          <Link
+            className="primary-button"
+            params={{ projectId, screenplayId }}
+            to="/projects/$projectId/screenplays/$screenplayId"
+          >
+            Back to screenplay
+          </Link>
+        </div>
         {revisions.isLoading ? (
           <p>Loading revision history…</p>
         ) : revisions.isError ? (

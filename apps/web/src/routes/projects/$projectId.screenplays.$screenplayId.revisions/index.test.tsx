@@ -124,64 +124,71 @@ describe('revision history page', () => {
     );
   });
 
-  describe('loader', () => {
+  /*
+   * This page declared a loader and a single screenplay crumb, both existing only to put
+   * "Projects / project / screenplay" in front of its name. The owner judged that trail noise on a
+   * view *of* a screenplay -- the same call already made for the editor and the comparison -- so
+   * the trail, the crumb and the loader that fed it are all gone.
+   *
+   * What replaced the way back is an explicit control rather than a trail segment, which is the
+   * part that matters: with no crumb and a brand pointing at the dashboard, this page would
+   * otherwise have had no route back to the screenplay it belongs to.
+   */
+  it('declares no breadcrumb and no loader, and renders no trail', () => {
+    expect(Route.options.staticData?.breadcrumb).toBeUndefined();
+    expect(Route.options.loader).toBeUndefined();
+
     /*
-     * Tested because the crumb tests below feed `loaderData` in directly and so never exercise
-     * this -- verified by mutation: replacing the loader's return with `{}` left every one of them
-     * green. The loader is the half that can silently cost the trail its screenplay segment.
+     * `routeState.matches` is populated on purpose. The harness defaults it to `[]`, and with an
+     * empty match stack `RouteBreadcrumb` renders nothing whether this route passes the prop or
+     * not -- so the link assertion below is vacuous without a fixture, and re-adding the prop
+     * passed this test until these matches existed. Verified by mutation both ways.
+     *
+     * These are the `$projectId` layout's real crumbs, which this route nests beneath and would
+     * inherit if it rendered a trail at all.
      */
-    const loader = Route.options.loader as (opts: {
-      context: { queryClient: { ensureQueryData: (options: unknown) => Promise<unknown> } };
-      params: { projectId: string; screenplayId: string };
-    }) => Promise<{ screenplayTitle: string | undefined }>;
-
-    it('reads the title from the same ["screenplay", id] query the editor route already primes', async () => {
-      // The shared key is the point: arriving here from the editor is a cache hit, not a refetch.
-      const ensureQueryData = vi.fn().mockResolvedValue({ id: screenplayId, title: 'Act One' });
-      const result = await loader({
-        context: { queryClient: { ensureQueryData } },
+    routeState.matches = [
+      {
+        id: '/projects/$projectId',
+        loaderData: { projectTitle: 'Hollow Heart' },
+        params: { projectId },
+        pathname: `/projects/${projectId}`,
+        staticData: {
+          breadcrumb: [
+            { label: () => 'Projects', to: () => '/projects' },
+            {
+              label: (ctx: { loaderData: { projectTitle: string } }) => ctx.loaderData.projectTitle,
+              to: (ctx: { params: { projectId: string } }) => `/projects/${ctx.params.projectId}`,
+            },
+          ],
+        },
+      },
+      {
+        id: '/projects/$projectId/screenplays/$screenplayId/revisions/',
         params: { projectId, screenplayId },
-      });
+        pathname: `/projects/${projectId}/screenplays/${screenplayId}/revisions`,
+        staticData: {},
+      },
+    ];
 
-      expect(ensureQueryData).toHaveBeenCalledWith(
-        expect.objectContaining({ queryKey: ['screenplay', screenplayId] }),
-      );
-      expect(result).toEqual({ screenplayTitle: 'Act One' });
-    });
+    routeState.query = { data: [], isError: false, isLoading: false };
+    render(<RevisionHistoryPage />);
+    expect(document.querySelectorAll('.breadcrumb-link')).toHaveLength(0);
   });
 
-  describe('staticData.breadcrumb', () => {
-    /*
-     * The way back to the screenplay used to be a "Back to screenplay" link in this screen's own
-     * hand-rolled header. The app-bar slice replaced that header with the shared titlebar, and the
-     * way back became a *segment of the breadcrumb trail* rather than a second affordance saying
-     * the same thing -- so this asserts the declaration, exactly as the project layout's own test
-     * does for its two crumbs. `routeBreadcrumb.test.tsx` owns how a declaration becomes rendered
-     * links; this file's job is only to prove this route declares the right one.
-     *
-     * `Projects` and the project's own title are deliberately absent here: they are inherited from
-     * the `$projectId` pathless layout every project-scoped route nests under, and restating them
-     * is the duplication that layout exists to prevent.
-     */
-    const crumbs = Route.options.staticData!.breadcrumb!;
+  it('offers an explicit way back to the screenplay, beside the heading', () => {
+    routeState.query = { data: [], isError: false, isLoading: false };
+    render(<RevisionHistoryPage />);
 
-    it('declares exactly one crumb -- the screenplay, not the ancestors it inherits', () => {
-      expect(crumbs).toHaveLength(1);
-    });
-
-    it('points back at the live screenplay, labelled with its real title', () => {
-      const context = {
-        loaderData: { screenplayTitle: 'Act One' },
-        params: { projectId, screenplayId },
-      };
-      expect(crumbs[0]!.label(context)).toBe('Act One');
-      expect(crumbs[0]!.to(context)).toBe(`/projects/${projectId}/screenplays/${screenplayId}`);
-    });
-
-    it('omits the label rather than inventing one when the loader resolved no title', () => {
-      // Same rule the project crumb follows: `undefined` drops the segment, never a placeholder.
-      const context = { loaderData: {}, params: { projectId, screenplayId } };
-      expect(crumbs[0]!.label(context)).toBeUndefined();
-    });
+    const back = screen.getByRole('link', { name: 'Back to screenplay' });
+    // The route *pattern*, not an interpolated path: `routeHarness`'s `Link` stand-in renders the
+    // raw `to` prop and ignores `params`, which is the convention every other link assertion in
+    // this file follows. What this pins is the destination route, which is the part that can regress.
+    expect(back).toHaveAttribute('href', '/projects/$projectId/screenplays/$screenplayId');
+    // Beside the heading, not elsewhere on the page: the owner asked for it inline with
+    // "Revision history", so this pins the relationship rather than mere presence.
+    expect(back.closest('.section-head')?.querySelector('h1')).toHaveTextContent(
+      'Revision history',
+    );
   });
 });

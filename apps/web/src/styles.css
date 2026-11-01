@@ -2165,6 +2165,35 @@ select:focus-visible,
   letter-spacing: -0.04em;
 }
 
+/*
+ * A section heading with one action aligned to its right -- the revision-history list's "Back to
+ * screenplay" beside its own `<h1>`.
+ *
+ * `center`, not `baseline`: the action is a filled `primary-button`, and baseline-aligning a padded
+ * control against a 28px heading hangs its box below the heading's baseline so it reads as sitting
+ * low. (Baseline is the right choice for a bare text link, which this was before the owner asked
+ * for it to match "Back to revisions".)
+ *
+ * The heading's own `margin: 8px 0 28px` moves to this container, and the heading is zeroed inside
+ * it. In a flex row those margins are still part of the heading's box, so centring against them
+ * would push the button upward by half the 28px -- and hoisting the spacing keeps the page's
+ * vertical rhythm byte-identical to the version without a button.
+ *
+ * Wraps on a narrow viewport rather than letting the two collide.
+ */
+.section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 0 28px;
+}
+
+.section-head h1 {
+  margin: 0;
+}
+
 .eyebrow {
   color: var(--text-08);
   font-size: 11px;
