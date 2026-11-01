@@ -1,4 +1,37 @@
 :root {
+  /*
+   * The title bar's height, on `:root` rather than on `.application` with the shell's other four
+   * row tracks. It is the one chrome dimension that two different layout contexts need: the
+   * editor's grid reserves it as a track, and the four plain routes wearing the same bar have no
+   * such grid, so `.titlebar`'s own `min-height` reads it directly. Declared on `.application` it
+   * resolved to nothing on those routes, which silently made that `min-height` invalid -- the bar
+   * kept collapsing to content height with the rule apparently in place.
+   *
+   * The other `--fd-shell-*-row` tracks stay on `.application`: nothing outside the shell renders
+   * a menubar, toolbar, banner or status bar, so they have no second context to be shared with.
+   */
+  /*
+   * One half of the brand's hover reveal. The logo clips away for this long, then the label clips
+   * in for the same again, so the whole gesture is twice this. Read by both panels' duration *and*
+   * their delay -- see `.brand-face` on why those two must be the same number.
+   *
+   * 200ms, not the 100ms this started at. At 100ms each the two phases ran back to back inside
+   * 200ms total and read as a single blur rather than a sequence -- the owner could not tell the
+   * staging was happening without screen-recording it and slowing the playback down. 100ms is
+   * around the floor at which motion registers at all, so a staged animation built from two of
+   * them has no chance of reading as staged.
+   *
+   * Tunable from here alone: this is the only number either phase reads, so trying a different
+   * tempo is editing this one declaration.
+   *
+   * **Read only by the staged-clip reveal, which is currently the commented-out alternative** --
+   * see the two-blocks comment above `.brand-face`. Deliberately kept rather than deleted with the
+   * rest of that block: uncommenting it has to be the whole switch, and a reader finding the
+   * variable apparently unused should know why before removing it. It goes when that alternative
+   * does.
+   */
+  --fd-brand-wipe-phase: 200ms;
+  --fd-shell-titlebar-row: 38px;
   --surface-01: #fff;
   --surface-02: #fbfbf7;
   --surface-03: #f7f8f8;
@@ -249,7 +282,6 @@ select:focus-visible,
    * one number. It now overrides one property, and `.shell-without-toolbar`'s higher specificity
    * keeps winning over it with no second copy to keep in step.
    */
-  --fd-shell-titlebar-row: 38px;
   --fd-shell-menubar-row: 31px;
   --fd-shell-banner-row: 0px;
   --fd-shell-toolbar-row: 47px;
@@ -307,6 +339,22 @@ select:focus-visible,
   grid-area: titlebar;
   align-items: center;
   gap: 24px;
+  /*
+   * `min-height`, not a `height`, and read from the editor shell's own track variable rather than
+   * restated as a second 38px.
+   *
+   * `grid-area: titlebar` gives this element its height only inside `.application`, whose
+   * `grid-template-rows` reserves `--fd-shell-titlebar-row` for it. The four plain routes that
+   * now wear this same bar are not that grid -- `.project-screen` has no rule of its own at all --
+   * so there the bar collapsed to its content height and read as a thin strip with no vertical
+   * breathing room. The owner reported it as "much too thin. There does not seem to be any
+   * vertical padding."
+   *
+   * One variable keeps the editor and the plain screens identical by construction: a future change
+   * to the shell's track moves both together, where vertical padding here would have to be kept in
+   * sync with it by hand and would also add to the 38px inside the grid rather than filling it.
+   */
+  min-height: var(--fd-shell-titlebar-row);
   padding: 0 12px;
   background: var(--surface-16);
   color: var(--text-01);
@@ -318,7 +366,18 @@ select:focus-visible,
   align-items: center;
   gap: 8px;
   font-weight: 650;
-  min-width: 190px;
+  /*
+   * The width of the window the two reveal panels travel through, not just the brand's own
+   * footprint: `.brand-wipe` clips to this box, so the wider it is the further the incoming label
+   * has to come from. At 190px the owner found the label read as arriving from too far to the
+   * right -- the arrow appears at the far edge well before its text follows it across.
+   *
+   * 175px is the narrowest this can go while both panels still fit without being cut off, which is
+   * measured rather than guessed: `app-bar-logo.spec.ts` asserts each panel's natural width against
+   * this box in a real browser, so taking it lower fails there instead of silently truncating
+   * either "Finaler Draft" or "Return to project".
+   */
+  min-width: 175px;
   color: inherit;
   text-decoration: none;
 }
@@ -334,9 +393,228 @@ select:focus-visible,
   font-size: 10px;
 }
 
-.document-title {
+/*
+ * The editor's and the revision-diff view's own brand (`applicationShell.tsx`'s `brand.wipeLabel`
+ * branch): the owner's "wipe from the logo to 'return to project'" -- a slide, where one panel
+ * replaces the other by sliding out as its replacement slides in, not the fade the owner did not
+ * ask for. `height` is explicit because the two panels below are both `position: absolute`,
+ * which takes them out of flow -- a `position: relative` box with no in-flow content of its own
+ * collapses to zero height, and `.brand`'s usual height (the single line `display: flex` sizes
+ * to) would disappear along with it.
+ *
+ * `overflow: hidden` bounds both panels to `.brand`'s own `min-width`, so neither can widen the
+ * bar while it animates.
+ *
+ * **Neither panel ever moves.** They are stacked in the same box and revealed by a single
+ * travelling edge, which is what the owner asked for: "both start in place, but only the logo is
+ * visible, and on hover it wipes so the visibility on the logo goes away from right to left on
+ * hover, like one of those image comparers where you can drag a line in the middle to reveal one
+ * image or the other."
+ *
+ * `clip-path: inset()` does that, and the two insets are complementary so there is exactly one
+ * boundary rather than two independent reveals. The logo's *right* inset grows 0 to 100%, so it is
+ * cut away from its right edge leftward; the label's *left* inset shrinks 100% to 0, so it appears
+ * from the right edge leftward. At any moment the logo occupies everything left of the edge and the
+ * label everything right of it.
+ *
+ * Deliberately not `transform`, which is what this replaced: translating the panels slides them
+ * past the box, so the logo's leftmost characters leave first and the two never share a boundary.
+ * Deliberately not `opacity`, which would cross-fade both in place with no edge at all. Only
+ * clipping gives a draggable-divider reveal. `clip-path` is also compositor-animated, so this costs
+ * no more than the transform version did.
+ */
+.brand-wipe {
+  position: relative;
+  overflow: hidden;
+  height: 22px;
+}
+
+.brand-face,
+.brand-wipe-label {
+  display: flex;
+  position: absolute;
+  inset: 0;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+/*
+ * ===========================================================================
+ *  TWO REVEALS, ONE ACTIVE. Switching is commenting one block and uncommenting
+ *  the other -- nothing else, and no test changes.
+ * ===========================================================================
+ *
+ * The owner liked both and asked to keep the unused one to hand: "include the sequenced transition
+ * in the code, perhaps commented out, so switching is as easy as switching which line(s) is
+ * commented."
+ *
+ * A deliberate, bounded exception to this project's "keep only active code" rule, not an
+ * oversight. One of the two blocks below is always live; they are the only place either mechanism
+ * is expressed; and `apps/web/e2e/app-bar-logo.spec.ts` asserts only the behaviour the two share --
+ * the logo in view at rest, the label in view on hover *and* on keyboard focus, reversible on
+ * leaving, geometric rather than a cross-fade, and neither panel growing the bar. It measures that
+ * by hit-testing across the brand's box, which is the one thing both mechanisms affect: a region
+ * translated out of the box and a region clipped away are equally absent from it.
+ *
+ * That is what makes this a genuine one-edit switch, and it was verified in both directions -- the
+ * whole suite passes with either block live. A spec pinning `transform` or `clip-path` would have
+ * meant flipping the comments also broke the tests, which is the friction the toggle exists to
+ * avoid.
+ *
+ * When one is settled on, delete the other. `progress/app-bar-navigation.md` records both in full
+ * and each shipped as its own commit, so removing the loser loses nothing.
+ */
+
+/* The label's back-arrow. Its own element so it can be hidden from assistive technology while
+   the label text stays the accessible name -- see `applicationShell.tsx`. Sized and coloured off
+   the label's own text rather than given a literal, so it tracks the bar if that changes. */
+.brand-wipe-arrow {
+  flex: 0 0 auto;
+  font-size: 1em;
+  line-height: 1;
+  opacity: 0.75;
+}
+
+/* --- ACTIVE: slide. Both panels translate; the logo leaves as the label arrives. --- */
+.brand-face,
+.brand-wipe-label {
+  transition: transform 180ms ease;
+}
+
+.brand-face {
+  transform: translateX(0);
+}
+
+.brand-wipe-label {
+  transform: translateX(100%);
+}
+
+.brand-wipe:hover .brand-face,
+.brand-wipe:focus-visible .brand-face {
+  transform: translateX(-100%);
+}
+
+.brand-wipe:hover .brand-wipe-label,
+.brand-wipe:focus-visible .brand-wipe-label {
+  transform: translateX(0);
+}
+
+/* --- ALTERNATIVE: staged clip. The logo clips fully away, then the label clips in. The delays sit
+       on the resting rules as well as the hovered ones, so leaving reverses the order rather than
+       replaying it. `--fd-brand-wipe-phase` is both the duration and the trailing delay and must
+       stay one value: shorter overlaps the halves back into a single travelling edge, longer
+       leaves a gap of empty bar between them.
+
+.brand-face,
+.brand-wipe-label {
+  transition: clip-path var(--fd-brand-wipe-phase) ease;
+}
+
+.brand-face {
+  clip-path: inset(0 0 0 0);
+  transition-delay: var(--fd-brand-wipe-phase);
+}
+
+.brand-wipe-label {
+  clip-path: inset(0 0 0 100%);
+  transition-delay: 0s;
+}
+
+.brand-wipe:hover .brand-face,
+.brand-wipe:focus-visible .brand-face {
+  clip-path: inset(0 100% 0 0);
+  transition-delay: 0s;
+}
+
+.brand-wipe:hover .brand-wipe-label,
+.brand-wipe:focus-visible .brand-wipe-label {
+  clip-path: inset(0 0 0 0);
+  transition-delay: var(--fd-brand-wipe-phase);
+}
+--- */
+
+/*
+ * The owner was specific about the motion itself ("wipe"), which is exactly the kind of movement
+ * `prefers-reduced-motion` exists to suppress for a reader who has asked for it -- the label
+ * still swaps on hover/focus (that is the control's actual behaviour, and the accessible name was
+ * never animation-dependent in the first place, see `ApplicationTitlebar`'s own comment), only
+ * the transition between the two states is removed.
+ *
+ * The hovered selectors are listed as well as the resting ones, at matching specificity, and the
+ * delay is zeroed explicitly. `transition: none` on the base rules alone would in fact be enough --
+ * with no transition property there is nothing for a delay to postpone -- but
+ * `.brand-wipe:hover .brand-face` is two classes to this block's one, so its `transition-delay`
+ * would still win the cascade and leave a reader deducing that the delay is inert from the property
+ * reset. Saying both is cheaper than that deduction, and survives someone later giving these panels
+ * a transition that reduced motion is meant to keep.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .brand-face,
+  .brand-wipe-label,
+  .brand-wipe:hover .brand-face,
+  .brand-wipe:focus-visible .brand-face,
+  .brand-wipe:hover .brand-wipe-label,
+  .brand-wipe:focus-visible .brand-wipe-label {
+    transition: none;
+    transition-delay: 0s;
+  }
+}
+
+/*
+ * The breadcrumb trail (`applicationShell.tsx`'s `nav.breadcrumb`), centred in the bar exactly as
+ * `.document-title` alone used to be -- `flex: 1` and the centring both moved here from that rule
+ * (below) when the trail was added in front of it, so the whole nav (every ancestor link plus the
+ * current title) centres as one unit rather than the current title alone drifting off-centre
+ * whenever a screen has ancestors to show.
+ */
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex: 1;
-  text-align: center;
+  min-width: 0;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.breadcrumb-segment {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/*
+ * Rendered as either an `<a>` (a router-agnostic caller's `href`) or a `<button>` (a router-aware
+ * caller's `onSelect`) -- see `BreadcrumbAncestor`'s own comment -- styled identically either way,
+ * so a reader cannot tell which kind of caller built this trail from looking at it. `--text-02`,
+ * not the current segment's `--text-01` (inherited from `.titlebar`): a visibly different colour is
+ * what tells a reader this word is a link and the one after the last separator is not, since
+ * nothing else here (no underline at rest, matching every other chrome control's resting state)
+ * says so.
+ */
+.breadcrumb-link {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-02);
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.breadcrumb-link:hover,
+.breadcrumb-link:focus-visible {
+  text-decoration: underline;
+}
+
+.breadcrumb-separator {
+  color: var(--text-03);
+  user-select: none;
+}
+
+.document-title {
   font-weight: 600;
 }
 
@@ -416,16 +694,54 @@ select:focus-visible,
   background: var(--feedback-error);
 }
 
-.account-button {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 1px solid var(--border-04);
-  border-radius: 50%;
+/*
+ * The account menu's wrapper (`AccountMenu`, accountMenu.tsx), rendered inside `.titlebar` on
+ * every screen now -- the working control the dead `<span className="account-button">` badge
+ * (the "FD" circle, never a real control) is gone in favour of. `position: relative` gives the
+ * sign-out failure message below a box to anchor to.
+ */
+.account-menu {
+  position: relative;
+}
+
+/*
+ * `OverflowMenu`'s own default trigger colour (`--text-09`, styles.css above) is tuned for the
+ * light surfaces every other instance of it sits on (the per-row menu, the File menu's
+ * `--surface-03`) and is close to unreadable against `.titlebar`'s dark `--surface-16` -- the same
+ * kind of override `.menu-file .overflow-menu-trigger` already applies for the (lighter, but still
+ * not white) menubar. `--text-01` matches the brand text and the current breadcrumb segment,
+ * which already sit on this exact background.
+ */
+.titlebar .overflow-menu-trigger {
+  color: var(--text-01);
+}
+
+.titlebar .overflow-menu-trigger:hover,
+.titlebar .overflow-menu-trigger[aria-expanded='true'] {
+  border-color: var(--border-07);
   background: var(--surface-15);
-  color: white;
-  font-size: 10px;
+}
+
+/*
+ * Floated below the trigger rather than given a layout row of its own: `.titlebar` is a fixed
+ * 38px grid track (`.application`'s own `--fd-shell-titlebar-row`), and the three plain routes
+ * that also now wear this bar have no spare block below it reserved for an error message either
+ * (the old `.sign-out-error` sat in the page body, below a header that was not in a fixed-height
+ * grid at all). `role="alert"` still announces it the instant it mounts regardless of where it is
+ * drawn.
+ */
+.account-menu .sign-out-error {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 200px;
+  margin: 0;
+  border: 1px solid var(--border-04);
+  border-radius: 2px;
+  background: var(--surface-01);
+  padding: 8px 10px;
+  white-space: normal;
 }
 
 .menubar,

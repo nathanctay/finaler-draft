@@ -1,5 +1,6 @@
 import { createFileRoute, useNavigate, useParams } from '@tanstack/react-router';
 import { z } from 'zod';
+import { AccountMenu } from '../../../accountMenu.js';
 import { api, type FetchedScreenplay, type PersistedScreenplay } from '../../../api.js';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { lazy, Suspense, useState } from 'react';
@@ -127,6 +128,17 @@ function ScreenplayPage() {
         </Suspense>
       )}
       <EditorWorkspace
+        accountMenu={<AccountMenu />}
+        /*
+         * Deliberately no `breadcrumb`. The owner's call after seeing the trail working: the editor
+         * shows the screenplay's name alone, not the path to it. The way back up is the brand's own
+         * "Return to project" wipe, which is the same destination the project crumb offered, so
+         * nothing becomes unreachable -- it stops being said twice in one bar.
+         *
+         * Reverting is adding `breadcrumb={<RouteBreadcrumb />}` back here. `App` forwards whatever
+         * it is handed and builds nothing itself, so this is the only line that decides it, and the
+         * comparison view next door keeps its own trail independently.
+         */
         entitlementReadOnly={entitlementReadOnly}
         initial={screenplay.data as PersistedScreenplay}
         {...(mayShare ? { onOpenSharing: () => setSharingOpen(true) } : {})}

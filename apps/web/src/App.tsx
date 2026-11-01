@@ -7,6 +7,7 @@ import {
   useState,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from 'react';
 import {
   DEFAULT_DOCUMENT_SETTINGS,
@@ -342,6 +343,8 @@ export interface HistoricalRevisionInfo {
 }
 
 export function App({
+  accountMenu,
+  breadcrumb,
   entitlementReadOnly,
   historicalRevision,
   initial = legacyInitial,
@@ -351,6 +354,25 @@ export function App({
   onScreenplayRenamed,
   viewerRole,
 }: {
+  /**
+   * Carried straight through to `ApplicationTitlebar`'s own `accountMenu` prop -- see that
+   * module's top comment for why it is a plain `ReactNode` (in practice, `<AccountMenu />`,
+   * accountMenu.tsx) rather than something this component builds or even knows the shape of.
+   * `App` itself must gain no `@tanstack/react-router`/`@tanstack/react-query` dependency to
+   * offer this, for the identical reason `onOpenRevisionHistory` below is a callback rather than
+   * this component navigating on its own: the live screenplay route supplies it, exactly as it
+   * already supplies `onOpenSharing`/`onOpenRevisionHistory`/`onScreenplayRenamed`.
+   */
+  accountMenu?: ReactNode;
+  /**
+   * Carried straight through to `ApplicationTitlebar`'s own `breadcrumb` prop (in practice,
+   * `<RouteBreadcrumb />`, routeBreadcrumb.tsx) -- the same seam as `accountMenu` immediately
+   * above, for the same reason. Never used to derive this screen's *own* current segment: that
+   * stays `displayedTitle`/`renameTitle` below, this component's own live, inline-renameable
+   * state, not something route-derived (`progress/app-bar-navigation.md`'s own note on why the
+   * trail and the document title are deliberately two different data sources).
+   */
+  breadcrumb?: ReactNode;
   entitlementReadOnly?: EntitlementReadOnly | undefined;
   historicalRevision?: HistoricalRevisionInfo | undefined;
   initial?: PersistedScreenplay;
@@ -2419,6 +2441,16 @@ export function App({
       }
       titlebar={
         <ApplicationTitlebar
+          accountMenu={accountMenu}
+          // The owner's second ask: the logo returns to *this screenplay's project*, not the
+          // dashboard, with a wipe on hover/focus -- see `BrandDestination`'s own comment.
+          // `initial.projectId` is plain data already on this component's own props (no
+          // `@tanstack/react-router` involved in building a path string), so this needs no new
+          // prop from the route the way `accountMenu`/`breadcrumb` do; it is computed here for
+          // the live editor and, for free, for the historical-revision preview too -- both are
+          // genuinely "inside a project" in the way the dashboard and Deleted items are not.
+          brand={{ href: `/projects/${initial.projectId}`, wipeLabel: 'Return to project' }}
+          breadcrumb={breadcrumb}
           documentTitle={displayedTitle}
           documentType="Screenplay"
           indicator={

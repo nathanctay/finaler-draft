@@ -12,10 +12,13 @@ import type {
   FdxUnknownType,
   FdxUnknownTypeResolutions,
 } from '@finaler-draft/fdx';
+import { AccountMenu } from '../../../accountMenu.js';
 import { api, MessageApiError, type ScreenplaySummary } from '../../../api.js';
+import { ApplicationTitlebar } from '../../../applicationShell.js';
 import { CreateScreenplaySplitButton } from '../../../components/CreateScreenplaySplitButton.js';
 import { DeletedRow } from '../../../components/DeletedRow.js';
 import { OverflowMenu } from '../../../components/OverflowMenu.js';
+import { RouteBreadcrumb } from '../../../routeBreadcrumb.js';
 
 // The route-level title schema (apps/api/src/projects.ts's `projectTitle`:
 // `z.string().trim().min(1).max(200)`) is stricter than `screenplaySchema`'s own 250-character
@@ -284,6 +287,16 @@ function ProjectPage() {
     queryKey: ['screenplays', projectId],
     queryFn: () => api.screenplays(projectId),
   });
+  // The same `['projects']` cache entry the parent `/projects/$projectId` layout's own `loader`
+  // already warmed for the breadcrumb's "<project title>" crumb (that route's own comment) --
+  // reading it here too, rather than fetching this project by itself, means this page's own
+  // current-title segment and the trail's ancestor crumb can never name two different projects.
+  // `undefined` (never a placeholder) while it resolves or for a non-member viewer -- the project
+  // screen is never reached by a screenplay-scoped-only invitee in the first place (they have no
+  // membership here to land on; see `routes/projects/index.tsx`'s `SharedScreenplayRow` comment),
+  // so in practice this is only ever momentarily `undefined` on first paint.
+  const projects = useQuery({ queryKey: ['projects'], queryFn: api.projects });
+  const projectTitle = projects.data?.find((project) => project.id === projectId)?.title;
   const create = useMutation({
     mutationFn: async () => {
       const id = crypto.randomUUID();
@@ -475,9 +488,15 @@ function ProjectPage() {
 
   return (
     <main className="project-screen">
-      <header className="project-header">
-        <Link to="/projects">Projects</Link>
-      </header>
+      <ApplicationTitlebar
+        accountMenu={<AccountMenu />}
+        // A plain link (no `wipeLabel`): the owner's wipe ask was specific to the editor and the
+        // comparison, not to the project screen itself, which keeps the same static way back to
+        // the dashboard it already had.
+        brand={{ href: '/projects' }}
+        breadcrumb={<RouteBreadcrumb />}
+        documentTitle={projectTitle ?? ''}
+      />
       <section className="project-list">
         <p className="eyebrow">PROJECT</p>
         <h1>Screenplays</h1>

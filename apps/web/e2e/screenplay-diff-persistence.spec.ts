@@ -457,7 +457,10 @@ async function measureChrome(page: Page) {
       },
       titlebar: {
         ...box(titlebar),
-        accountBadge: required('.account-button').textContent,
+        // `.account-button` -- the dead, non-interactive badge this replaced -- is gone
+        // (`progress/app-bar-navigation.md`); `AccountMenu`'s own trigger is the working control
+        // now in its place, identified the same way by its accessible name.
+        accountBadge: required('.account-menu .overflow-menu-trigger').getAttribute('aria-label'),
         brandHref: required('.brand').getAttribute('href'),
         brandLabel: required('.brand').getAttribute('aria-label'),
         brandMark: required('.brand-mark').textContent,

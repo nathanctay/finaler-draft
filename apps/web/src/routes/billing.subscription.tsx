@@ -1,7 +1,10 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { createFileRoute, Link, redirect } from '@tanstack/react-router';
+import { createFileRoute, redirect } from '@tanstack/react-router';
 import { api, type BillingPlan } from '../api.js';
+import { AccountMenu } from '../accountMenu.js';
+import { ApplicationTitlebar } from '../applicationShell.js';
+import { RouteBreadcrumb } from '../routeBreadcrumb.js';
 import {
   computeAnnualSavingsLabel,
   defaultBillingInterval,
@@ -46,6 +49,10 @@ import { guardSessionUser } from '../session.js';
  * so no separate resume endpoint exists or is needed.
  */
 export const Route = createFileRoute('/billing/subscription')({
+  // Its own fixed ancestor, for the same reason `/deleted` declares one: `/billing/subscription`
+  // is a top-level route, not nested under `/projects`, so there is no parent match to inherit a
+  // crumb from. See `routeBreadcrumb.tsx` on `StaticDataRouteOption.breadcrumb`.
+  staticData: { breadcrumb: [{ label: () => 'Projects', to: () => '/projects' }] },
   beforeLoad: async ({ context }) => {
     const user = await guardSessionUser(context.queryClient);
     if (!user) throw redirect({ to: '/sign-in' });
@@ -113,9 +120,15 @@ function ManageSubscriptionPage() {
 
   return (
     <main className="project-screen">
-      <header className="project-header">
-        <Link to="/projects">Projects</Link>
-      </header>
+      <ApplicationTitlebar
+        accountMenu={<AccountMenu />}
+        // No `wipeLabel`: the wipe is for screens genuinely inside a project (the editor and the
+        // comparison). Billing is reached from the account menu on any screen, so its brand keeps
+        // the plain way back to the dashboard.
+        brand={{ href: '/projects' }}
+        breadcrumb={<RouteBreadcrumb />}
+        documentTitle="Manage Subscription"
+      />
       <section className="project-list">
         <p className="eyebrow">BILLING</p>
         <h1>Manage Subscription</h1>

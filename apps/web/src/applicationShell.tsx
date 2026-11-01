@@ -162,23 +162,82 @@ export interface TitleRenameCapability {
 }
 
 /**
- * The title bar itself, shared rather than described twice: the brand mark and the account badge
- * are byte-identical on every screen that wears the chrome, and the document title is the one
- * thing that differs. A screen supplies its own `indicator` (the editor's save dot) only if it has
+ * The title bar itself, shared rather than described twice: the brand mark is byte-identical on
+ * every screen that wears the chrome, and the breadcrumb trail plus the document title are the two
+ * things that differ. A screen supplies its own `indicator` (the editor's save dot) only if it has
  * a document state worth a dot; a read-only screen has none and passes nothing. `rename` is the
  * same shape of optional capability -- see `TitleRenameCapability`'s own doc comment -- and is
  * omitted by every caller except the live screenplay editor rendering for its own owner; every
  * other caller (every non-owner viewer, and the read-only revision-diff route, which never
  * supplies it at all) gets back exactly the plain, inert text this element has always rendered.
+ *
+ * `breadcrumb` and `accountMenu` are the same shape of seam again, for the same reason, and
+ * deliberately both plain `ReactNode`s rather than data this component assembles into markup:
+ * the controls they stand for (`RouteBreadcrumb`, routeBreadcrumb.tsx, and `AccountMenu`,
+ * accountMenu.tsx) both need `@tanstack/react-router`, and the account menu needs
+ * `@tanstack/react-query` too, for its sign-out mutation -- and this module must gain neither. It
+ * is rendered by the editor's standalone, provider-free test suite at 67 render sites, which is
+ * why the brand above is a plain `<a href>` rather than a router `Link` in the first place; see
+ * `routeBreadcrumb.tsx`'s and `accountMenu.tsx`'s own comments for the full reasoning. Every
+ * caller that wants a working trail or account control mounts that component itself and hands the
+ * result in here; a caller that passes nothing (none do, in production) gets back the plain title
+ * bar with neither, matching how `indicator`/`rename` already degrade.
  */
+/**
+ * Where the brand mark goes, and what it says about itself while it does -- the owner's second
+ * ask of the app-bar-navigation slice: "when you click on the logo within the editor in the top
+ * left, it takes you back to the project, not the main screen. And when you hover over the logo,
+ * lets have it wipe from the logo to 'return to project'."
+ *
+ * `wipeLabel` is the load-bearing distinction from a plain link. Omitted, the brand is exactly
+ * what it has always been: a static link to `href`, named once by `aria-label` below. Supplied
+ * (today, only by the live editor and the read-only revision-diff route, both genuinely "inside a
+ * project" in the way the dashboard and Deleted items are not), hovering or focusing the brand
+ * wipes it over to `wipeLabel`'s text -- see the render below and `.brand-wipe` in styles.css for
+ * the mechanics, and this field's own name for why it is a wipe (a sliding replacement) rather
+ * than the fade the owner did not ask for.
+ *
+ * The accessible name is never the wipe alone: `aria-label` states the full destination
+ * ("Finaler Draft — return to project") regardless of hover or focus state, so a screen-reader
+ * user is told where this goes without the animation ever having run -- `prefers-reduced-motion`
+ * users included, for whom the CSS transition is removed entirely but the label swap (and the
+ * `aria-label`, which was never animated) stays exactly as informative.
+ */
+export interface BrandDestination {
+  readonly href: string;
+  readonly wipeLabel?: string;
+}
+
 export function ApplicationTitlebar({
+  accountMenu,
+  brand,
+  breadcrumb,
   documentTitle,
   documentType,
   indicator,
   rename,
 }: {
+  readonly accountMenu?: ReactNode;
+  /**
+   * `undefined` for the one screen the brand is never a control on: the writing desk, where the
+   * brand names the page the writer is already looking at -- see `BrandDestination`'s own comment
+   * for every other screen's shape.
+   */
+  readonly brand?: BrandDestination;
+  /** The ancestor trail ahead of `documentTitle` -- see this component's own comment for why it
+   * is a rendered `ReactNode` (in practice, always `<RouteBreadcrumb />`) rather than data this
+   * component turns into links itself. */
+  readonly breadcrumb?: ReactNode;
   readonly documentTitle: string;
-  readonly documentType: string;
+  /**
+   * The current screen's own "kind of view" suffix -- "Screenplay", "Comparison" -- shown beside
+   * the title exactly as before. Optional now that this component also renders the three screens
+   * whose current segment is the screen's own name ("Projects", a project's title, "Deleted
+   * items") rather than a document with a kind: none of those has a second word to say here, and
+   * an empty string would render a visible trailing `.title-type` with nothing in it rather than
+   * simply omitting the element -- see the render below.
+   */
+  readonly documentType?: string;
   readonly indicator?: ReactNode;
   /** `| undefined` explicitly, not a bare `?:`. `tsconfig` sets `exactOptionalPropertyTypes`, under
    * which `?:` means "may be absent" and not "may be present and undefined" -- and the editor
@@ -318,22 +377,77 @@ export function ApplicationTitlebar({
         router-agnostic, lazily-loaded editor (see the editor route's `lazy(...)` import and
         `App.tsx`'s own standalone test suite, neither of which provides router context) and by
         ordinary routes, and the editor had no way out of a screenplay but the browser's back
-        button before this existed. A full navigation to /projects is a small cost for a control
-        used rarely and deliberately, against the alternative of requiring router context in the
-        chrome itself. The accessible name leads with the visible "Finaler Draft" text per
-        WCAG 2.5.3.
+        button before this existed. A full navigation is a small cost for a control used rarely
+        and deliberately, against the alternative of requiring router context in the chrome
+        itself. The accessible name leads with the visible "Finaler Draft" text per WCAG 2.5.3,
+        on every shape below -- the writing desk's inert brand, the plain link, and the wipe.
       */}
-      <a aria-label="Finaler Draft — back to your projects" className="brand" href="/projects">
-        <span className="brand-mark">F</span>
-        <span>Finaler Draft</span>
-      </a>
-      <div className="document-title">
-        {indicator}
-        {titleNode} <span className="title-type">{documentType}</span>
-      </div>
-      <span className="account-button" aria-label="Signed-in writer">
-        FD
-      </span>
+      {brand === undefined ? (
+        // The writing desk: the brand names the page the writer is already on, so it is not a
+        // control at all here -- a link to the page you are looking at is not a link anywhere
+        // else in this app either, and this is the one screen the bar appears on without a
+        // `breadcrumb` ahead of it for the same reason.
+        <span className="brand">
+          <span className="brand-mark">F</span>
+          <span>Finaler Draft</span>
+        </span>
+      ) : brand.wipeLabel === undefined ? (
+        <a aria-label="Finaler Draft — back to your projects" className="brand" href={brand.href}>
+          <span className="brand-mark">F</span>
+          <span>Finaler Draft</span>
+        </a>
+      ) : (
+        <a
+          aria-label={`Finaler Draft — ${brand.wipeLabel}`}
+          className="brand brand-wipe"
+          href={brand.href}
+        >
+          <span className="brand-face">
+            <span className="brand-mark">F</span>
+            <span>Finaler Draft</span>
+          </span>
+          <span className="brand-wipe-label">
+            {/*
+              `aria-hidden`, and a separate element rather than part of `wipeLabel` itself: the
+              string is also this control's accessible name (see the `aria-label` above), and
+              "Finaler Draft — ← Return to project" is not something anyone should hear. Same
+              treatment the overflow menu's own `›` disclosure glyph gets, for the same reason.
+            */}
+            <span aria-hidden="true" className="brand-wipe-arrow">
+              &#8592;
+            </span>
+            {brand.wipeLabel}
+          </span>
+        </a>
+      )}
+      {/*
+        The breadcrumb trail: whatever `breadcrumb` renders (in practice, `<RouteBreadcrumb />`'s
+        ancestor links) ahead of the current screen's own name -- still exactly
+        `documentTitle`/`documentType`/`indicator`/`rename`, unchanged from before this trail
+        existed. `aria-label`, not relying on a default: this is the first `<nav>` this bar has
+        ever had, and a bare "Breadcrumb" region landmark is what lets a screen-reader user jump
+        straight to it rather than finding it by reading through the bar.
+      */}
+      <nav aria-label="Breadcrumb" className="breadcrumb">
+        {breadcrumb}
+        <div aria-current="page" className="document-title">
+          {indicator}
+          {titleNode}
+          {/* A leading space inside the fragment, not a sibling JSX expression next to one: JSX
+              collapses the whitespace-only text a newline between two expressions would otherwise
+              leave, so "{titleNode} <span>" (the pre-breadcrumb markup) relied on that literal
+              space being on the same line as `{titleNode}`. Keeping it here, bound to whether
+              `documentType` exists, is what keeps "Hollow Heart Comparison" rendering as two words
+              and "Projects" (no `documentType`) rendering with no trailing space at all. */}
+          {documentType !== undefined && (
+            <>
+              {' '}
+              <span className="title-type">{documentType}</span>
+            </>
+          )}
+        </div>
+      </nav>
+      {accountMenu}
     </header>
   );
 }

@@ -191,4 +191,25 @@ describe('deleted page', () => {
     await user.keyboard('{Enter}');
     await waitFor(() => expect(screen.queryByText('Old Project')).not.toBeInTheDocument());
   });
+
+  /**
+   * The app-bar-navigation slice: this route's own `staticData.breadcrumb` (its module comment
+   * covers why it declares a fixed crumb rather than inheriting one -- `/deleted` has no shared
+   * parent route with `/projects/` to inherit it from). Exercised directly here, not through
+   * `routeBreadcrumb.test.tsx`'s fakes, so a change to the real label or destination is caught by
+   * the route's own suite.
+   */
+  it('contributes a fixed "Projects" ancestor crumb, pointing at the dashboard', () => {
+    const crumbs = Route.options.staticData!.breadcrumb!;
+    expect(crumbs).toHaveLength(1);
+    const context = { loaderData: undefined, params: {} };
+    expect(crumbs[0]!.label(context)).toBe('Projects');
+    expect(crumbs[0]!.to(context)).toBe('/projects');
+  });
+
+  it('mounts the shared account menu', () => {
+    fetchMock.mockImplementation(async () => jsonResponse({ projects: [], screenplays: [] }));
+    renderPage();
+    expect(screen.getByRole('button', { name: 'Account menu' })).toBeVisible();
+  });
 });

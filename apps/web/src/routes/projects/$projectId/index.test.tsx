@@ -731,3 +731,38 @@ describe('Import FDX control', () => {
     });
   });
 });
+
+/**
+ * The shared app bar (`progress/app-bar-navigation.md`), replacing this screen's old bare
+ * `<header className="project-header"><Link to="/projects">Projects</Link></header>`. The title
+ * reads from the same `['projects']` cache entry the `/projects/$projectId` layout's own `loader`
+ * populates for the breadcrumb's ancestor crumb -- `routeState.queries` carries a key for it here
+ * because this route now has two concurrent `useQuery` calls (`['screenplays', projectId]`, which
+ * every test above already drives through the single shared `routeState.query`, and `['projects']`
+ * now too); see that field's own comment in routeHarness.tsx.
+ */
+describe('project page: the shared app bar', () => {
+  beforeEach(resetRouteHarness);
+
+  it('names the project in the title bar, mounts the account menu, and keeps no bare link to Projects', () => {
+    routeState.queries[JSON.stringify(['projects'])] = {
+      data: [{ id: projectId, role: 'owner', title: 'Hollow Heart' }],
+      isError: false,
+      isLoading: false,
+    };
+    render(<ProjectPage />);
+    expect(document.querySelector('.document-title')).toHaveTextContent('Hollow Heart');
+    expect(screen.getByRole('button', { name: 'Account menu' })).toBeVisible();
+    expect(screen.queryByRole('link', { name: 'Projects' })).not.toBeInTheDocument();
+  });
+
+  it('renders no project title at all rather than a wrong one while the project list has not resolved yet', () => {
+    routeState.queries[JSON.stringify(['projects'])] = {
+      data: undefined,
+      isError: false,
+      isLoading: true,
+    };
+    render(<ProjectPage />);
+    expect(document.querySelector('.document-title')).toHaveTextContent('');
+  });
+});

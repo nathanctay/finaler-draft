@@ -108,7 +108,11 @@ describe('project screenplay list: delete and undo', () => {
     await screen.findByText('Draft — Deleted');
 
     await act(() => queryClient.invalidateQueries({ queryKey: ['screenplays', projectId] }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    // 4, not 3: the shared app bar's title now reads the project's own name off a second,
+    // concurrent `['projects']` query (this page's own comment on `projectTitle`), which fetches
+    // once on mount alongside the screenplay list -- the GET, the DELETE, the invalidated
+    // refetch, and this one extra GET.
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
     expect(screen.getByText('Draft — Deleted')).toBeVisible();
   });
 

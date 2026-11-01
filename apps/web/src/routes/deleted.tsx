@@ -1,7 +1,10 @@
 import { useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { createFileRoute, Link, redirect } from '@tanstack/react-router';
+import { createFileRoute, redirect } from '@tanstack/react-router';
+import { AccountMenu } from '../accountMenu.js';
 import { api, type DeletedProject, type DeletedScreenplay } from '../api.js';
+import { ApplicationTitlebar } from '../applicationShell.js';
+import { RouteBreadcrumb } from '../routeBreadcrumb.js';
 import { guardSessionUser } from '../session.js';
 
 /**
@@ -20,6 +23,13 @@ export const Route = createFileRoute('/deleted')({
     if (!user) throw redirect({ to: '/sign-in' });
   },
   component: DeletedPage,
+  // This route's own breadcrumb ancestor -- just "Projects", always, no data to resolve. Declared
+  // here rather than inherited from a shared parent match because there is no such parent:
+  // `/deleted` is a top-level sibling of `/projects/` in the route tree (confirmed against
+  // `routeTree.gen.ts`), reachable from the account menu on every screen rather than nested under
+  // the writing desk. `routeBreadcrumb.tsx`'s own comment on `StaticDataRouteOption.breadcrumb`
+  // covers why a route with no shared ancestor to inherit from declares its own fixed crumb.
+  staticData: { breadcrumb: [{ label: () => 'Projects', to: () => '/projects' }] },
 });
 
 /**
@@ -122,9 +132,15 @@ function DeletedPage() {
 
   return (
     <main className="project-screen">
-      <header className="project-header">
-        <Link to="/projects">Projects</Link>
-      </header>
+      <ApplicationTitlebar
+        accountMenu={<AccountMenu />}
+        // A plain link (no `wipeLabel`): the owner's wipe ask was specific to the editor and the
+        // comparison, both genuinely "inside a project" -- Deleted items is not, and keeps the
+        // same static way back to the dashboard it already had.
+        brand={{ href: '/projects' }}
+        breadcrumb={<RouteBreadcrumb />}
+        documentTitle="Deleted items"
+      />
       <section className="project-list">
         <p className="eyebrow">RECOVERY</p>
         <h1 ref={headingRef} tabIndex={-1}>

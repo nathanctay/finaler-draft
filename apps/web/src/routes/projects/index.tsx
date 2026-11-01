@@ -1,7 +1,9 @@
 import { lazy, Suspense, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { createFileRoute, Link, redirect, useNavigate } from '@tanstack/react-router';
+import { createFileRoute, Link, redirect } from '@tanstack/react-router';
+import { AccountMenu } from '../../accountMenu.js';
 import { api, type IncomingInvitation, type Project, type SharedScreenplay } from '../../api.js';
+import { ApplicationTitlebar } from '../../applicationShell.js';
 import { guardSessionUser } from '../../session.js';
 import { DeletedRow } from '../../components/DeletedRow.js';
 import { OverflowMenu } from '../../components/OverflowMenu.js';
@@ -211,7 +213,6 @@ function SharedScreenplayRow({ screenplay }: { screenplay: SharedScreenplay }) {
 
 function ProjectsPage() {
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
   const [title, setTitle] = useState('');
   // id -> title captured at the moment of deletion. Deliberately not cleared by invalidating
   // the `['projects']` query on delete -- see the module comment on DeletedRow and the scope's
@@ -281,16 +282,6 @@ function ProjectsPage() {
       return queryClient.invalidateQueries({ queryKey: ['projects'] });
     },
   });
-  const signOut = useMutation({
-    mutationFn: api.signOut,
-    onSuccess: () => {
-      // Clearing the whole cache, not just ['session'], keeps the next person to sign
-      // in on this browser from seeing this user's project and screenplay titles.
-      queryClient.clear();
-      return navigate({ to: '/sign-in' });
-    },
-  });
-
   function forgetDeleted(projectId: string) {
     setDeletedProjects((current) =>
       Object.fromEntries(Object.entries(current).filter(([id]) => id !== projectId)),
@@ -309,36 +300,10 @@ function ProjectsPage() {
 
   return (
     <main className="project-screen">
-      <header className="project-header">
-        <div className="brand">
-          <span className="brand-mark">F</span>
-          <span>Finaler Draft</span>
-        </div>
-        <OverflowMenu
-          items={[
-            // A single, always-available entry rather than two tier-conditional ones ("Upgrade
-            // to Pro" vs. "Manage billing", the previous shape): both destinations are now the
-            // same page (routes/billing.subscription.tsx), which shows the writer's actual plan
-            // and status and offers the right action from there -- upgrade for a free/restricted
-            // account, the Customer Portal for a paying one. This also means the account menu no
-            // longer needs to fetch entitlement state itself just to decide a label or an action;
-            // the destination page owns that.
-            {
-              label: 'Manage Subscription',
-              onSelect: () => void navigate({ to: '/billing/subscription' }),
-            },
-            { label: 'Deleted items', onSelect: () => void navigate({ to: '/deleted' }) },
-            { label: 'Sign out', onSelect: () => signOut.mutate() },
-          ]}
-          label="Account menu"
-          triggerContent="Account"
-        />
-      </header>
-      {signOut.isError && (
-        <p className="sign-out-error" role="alert">
-          Sign out failed. Try again.
-        </p>
-      )}
+      {/* "Projects" is this screen's own name -- the root of the trail, with nothing ahead of it
+          (no `breadcrumb` prop), exactly as `ApplicationTitlebar`'s own comment on an omitted
+          ancestor trail describes. */}
+      <ApplicationTitlebar accountMenu={<AccountMenu />} documentTitle="Projects" />
       <section className="project-list">
         <p className="eyebrow">PRIVATE PROJECTS</p>
         <h1>Your writing desk</h1>

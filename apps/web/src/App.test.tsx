@@ -205,10 +205,16 @@ describe('local semantic screenplay editor', () => {
     expect(() => editorContentFromScreenplay(screenplayFixture)).toThrow(/not editable/i);
   });
 
-  it('gives the editor a real way back to the writing desk via the brand mark', () => {
+  // The app-bar-navigation slice's Task 2: the editor's brand now returns to *this screenplay's
+  // project*, not the dashboard -- `app-bar-logo.spec.ts` (a real browser) covers the hover/focus
+  // wipe itself; this is the plain contract jsdom can prove -- the destination, the accessible
+  // name, and that both survive with no project supplied at all.
+  it('gives the editor a real way back to its own project via the brand mark, not the dashboard', () => {
     render(<App />);
-    const back = screen.getByRole('link', { name: 'Finaler Draft — back to your projects' });
-    expect(back).toHaveAttribute('href', '/projects');
+    const back = screen.getByRole('link', { name: 'Finaler Draft — Return to project' });
+    // The default (no `initial` supplied) screenplay fixture's own `projectId` -- App.tsx's
+    // `legacyInitial`, not exported, so this is a literal rather than an import solely for a test.
+    expect(back).toHaveAttribute('href', '/projects/5d0c5594-64f4-4ca1-a1bd-b4b4840f8e7f');
     expect(back).toHaveTextContent('Finaler Draft');
   });
 
@@ -2218,6 +2224,34 @@ describe('revision history entry point', () => {
 
     await user.click(screen.getByRole('button', { name: 'File menu' }));
     expect(screen.queryByRole('menuitem', { name: 'Revision history…' })).not.toBeInTheDocument();
+  });
+
+  /**
+   * The app-bar-navigation slice's `accountMenu`/`breadcrumb` props -- carried straight through to
+   * `ApplicationTitlebar` without this component rendering, inspecting, or caring what either is
+   * (see `App`'s own comment on both props). Proven with plain marker nodes, in this same
+   * no-router-no-query-client render this whole file already uses for every other test: that
+   * absence is the entire point, and a prop that needed either dependency to render could not be
+   * proven here at all.
+   */
+  it('carries accountMenu and breadcrumb through to the title bar untouched', async () => {
+    render(
+      <App
+        accountMenu={<span data-testid="account-menu-stand-in">Account stand-in</span>}
+        breadcrumb={<span data-testid="breadcrumb-stand-in">Breadcrumb stand-in</span>}
+        initial={script}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    expect(screen.getByTestId('account-menu-stand-in')).toBeVisible();
+    expect(screen.getByTestId('breadcrumb-stand-in')).toBeVisible();
+  });
+
+  it('renders neither account menu nor breadcrumb content when neither prop is supplied', async () => {
+    render(<App initial={script} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    expect(screen.queryByTestId('account-menu-stand-in')).toBeNull();
+    expect(screen.queryByTestId('breadcrumb-stand-in')).toBeNull();
   });
 
   // The screenplay-invitations slice's third entry point. Same contract as "Revision history…"
