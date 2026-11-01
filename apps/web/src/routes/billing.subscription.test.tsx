@@ -94,6 +94,28 @@ describe('Manage Subscription page', () => {
     expect(screen.getByText('Loading your subscription…')).toBeVisible();
   });
 
+  it('declares no breadcrumb, and renders no trail, because it is not inside anything', () => {
+    /*
+     * This page is reached from the account menu on every screen, not by descending from the
+     * dashboard, so a "Projects /" ancestor in front of its name claimed a hierarchy it does not
+     * have -- the owner's "it shouldn't say projects before the page in the header."
+     *
+     * Asserted as an absence so re-adding a trail fails here first. Deliberately not asserting the
+     * `nav[aria-label="Breadcrumb"]` is gone: it also wraps this page's own name, which carries
+     * `aria-current="page"`, so the landmark stays useful with nothing in front of it. What must
+     * not exist is a link claiming this page sits under another one.
+     */
+    expect(Route.options.staticData?.breadcrumb).toBeUndefined();
+
+    setQueries(entitlement('restricted'), null);
+    render(<ManageSubscriptionPage />);
+
+    expect(document.querySelectorAll('.breadcrumb-link')).toHaveLength(0);
+    // Scoped to the bar's own current-page slot, not `getByText`: the page's `<h1>` carries the
+    // same words, so an unscoped query matches twice and says nothing about the header.
+    expect(document.querySelector('.document-title')).toHaveTextContent('Manage Subscription');
+  });
+
   describe('a writer who has never subscribed', () => {
     beforeEach(() => setQueries(entitlement('restricted'), null));
 

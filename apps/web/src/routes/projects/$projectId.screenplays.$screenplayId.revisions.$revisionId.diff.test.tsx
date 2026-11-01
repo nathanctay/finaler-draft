@@ -142,6 +142,56 @@ function rowFor(text: string): HTMLElement {
 describe('revision diff page: guards and states', () => {
   beforeEach(resetRouteHarness);
 
+  it('renders no breadcrumb trail, matching the live editor it compares against', () => {
+    /*
+     * The owner: "The compare revision page also still shows 'Projects/PROJECT NAME' even though
+     * the regular editor page doesn't."
+     *
+     * Both are views of a screenplay, and on both the brand returns to that screenplay's project --
+     * so the project crumb pointed exactly where the brand already goes. Unlike `/deleted` and
+     * `/billing/subscription`, this route declares no crumb of its own to remove: it inherited the
+     * ancestors from the `$projectId` layout, which still declares them because the project screen
+     * and the revision-history list both render them. So this asserts the *rendered* trail only.
+     */
+    /*
+     * `routeState.matches` is populated deliberately. The harness defaults it to `[]`, and with an
+     * empty match stack `RouteBreadcrumb` renders nothing whether this route passes it or not --
+     * so the link assertion below was vacuous until this fixture existed, and re-adding the prop
+     * passed the test. Verified by mutation: with these matches in place, re-adding it fails.
+     *
+     * These are the `$projectId` layout's real crumbs, which this route sits beneath and would
+     * inherit if it rendered a trail at all.
+     */
+    routeState.matches = [
+      {
+        id: '/projects/$projectId',
+        loaderData: { projectTitle: 'Hollow Heart' },
+        params: { projectId },
+        pathname: `/projects/${projectId}`,
+        staticData: {
+          breadcrumb: [
+            { label: () => 'Projects', to: () => '/projects' },
+            {
+              label: (ctx: { loaderData: { projectTitle: string } }) => ctx.loaderData.projectTitle,
+              to: (ctx: { params: { projectId: string } }) => `/projects/${ctx.params.projectId}`,
+            },
+          ],
+        },
+      },
+      {
+        id: '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId/diff',
+        params: { projectId },
+        pathname: `/projects/${projectId}/screenplays/s1/revisions/r1/diff`,
+        staticData: {},
+      },
+    ];
+
+    renderWith(emptyDiffResult);
+
+    expect(document.querySelectorAll('.breadcrumb-link')).toHaveLength(0);
+    expect(document.querySelector('.document-title')).toHaveTextContent('Comparison');
+  });
+
   it('redirects a signed-out visitor to /sign-in instead of rendering, the same guard every other protected route uses', async () => {
     const beforeLoad = Route.options.beforeLoad as
       | ((opts: ReturnType<typeof contextWithSession>) => Promise<void>)

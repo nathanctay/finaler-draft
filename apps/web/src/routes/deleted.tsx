@@ -4,7 +4,6 @@ import { createFileRoute, redirect } from '@tanstack/react-router';
 import { AccountMenu } from '../accountMenu.js';
 import { api, type DeletedProject, type DeletedScreenplay } from '../api.js';
 import { ApplicationTitlebar } from '../applicationShell.js';
-import { RouteBreadcrumb } from '../routeBreadcrumb.js';
 import { guardSessionUser } from '../session.js';
 
 /**
@@ -23,13 +22,6 @@ export const Route = createFileRoute('/deleted')({
     if (!user) throw redirect({ to: '/sign-in' });
   },
   component: DeletedPage,
-  // This route's own breadcrumb ancestor -- just "Projects", always, no data to resolve. Declared
-  // here rather than inherited from a shared parent match because there is no such parent:
-  // `/deleted` is a top-level sibling of `/projects/` in the route tree (confirmed against
-  // `routeTree.gen.ts`), reachable from the account menu on every screen rather than nested under
-  // the writing desk. `routeBreadcrumb.tsx`'s own comment on `StaticDataRouteOption.breadcrumb`
-  // covers why a route with no shared ancestor to inherit from declares its own fixed crumb.
-  staticData: { breadcrumb: [{ label: () => 'Projects', to: () => '/projects' }] },
 });
 
 /**
@@ -138,7 +130,15 @@ function DeletedPage() {
         // comparison, both genuinely "inside a project" -- Deleted items is not, and keeps the
         // same static way back to the dashboard it already had.
         brand={{ href: '/projects' }}
-        breadcrumb={<RouteBreadcrumb />}
+        /*
+         * Deliberately no `breadcrumb`. This page is not inside anything -- it is reached from the
+         * account menu on every screen, not by descending from the dashboard -- so a "Projects /"
+         * ancestor in front of its name claimed a hierarchy that does not exist. The owner's words:
+         * "it shouldn't say projects before the page in the header. That doesn't make sense."
+         *
+         * The brand still returns to the dashboard, so nothing became unreachable; the bar just
+         * stopped asserting a parent this page never had.
+         */
         documentTitle="Deleted items"
       />
       <section className="project-list">

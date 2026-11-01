@@ -4,7 +4,6 @@ import { createFileRoute, redirect } from '@tanstack/react-router';
 import { api, type BillingPlan } from '../api.js';
 import { AccountMenu } from '../accountMenu.js';
 import { ApplicationTitlebar } from '../applicationShell.js';
-import { RouteBreadcrumb } from '../routeBreadcrumb.js';
 import {
   computeAnnualSavingsLabel,
   defaultBillingInterval,
@@ -49,10 +48,6 @@ import { guardSessionUser } from '../session.js';
  * so no separate resume endpoint exists or is needed.
  */
 export const Route = createFileRoute('/billing/subscription')({
-  // Its own fixed ancestor, for the same reason `/deleted` declares one: `/billing/subscription`
-  // is a top-level route, not nested under `/projects`, so there is no parent match to inherit a
-  // crumb from. See `routeBreadcrumb.tsx` on `StaticDataRouteOption.breadcrumb`.
-  staticData: { breadcrumb: [{ label: () => 'Projects', to: () => '/projects' }] },
   beforeLoad: async ({ context }) => {
     const user = await guardSessionUser(context.queryClient);
     if (!user) throw redirect({ to: '/sign-in' });
@@ -126,7 +121,15 @@ function ManageSubscriptionPage() {
         // comparison). Billing is reached from the account menu on any screen, so its brand keeps
         // the plain way back to the dashboard.
         brand={{ href: '/projects' }}
-        breadcrumb={<RouteBreadcrumb />}
+        /*
+         * Deliberately no `breadcrumb`. This page is not inside anything -- it is reached from the
+         * account menu on every screen, not by descending from the dashboard -- so a "Projects /"
+         * ancestor in front of its name claimed a hierarchy that does not exist. The owner's words:
+         * "it shouldn't say projects before the page in the header. That doesn't make sense."
+         *
+         * The brand still returns to the dashboard, so nothing became unreachable; the bar just
+         * stopped asserting a parent this page never had.
+         */
         documentTitle="Manage Subscription"
       />
       <section className="project-list">

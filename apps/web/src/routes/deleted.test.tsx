@@ -193,18 +193,25 @@ describe('deleted page', () => {
   });
 
   /**
-   * The app-bar-navigation slice: this route's own `staticData.breadcrumb` (its module comment
-   * covers why it declares a fixed crumb rather than inheriting one -- `/deleted` has no shared
-   * parent route with `/projects/` to inherit it from). Exercised directly here, not through
-   * `routeBreadcrumb.test.tsx`'s fakes, so a change to the real label or destination is caught by
-   * the route's own suite.
+   * This route used to declare a fixed "Projects" ancestor crumb and render a trail. Both are gone:
+   * Deleted items is reached from the account menu on every screen rather than by descending from
+   * the dashboard, so a "Projects /" in front of its name asserted a hierarchy it does not have.
+   *
+   * Asserted as an absence rather than simply deleted, so re-adding a trail here fails a test
+   * first instead of arriving unnoticed -- the same treatment the editor's own removal got.
    */
-  it('contributes a fixed "Projects" ancestor crumb, pointing at the dashboard', () => {
-    const crumbs = Route.options.staticData!.breadcrumb!;
-    expect(crumbs).toHaveLength(1);
-    const context = { loaderData: undefined, params: {} };
-    expect(crumbs[0]!.label(context)).toBe('Projects');
-    expect(crumbs[0]!.to(context)).toBe('/projects');
+  it('declares no breadcrumb, and renders no trail, because it is not inside anything', () => {
+    expect(Route.options.staticData?.breadcrumb).toBeUndefined();
+
+    fetchMock.mockImplementation(async () => jsonResponse({ projects: [], screenplays: [] }));
+    renderPage();
+
+    // No *ancestor* segments. Deliberately not asserting the `nav[aria-label="Breadcrumb"]` itself
+    // is gone: it also wraps this screen's own name, which carries `aria-current="page"`, so the
+    // landmark stays useful with nothing in front of it. What must not exist is a link claiming
+    // this page sits under another one.
+    expect(document.querySelectorAll('.breadcrumb-link')).toHaveLength(0);
+    expect(screen.getByText('Deleted items')).toBeVisible();
   });
 
   it('mounts the shared account menu', () => {

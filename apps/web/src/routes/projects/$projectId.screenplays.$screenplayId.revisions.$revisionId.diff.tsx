@@ -28,7 +28,6 @@ import {
 } from '../../inlineScreenplayDiff.js';
 import { applyPageGeometryCssVariables } from '../../pageGeometryCss.js';
 import { humanizeRevisionDiffSide } from '../../revisionDisplay.js';
-import { RouteBreadcrumb } from '../../routeBreadcrumb.js';
 import { guardSessionUser } from '../../session.js';
 
 export const Route = createFileRoute(
@@ -409,7 +408,16 @@ function RevisionDiffPage() {
           // project" (this file's own module comment), so its logo returns there too, with the
           // same wipe.
           brand={{ href: `/projects/${projectId}`, wipeLabel: 'Return to project' }}
-          breadcrumb={<RouteBreadcrumb />}
+          /*
+           * Deliberately no `breadcrumb`, matching the live editor next door. The owner: "The
+           * compare revision page also still shows 'Projects/PROJECT NAME' even though the regular
+           * editor page doesn't."
+           *
+           * Both are views *of a screenplay*, and on both the brand returns to that screenplay's
+           * project -- so the project crumb pointed where the brand already goes and the trail only
+           * repeated it. The `$projectId` layout still declares those ancestor crumbs, because the
+           * project screen and the revision-history list both still render them.
+           */
           documentTitle={result?.newerScreenplay.title ?? ''}
           documentType="Comparison"
         />
