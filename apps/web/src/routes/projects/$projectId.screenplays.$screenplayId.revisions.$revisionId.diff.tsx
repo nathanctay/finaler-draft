@@ -16,7 +16,12 @@ import {
 } from '../../diffNavigator.js';
 import { InspectorPanel } from '../../inspectorPanel.js';
 import { NavigatorPanel, type NavigatorEntry } from '../../navigatorPanel.js';
-import { clampZoomPercent, ZOOM_DEFAULT_PERCENT, ZOOM_STEP_PERCENT } from '../../zoomPresets.js';
+import {
+  clampZoomPercent,
+  ZOOM_DEFAULT_PERCENT,
+  ZOOM_PRESET_PERCENTS,
+  ZOOM_STEP_PERCENT,
+} from '../../zoomPresets.js';
 import {
   buildInlineScreenplayDiff,
   type InlineDiffBlockRow,
@@ -60,6 +65,13 @@ const NAVIGATOR_TABS = [
 ] as const;
 
 type NavigatorTabId = (typeof NAVIGATOR_TABS)[number]['id'];
+
+/** Shared by the toolbar's zoom preset `<option>`s and the View menu's "Zoom" submenu below -- one
+ * sentence for the one reason both controls disable the same two options: Fit width/Fit page are
+ * computed from `.editor-region`'s measured available area and recomputed on resize (`zoom.ts`'s
+ * `resolveZoomPercent`), and this read-only comparison has no such lifecycle to drive them with. */
+const FIT_MODE_DISABLED_REASON =
+  'Fit width and Fit page need a live layout to measure, which a stored comparison does not have.';
 
 /**
  * The small trailing figure on a scene row. Terse on purpose, matching the editor's own
@@ -271,19 +283,30 @@ function RevisionDiffPage() {
       dark={dark}
       menubar={
         /*
-         * The same menubar component the editor renders, with the same File item set and the same
-         * five inert labels beside it. Every item that has no meaning on a read-only comparison of two
-         * stored snapshots is a really-disabled menu item with its reason as its tooltip -- the
-         * behaviour `OverflowMenu` already had for the editor's own export items.
+         * The same menubar component the editor renders, with the same File item set and the same two
+         * still-inert labels (Tools, Help) beside it. Every File item that has no meaning on a
+         * read-only comparison of two stored snapshots is a really-disabled menu item with its reason
+         * as its tooltip -- the behaviour `OverflowMenu` already had for the editor's own export items.
          *
-         * "Revision history…" is the one that is genuinely live, because it genuinely applies: this
-         * comparison came from that list and a reader can go back to it. It leads to the same place as
-         * the banner's "Back to revisions"; a command appearing in both a menu and a visible control
-         * is ordinary, and dropping it from the menu to avoid the overlap would make the one item that
-         * works disappear.
+         * "Revision history…" is the one File item that is genuinely live, because it genuinely
+         * applies: this comparison came from that list and a reader can go back to it. It leads to the
+         * same place as the banner's "Back to revisions"; a command appearing in both a menu and a
+         * visible control is ordinary, and dropping it from the menu to avoid the overlap would make
+         * the one item that works disappear.
+         *
+         * **Edit and Format are omitted outright** (`progress/menus-slice-1.md`) rather than rendered
+         * full of disabled items: neither verb applies to a stored snapshot at all, and unlike the File
+         * menu's six items above -- each one disabled for its own specific, nameable reason a reader
+         * might actually come looking for -- an Edit or a Format menu here would be a wall of disabled
+         * entries sharing one repeated sentence ("this is a read-only comparison"). That is noise, not
+         * explanation, and `ApplicationMenubar` cuts a menu with no items entirely rather than render
+         * it as a label or as a disabled shell -- see that module's own comment.
+         *
+         * **View renders**, because it genuinely applies: this comparison has its own zoom state
+         * (`zoomPercent` below) and its own dark-canvas preference, both real view preferences over a
+         * real, if read-only, canvas -- not a document operation with nothing here to act on.
          */
         <ApplicationMenubar
-          canvasToggle={{ dark, onToggle: () => setDark((value) => !value) }}
           fileMenuItems={[
             {
               disabled: true,
@@ -346,6 +369,43 @@ function RevisionDiffPage() {
                     'A comparison is not a screenplay — export the document itself, from the editor.',
                   label: 'PDF…',
                 },
+              ],
+            },
+          ]}
+          viewMenuItems={[
+            {
+              label: panels.navigator ? 'Hide Navigator' : 'Show Navigator',
+              onSelect: () => togglePanel('navigator'),
+            },
+            {
+              label: panels.inspector ? 'Hide Inspector' : 'Show Inspector',
+              onSelect: () => togglePanel('inspector'),
+            },
+            {
+              label: dark ? 'Light canvas' : 'Dark canvas',
+              onSelect: () => setDark((value) => !value),
+            },
+            {
+              label: 'Zoom',
+              submenuItems: [
+                // Fit width/Fit page need a measured available area and a recompute lifecycle
+                // (`zoom.ts`'s `resolveZoomPercent`) this comparison has none of -- the identical
+                // reason the toolbar's own zoom preset disables the same two options (see this
+                // route's `toolbar` comment below).
+                {
+                  disabled: true,
+                  disabledReason: FIT_MODE_DISABLED_REASON,
+                  label: 'Fit width',
+                },
+                {
+                  disabled: true,
+                  disabledReason: FIT_MODE_DISABLED_REASON,
+                  label: 'Fit page',
+                },
+                ...ZOOM_PRESET_PERCENTS.map((percent) => ({
+                  label: `${percent}%`,
+                  onSelect: () => setZoomPercent(clampZoomPercent(percent)),
+                })),
               ],
             },
           ]}

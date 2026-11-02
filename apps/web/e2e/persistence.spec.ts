@@ -537,3 +537,76 @@ test('a writer can delete a project and restore it from the Deleted page -- reac
   await expect(page).toHaveURL('/projects');
   await expect(page.getByRole('link', { name: 'Delete-restore project' })).toBeVisible();
 });
+
+/*
+ * "Select all does not work. It just scrolls me to the bottom" -- the owner, testing the Edit menu
+ * this slice added. Both halves of that came from one omission: `selectAll` alone moved the
+ * selection in the editor's state and left focus on the menu item, and ProseMirror paints no
+ * selection through an unfocused view, so nothing was visibly selected; `selectAll` also leaves the
+ * selection head at the end of the document, so the command's default `scrollIntoView` jumped to the
+ * last line, which was the only feedback the writer got.
+ *
+ * This is in the real-browser suite rather than beside the jsdom test of the same fix because
+ * neither symptom exists in jsdom: it performs no layout, so there is no scroll position to read,
+ * and it paints no selection to observe. `App.test.tsx` covers that focus is requested; what a real
+ * engine adds, and what the owner actually reported, is that the selection becomes visible and the
+ * viewport stays where it was.
+ */
+test('Select all selects the whole document visibly and leaves the viewport where it was', async ({
+  page,
+}) => {
+  const { canvas } = await createAndOpenScreenplay(page);
+
+  // Enough lines that the end of the document sits well below the fold -- a screenplay page is
+  // 11in tall, so the selection head after `selectAll` is off-screen and any scroll-on-select is
+  // measurable rather than lost in rounding.
+  await canvas.click();
+  await page.keyboard.type('FIRST LINE');
+  for (let line = 0; line < 40; line += 1) {
+    await page.keyboard.press('Enter');
+    await page.keyboard.type(`Filler line ${String(line)}`);
+  }
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('LAST LINE');
+
+  /*
+   * `.editor-region` is the scroller, not the document: the shell is a fixed-height grid and the
+   * manuscript scrolls inside its own pane, so `document.scrollingElement.scrollTop` is always 0
+   * here. Asserting on the document instead is not merely imprecise, it is vacuous -- written that
+   * way first, this test still passed with the fix mutated back out, because the value it read
+   * could never change either way.
+   */
+  const scrollTopOf = () =>
+    page.evaluate(() => document.querySelector('.editor-region')!.scrollTop);
+
+  // The pane must genuinely have somewhere to scroll to, or "it did not scroll" proves nothing.
+  const overflow = await page.evaluate(() => {
+    const region = document.querySelector('.editor-region')!;
+    return region.scrollHeight - region.clientHeight;
+  });
+  expect(overflow).toBeGreaterThan(200);
+
+  // Back to the top, so a jump to the document end would be unmistakable.
+  await page.evaluate(() => {
+    document.querySelector('.editor-region')!.scrollTop = 0;
+  });
+  await expect.poll(scrollTopOf).toBe(0);
+
+  await page.getByRole('button', { name: 'Edit menu' }).click();
+  await page.getByRole('menuitem', { name: 'Select all' }).click();
+
+  // The selection is real, visible, and spans the document: the browser's own selection -- not the
+  // editor's internal state -- reaches from the first line to the last.
+  await expect
+    .poll(async () => await page.evaluate(() => window.getSelection()?.toString() ?? ''))
+    .toContain('FIRST LINE');
+  expect(await page.evaluate(() => window.getSelection()?.toString() ?? '')).toContain('LAST LINE');
+
+  // Focus is back in the document, which is what makes that selection visible at all.
+  expect(
+    await page.evaluate(() => document.activeElement?.classList.contains('ProseMirror') ?? false),
+  ).toBe(true);
+
+  // ...and the viewport did not jump to the selection's far end.
+  expect(await scrollTopOf()).toBe(0);
+});

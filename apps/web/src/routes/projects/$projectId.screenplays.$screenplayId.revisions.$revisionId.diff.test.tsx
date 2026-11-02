@@ -789,17 +789,61 @@ describe('revision diff page: the editor’s chrome, not a plainer page', () => 
     });
   });
 
-  /** The dark canvas is a view preference and the comparison has a canvas, so it is live -- the one
-   * menubar control besides File that does something here. */
+  /** The dark canvas is a view preference and the comparison has a canvas, so it is live -- now an
+   * item inside the View menu (`progress/menus-slice-1.md`), not a standalone menubar button. */
   it('offers a working dark-canvas toggle, because there is a canvas to darken', async () => {
     const user = userEvent.setup();
     renderWith(diffResult(older, newer));
 
     expect(main()).not.toHaveClass('dark');
-    await user.click(screen.getByRole('button', { name: 'Dark canvas' }));
+    await user.click(screen.getByRole('button', { name: 'View menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Dark canvas' }));
     expect(main()).toHaveClass('dark');
-    await user.click(screen.getByRole('button', { name: 'Light canvas' }));
+    await user.click(screen.getByRole('button', { name: 'View menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Light canvas' }));
     expect(main()).not.toHaveClass('dark');
+  });
+
+  /** View is the one menu, besides File, that this read-only comparison renders at all -- Edit and
+   * Format are omitted outright (the owner's decision, `progress/menus-slice-1.md`), because
+   * neither verb applies to a stored snapshot and a menu full of disabled items sharing one
+   * repeated reason would be noise, not explanation, unlike File's own six items, each disabled
+   * for its own specific, nameable reason. */
+  it('omits Edit and Format entirely, rather than rendering either full of disabled items', () => {
+    renderWith(diffResult(older, newer));
+
+    expect(screen.getByRole('button', { name: 'File menu' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'View menu' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit menu' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Format menu' })).toBeNull();
+  });
+
+  /** The View menu's own item set: the two panel toggles, the dark-canvas preference, and a Zoom
+   * submenu reusing the toolbar's own preset list (`zoomPresets.ts`) -- Fit width/Fit page really
+   * disabled for the identical reason the toolbar's own zoom preset disables them (no measured
+   * layout to fit, no recompute lifecycle), the percentages left live. */
+  it('offers Navigator, Inspector, dark canvas, and a Zoom submenu with the toolbar’s own presets', async () => {
+    const user = userEvent.setup();
+    renderWith(diffResult(older, newer));
+
+    await user.click(screen.getByRole('button', { name: 'View menu' }));
+    const viewMenu = screen.getByRole('menu');
+    expect(
+      within(viewMenu)
+        .getAllByRole('menuitem')
+        .map((item) => item.textContent),
+    ).toEqual(['Hide Navigator', 'Hide Inspector', 'Dark canvas', 'Zoom ›']);
+
+    await user.click(within(viewMenu).getByRole('menuitem', { name: 'Zoom' }));
+    const zoomSubmenu = screen.getAllByRole('menu')[1]!;
+    const fitWidth = within(zoomSubmenu).getByRole('menuitem', { name: 'Fit width' });
+    const fitPage = within(zoomSubmenu).getByRole('menuitem', { name: 'Fit page' });
+    expect(fitWidth).toBeDisabled();
+    expect(fitPage).toBeDisabled();
+    expect(within(zoomSubmenu).getByRole('menuitem', { name: '100%' })).toBeEnabled();
+
+    await user.click(within(zoomSubmenu).getByRole('menuitem', { name: '50%' }));
+    expect(screen.getByLabelText('Zoom level')).toHaveTextContent('50%');
   });
 
   /**
