@@ -39,6 +39,7 @@ import {
   startMembershipNotificationListener,
 } from './membershipNotifications.js';
 import { encodeCollabRestoredMessage } from '@finaler-draft/config';
+import { collabDebounceOverride } from './debounceOverride.js';
 
 try {
   if (shouldLoadRootEnvironment(process.env)) {
@@ -180,6 +181,22 @@ try {
     // satisfies the poll regardless of how short the debounce is -- verified directly: forcing
     // `store` to a no-op still fails the same tests with this override in place.
     ...(process.env.FINALER_SYSTEM_TEST === 'true' ? { debounce: 300, maxDebounce: 1000 } : {}),
+    //
+    // `COLLAB_DEBOUNCE_MS`/`COLLAB_MAX_DEBOUNCE_MS` are a second, narrower test-only seam, and
+    // unlike the flag above they exist to make the debounce *longer* rather than shorter.
+    // `gracefulShutdown.integration.test.ts` asserts that a checkpoint written during a `SIGTERM`
+    // is attributable to the shutdown flush rather than to the ordinary timer, and proved that by
+    // signalling inside the real 2s window -- a fixed 250ms sleep against a 2s timer. That margin
+    // held locally and failed twice on CI, where a loaded runner let the timer fire first and the
+    // `SIGKILL` control observed a checkpoint it is supposed to never see, blocking a deploy each
+    // time. Raising the debounce far past any plausible test duration makes that attribution
+    // *stronger*, not weaker: with a 30-second timer no ordinary debounce can fire during the test
+    // at all, so a checkpoint can only have come from the flush.
+    //
+    // Last in this object so it wins over the `FINALER_SYSTEM_TEST` branch above when both are set,
+    // and honoured only outside production -- a stray environment variable must never leave a
+    // production server holding edits in memory for minutes.
+    ...collabDebounceOverride(process.env),
     async onAuthenticate(data) {
       try {
         const { actorId, currentEpoch, epoch, readOnly, screenplayId, staleEpoch } =

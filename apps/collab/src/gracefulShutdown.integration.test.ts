@@ -173,6 +173,32 @@ async function waitForPortOpen(port: number, timeoutMs = 10_000): Promise<void> 
   }
 }
 
+/** Rows in the append-only update log for a screenplay, across every epoch. */
+async function countUpdateLogRows(screenplayId: string): Promise<number> {
+  const row = await pool!.query<{ count: number }>(
+    'select count(*)::int as count from document_yjs_updates where screenplay_id = $1',
+    [screenplayId],
+  );
+  return row.rows[0]?.count ?? 0;
+}
+
+/**
+ * Polls until the update log has grown past `baseline`, which is how this test knows an edit is
+ * durable without guessing at a sleep. Returns false on timeout rather than throwing, so the caller
+ * asserts on it and the failure reads as "the edit never reached the log" instead of as an opaque
+ * rejection.
+ */
+async function waitForUpdateCountAbove(screenplayId: string, baseline: number): Promise<boolean> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if ((await countUpdateLogRows(screenplayId)) > baseline) {
+      return true;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  return false;
+}
+
 async function runEditThenSignal(
   seed: { screenplayId: string; actorId: string },
   signal: 'SIGTERM' | 'SIGKILL',
@@ -191,6 +217,13 @@ async function runEditThenSignal(
       COLLAB_TOKEN_SECRET,
       PORT: String(port),
       NODE_ENV: 'test',
+      // A debounce far longer than this test can possibly take, so the ordinary timer cannot fire
+      // during it at all. This is what makes "a checkpoint exists" attributable to the shutdown
+      // flush alone -- a stronger claim than the previous approach of racing a 2s timer with a
+      // 250ms sleep, which is what failed twice on CI. `server.ts` honours these only outside
+      // production.
+      COLLAB_DEBOUNCE_MS: '30000',
+      COLLAB_MAX_DEBOUNCE_MS: '30000',
       // Deliberately *not* `FINALER_SYSTEM_TEST`: that flag shortens Hocuspocus's own debounce to
       // 300ms/1000ms specifically for the Playwright harness. Leaving the real 2s/10s defaults in
       // place is what makes this test's timing meaningful -- the signal is sent well inside that
@@ -246,6 +279,11 @@ async function runEditThenSignal(
       provider.on('authenticationFailed', onFailed);
     });
 
+    // The update-log baseline this edit will be observed against. Read *before* the edit, because
+    // opening a document collaboratively for the first time can itself append, so "any rows at all"
+    // is not evidence that this edit in particular landed.
+    const updateCountBeforeEdit = await countUpdateLogRows(screenplayId);
+
     // A real edit: insert an actual screenplay block carrying `lineText`, the same shape the
     // editor itself produces -- not a synthetic Yjs primitive unrelated to what this application
     // actually persists.
@@ -260,10 +298,25 @@ async function runEditThenSignal(
       fragment.insert(fragment.length, [block]);
     });
 
-    // Give the update a brief moment to actually reach the server and be applied/appended before
-    // signalling -- not waiting anywhere near the 2s debounce, just enough for one WebSocket round
-    // trip, confirmed generous by this suite's own repeated runs.
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+    /*
+     * Wait for the update to be *observably* durable before signalling, rather than sleeping a
+     * fixed 250ms and assuming it arrived.
+     *
+     * The old fixed sleep had to satisfy two conditions at once, and could not guarantee either
+     * under load: long enough for the update to reach the server and be appended, and short enough
+     * that the server's own debounce had not yet fired. It failed on CI in both directions --
+     * once with the `SIGKILL` case missing its text entirely (the sleep undershot the round trip),
+     * and once with the `SIGKILL` control seeing a checkpoint that only the debounce could have
+     * written (the sleep overshot the 2s timer). Each failure blocked a deploy.
+     *
+     * Polling the append-only update log removes the first condition by construction: `onChange`
+     * appends synchronously per Yjs update and is not debounced (see `server.ts`'s own comment on
+     * that hook), so a new row in `document_yjs_updates` *is* the durability this test needs before
+     * killing the process. The second condition is removed by the long `COLLAB_DEBOUNCE_MS` set in
+     * the child's environment above, not by being quick.
+     */
+    const updateLogged = await waitForUpdateCountAbove(screenplayId, updateCountBeforeEdit);
+    expect(updateLogged).toBe(true);
 
     provider.destroy();
     websocketProvider.destroy();
