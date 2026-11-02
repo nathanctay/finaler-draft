@@ -83,6 +83,16 @@ const serverEnvironment = z.object({
   // bearer JWT as a session credential, so the blast radius of the two secrets is intentionally
   // disjoint. See `@finaler-draft/collab-token`'s own top-of-file comment for the full reasoning.
   COLLAB_TOKEN_SECRET: z.string().min(32).optional(),
+  // The "Send feedback" capture path's email destination (apps/api/src/feedback.ts) -- the
+  // address the best-effort notification is sent to. Optional here for the same reason the
+  // Resend/Stripe/collab-token fields above are: a health/static-only process, and local
+  // development without a destination configured, both need to start. Unlike those, a missing
+  // value here never disables the feedback *route* itself: the database insert is authoritative
+  // and does not depend on where, or whether, the email goes (feedback.ts's own module comment).
+  // `requirePersistenceEnvironment` below makes this mandatory in production, for the identical
+  // "fails at startup, not at the first submission" reason `RESEND_API_KEY`/`MAIL_FROM_ADDRESS`
+  // already do.
+  FEEDBACK_MAIL_TO: z.string().email().optional(),
 });
 
 export type ServerEnvironment = z.infer<typeof serverEnvironment>;
@@ -107,6 +117,7 @@ export function requirePersistenceEnvironment(environment: ServerEnvironment) {
       STRIPE_PRICE_ID_MONTHLY: z.string().optional(),
       STRIPE_PRICE_ID_ANNUAL: z.string().optional(),
       COLLAB_TOKEN_SECRET: z.string().min(32).optional(),
+      FEEDBACK_MAIL_TO: z.string().email().optional(),
     })
     .parse(environment);
   if (environment.NODE_ENV === 'production') {
@@ -150,6 +161,17 @@ export function requirePersistenceEnvironment(environment: ServerEnvironment) {
         'STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID_MONTHLY, and ' +
           'STRIPE_PRICE_ID_ANNUAL are required in production: without them, subscription ' +
           'billing cannot verify webhooks or price a subscription.',
+      );
+    }
+    // The "Send feedback" capture path (apps/api/src/feedback.ts). A production process started
+    // without this has nowhere to send the best-effort notification email -- failing here, at
+    // startup, turns that into a deploy-time error instead of the owner silently never hearing
+    // about a submitted feedback row (which is still written regardless; this check governs only
+    // the email half of the feature, not whether feedback is captured at all).
+    if (!persistence.FEEDBACK_MAIL_TO) {
+      throw new Error(
+        'FEEDBACK_MAIL_TO is required in production: without it, the "Send feedback" capture ' +
+          "path's best-effort notification email has no destination address.",
       );
     }
   }

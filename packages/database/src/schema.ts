@@ -598,6 +598,50 @@ export const screenplayMembers = pgTable(
   ],
 );
 
+/**
+ * The "Send feedback" capture path (apps/api/src/feedback.ts) -- a signed-in writer's message to
+ * the owner, auto-attached with the context they didn't have to type. One row per submission,
+ * written once and never updated, and never read back by this application at all: there is no
+ * route anywhere that selects from this table. The owner reads it directly through Drizzle Studio
+ * (`pnpm --filter @finaler-draft/database db:studio`). See `feedback.ts`'s own module comment for
+ * why "no read endpoint, not even a role-gated one" is the actual security property this table's
+ * PII depends on, and `feedbackNoReadPath.test.ts` for how that property is asserted against the
+ * app's real, enumerated route tree rather than merely against one hardcoded URL.
+ *
+ * `userId` is a foreign key, not a denormalized copy of the writer's email -- a join to `user` is
+ * what a Drizzle Studio session uses to see who sent it, rather than this table carrying a second,
+ * independently-staling copy of an address `user.email` already owns.
+ *
+ * **`onDelete: 'cascade'`**, deliberately unlike `documentRevisions.authoredBy` or
+ * `membershipInvitations.invitedByUserId`, both of which keep their row alive with authorship
+ * merely un-attributed after the author's account is gone -- because both of those rows have a
+ * *second* subject (a project's shared history, another member's invitation) that still needs to
+ * exist once the author is deleted. A feedback row has no second subject: it is a message about and
+ * from exactly one account, read by nobody but the owner, and account deletion (an upcoming launch
+ * requirement -- see plan.md) is a request that a person's data stop existing. Keeping their
+ * message text around, attributed to a user id that no longer resolves to anyone, would not serve
+ * any reader this table has; it would only be PII outliving the deletion request meant to remove
+ * it. Cascading here is the one choice that actually honors that request.
+ */
+export const feedback = pgTable(
+  'feedback',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    body: text('body').notNull(),
+    // The auto-attached context bundle -- route, screenplay id (if any), app version -- written
+    // exactly as `feedback.ts`'s `feedbackContextInput` validated it. That schema is `.strict()`,
+    // which is the actual enforcement of "no manuscript text can be copied" the owner required:
+    // an unknown field (document content, most pointedly) is rejected at the write boundary
+    // before it ever reaches this column, rather than silently accepted into a free-form blob.
+    context: jsonb('context').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index('feedback_user_id_index').on(table.userId)],
+);
+
 export const invitationStatus = pgEnum('invitation_status', ['pending', 'accepted', 'declined']);
 
 /**

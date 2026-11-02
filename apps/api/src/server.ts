@@ -6,6 +6,8 @@ import { createEntitlementEnforcedProjectStore } from './entitlementProjectStore
 import { createPostgresEntitlementStore } from './entitlementStore.js';
 import { loadRootEnvironment, shouldLoadRootEnvironment } from './environment.js';
 import { selectMailPort, type MailMessage } from '@finaler-draft/auth-server/mail';
+import { createPostgresFeedbackStore } from './feedback.js';
+import { createFeedbackMailNotifier } from './feedbackMail.js';
 import { createInvitationMailNotifier } from './invitationMail.js';
 import { createPostgresProjectStore } from './projects.js';
 import { createPostgresRevisionStore } from './revisions.js';
@@ -221,6 +223,21 @@ async function buildPersistentApp(
     // redirects use, and the invitation email needs it for the one link it carries -- a link to the
     // invitee's own dashboard, never an accept token.
     sharing: createPostgresSharingStore(pool, createInvitationMailNotifier(mail, appOrigin)),
+    // The "Send feedback" capture path. Always wired, regardless of whether `FEEDBACK_MAIL_TO`
+    // is configured -- unlike `stripe`/`billing`/`collab` below, this route's existence does not
+    // depend on an optional destination, because the database insert it performs is authoritative
+    // on its own (feedback.ts's own module comment). The notifier passed to the store is the one
+    // thing that *does* depend on `FEEDBACK_MAIL_TO`: with no destination configured (every
+    // environment short of production, where `requirePersistenceEnvironment` already makes it
+    // mandatory), `undefined` is passed instead of a notifier, and the store simply never attempts
+    // an email -- not a failure, just nothing to do, the identical "absent means not attempted"
+    // contract every other optional dependency in this file already follows.
+    feedback: createPostgresFeedbackStore(
+      pool,
+      persistence.FEEDBACK_MAIL_TO
+        ? createFeedbackMailNotifier(mail, persistence.FEEDBACK_MAIL_TO)
+        : undefined,
+    ),
     collab: collabTokenConfigured ? { secret: persistence.COLLAB_TOKEN_SECRET! } : undefined,
     stripe: stripeConfigured
       ? {
