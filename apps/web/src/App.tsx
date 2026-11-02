@@ -93,6 +93,7 @@ import {
   restoreCentredScroll,
   restorePointerAnchoredScroll,
   ZOOM_DEFAULT_PERCENT,
+  ZOOM_PRESET_PERCENTS,
   ZOOM_STEP_PERCENT,
   type PointerZoomCapture,
   type ZoomMode,
@@ -526,6 +527,13 @@ export function App({
   const [pageCount, setPageCount] = useState(0);
   const [activeElement, setActiveElement] = useState<ScreenplayElementType>('scene_heading');
   const [activeBlockId, setActiveBlockId] = useState<string>();
+  // Whether the editor's own selection currently spans any text -- read from the ProseMirror
+  // model (`editor.state.selection.empty`), not the browser's native DOM Selection. The Edit menu's
+  // Cut and Copy items are disabled without this, and both source the text they act on from this
+  // same model (see `copySelectionText` below) for the identical reason: a menu item's own click
+  // moves DOM focus onto its `<button>`, which is exactly the moment a check against the native
+  // Selection would already be stale.
+  const [hasSelection, setHasSelection] = useState(false);
   const [projection, setProjection] = useState<LocalScreenplayProjection>({
     issues: ['Editor is starting.'],
     valid: false,
@@ -785,6 +793,7 @@ export function App({
       setActiveBlockId(currentBlock.id);
       setActiveElement(currentBlock.element);
     }
+    setHasSelection(!editorInstance.state.selection.empty);
     const nextProjection = projectLocalScreenplay(editorInstance, {
       documentSettings,
       id: initial.id,
@@ -1745,6 +1754,77 @@ export function App({
     syncEditorState(editor);
   };
 
+  /**
+   * Whether writing to the clipboard is actually reachable in this browser -- checked live, each
+   * render, rather than once at module load, so a test can stand up `navigator.clipboard` (jsdom
+   * has none by default) before rendering and see the Edit menu's Cut/Copy items react to it.
+   * `writeText`, specifically: the write half of the Clipboard API, which every engine this
+   * product supports grants from inside a synchronous user-gesture handler with no permission
+   * prompt -- unlike `readText`, the read half a menu Paste would need, which Safari and Firefox
+   * both gate or refuse. That asymmetry is the whole reason there is a Cut and a Copy below and no
+   * Paste; see the "No Paste" comment where the Edit menu's items are built.
+   */
+  const clipboardWriteSupported = typeof navigator.clipboard?.writeText === 'function';
+  const CLIPBOARD_UNAVAILABLE_REASON = 'Clipboard access is not available in this browser.';
+
+  /**
+   * Copy's own text, read from the ProseMirror model (`editor.state.selection`) rather than the
+   * browser's native DOM Selection. The two diverge at exactly the moment this matters:
+   * `OverflowMenu`'s Copy item is a real `<button>`, and activating it moves DOM focus onto that
+   * button before `onSelect` ever runs -- a check or a copy built on `document.getSelection()` (or
+   * `document.execCommand('copy')`, which reads that same native selection) would see it already
+   * collapsed or moved by the time this handler sees it, not the range the writer actually
+   * highlighted. `editor.state.selection` is Tiptap/ProseMirror's own model, unaffected by where
+   * DOM focus currently is -- only a dispatched transaction ever changes it -- so it still holds
+   * the writer's real selection regardless of the click that got here. `textBetween`'s block
+   * separator is `'\n'`: each `screenplayBlock` is a block-level node, so a selection spanning more
+   * than one renders as one line per block, matching how a multi-line plain-text paste is already
+   * split (`progress/paste-sanitization.md`).
+   */
+  function copySelectionText(editorInstance: Editor): string {
+    const { from, to } = editorInstance.state.selection;
+    return editorInstance.state.doc.textBetween(from, to, '\n');
+  }
+
+  /** Copy: never touches the document, so it carries no `editingAllowed` guard and no undo entry
+   * -- only a successful write is worth telling the writer about failing, which is why a rejected
+   * `writeText` surfaces in the same toast an export failure already uses. */
+  const copySelection = () => {
+    if (!editor) return;
+    navigator.clipboard.writeText(copySelectionText(editor)).catch((error: unknown) => {
+      console.error('Copy failed:', error);
+      setToast({
+        message: error instanceof Error ? error.message : 'Copy failed for an unknown reason.',
+        title: 'Copy failed',
+      });
+    });
+  };
+
+  /**
+   * Cut: copy, then delete the selection -- in that order, and the delete runs only once the write
+   * has actually succeeded. Deleting first and writing second would risk losing the selected text
+   * for good if the clipboard write then failed; this way a failed write leaves the document
+   * exactly as it was, with the same toast Copy's own failure uses.
+   */
+  const cutSelection = () => {
+    if (!editor || !editingAllowed) return;
+    const text = copySelectionText(editor);
+    navigator.clipboard.writeText(text).then(
+      () => {
+        editor.commands.deleteSelection();
+        editor.commands.focus(undefined, { scrollIntoView: false });
+        syncEditorState(editor);
+      },
+      (error: unknown) => {
+        console.error('Cut failed:', error);
+        setToast({
+          message: error instanceof Error ? error.message : 'Cut failed for an unknown reason.',
+          title: 'Cut failed',
+        });
+      },
+    );
+  };
+
   // The read-only banner's "Make this one editable" button. `entitlementReadOnly.onMakeEditable`
   // is the route's own call through to `PUT /api/entitlement/editable-screenplay`
   // (api.ts's `switchEditableScreenplay`); this only owns the button's own pending/error
@@ -1976,6 +2056,21 @@ export function App({
   const syncTimedOut =
     initialContent !== undefined && readOnlyReason === undefined && syncState === 'timedOut';
 
+  // The one sentence every menu item gated on `editingAllowed` shows as its `disabledReason` when
+  // it is `false` -- the File menu's "Document settings…" and "Save named revision…" computed this
+  // same ternary independently before the Edit and Format menus arrived with three more gated
+  // items apiece (Undo, Redo, Cut, and every entry in Format's "Element type" submenu); one
+  // `undefined` here means "editing is allowed", matching `disabled: !editingAllowed`'s own sense.
+  const readOnlyMenuReason: string | undefined = !editingAllowed
+    ? awaitingFirstSync
+      ? 'Read-only: connecting to the collaboration server'
+      : syncDenied
+        ? 'Read-only: access to this screenplay could not be confirmed'
+        : syncTimedOut
+          ? 'Read-only: still trying to connect to the collaboration server'
+          : 'Read-only: this screenplay is not your account’s editable one'
+    : undefined;
+
   // The banner row -- `ApplicationShell`'s `banner` slot (applicationShell.tsx). One expression,
   // not two: this used to be a `has-readonly-banner` modifier class computed here from these five
   // reasons *and*, separately, five conditional children rendered a hundred lines below it. That
@@ -2203,24 +2298,113 @@ export function App({
           file's) that keeps Tiptap, y-prosemirror, the Hocuspocus provider and the pagination plugin
           out of the comparison's chunk.
 
-          Only File is a working menu this increment (plan.md schedules activating the other five
-          alongside the Characters tab, a separate, out-of-scope item); `ApplicationMenubar` renders
-          those five as the inert labels they still are.
+          File, Edit, View and Format are working menus this slice (`progress/menus-slice-1.md`);
+          Tools and Help are later slices, and `ApplicationMenubar` still renders those two as the
+          inert labels they remain. The dark-canvas toggle, previously a loose `<button>` sitting
+          in this row next to the menus, now lives inside `viewMenuItems` below -- it is a view
+          preference, like the other three, not a piece of chrome that belongs beside the menus
+          rather than inside one of them.
         */
         <ApplicationMenubar
-          canvasToggle={{ dark, onToggle: () => setDark((value) => !value) }}
+          editMenuItems={[
+            {
+              disabled: !editingAllowed || !editor?.can().undo(),
+              disabledReason: !editingAllowed
+                ? readOnlyMenuReason
+                : !editor?.can().undo()
+                  ? 'Nothing to undo.'
+                  : undefined,
+              label: 'Undo',
+              onSelect: () => editor?.commands.undo(),
+            },
+            {
+              disabled: !editingAllowed || !editor?.can().redo(),
+              disabledReason: !editingAllowed
+                ? readOnlyMenuReason
+                : !editor?.can().redo()
+                  ? 'Nothing to redo.'
+                  : undefined,
+              label: 'Redo',
+              onSelect: () => editor?.commands.redo(),
+            },
+            {
+              // Cut mutates the document (it removes the selection once the clipboard write
+              // succeeds -- see `cutSelection`), so it is gated on `editingAllowed` exactly like
+              // every other item that changes the document; Copy below is not, because it never
+              // touches the document and a reviewer is entitled to copy text even though they
+              // cannot cut it.
+              disabled: !editingAllowed || !hasSelection || !clipboardWriteSupported,
+              disabledReason: !editingAllowed
+                ? readOnlyMenuReason
+                : !hasSelection
+                  ? 'Select text in the document first.'
+                  : !clipboardWriteSupported
+                    ? CLIPBOARD_UNAVAILABLE_REASON
+                    : undefined,
+              label: 'Cut',
+              onSelect: cutSelection,
+            },
+            {
+              disabled: !hasSelection || !clipboardWriteSupported,
+              disabledReason: !hasSelection
+                ? 'Select text in the document first.'
+                : !clipboardWriteSupported
+                  ? CLIPBOARD_UNAVAILABLE_REASON
+                  : undefined,
+              label: 'Copy',
+              onSelect: copySelection,
+            },
+            // No Paste. The owner's own words: "if we can still right click to paste, we can leave
+            // that out of the menu for now." A menu Paste would need `navigator.clipboard.readText()`
+            // to get anything onto the document, and Safari and Firefox both gate or refuse that call
+            // outright (unlike the `writeText()` Cut and Copy use above, which every engine grants
+            // from a user-gesture handler with no prompt) -- a menu item built on it would silently
+            // fail on two of the three engines this product supports, which is exactly the dead
+            // control this slice's whole clipboard section exists to rule out. Right-click paste and
+            // Ctrl+V both still work; they go through the browser's native paste event, not this menu.
+            // Do not add this back without solving that.
+            {
+              // Select all never touches the document -- it only moves the selection -- so unlike
+              // Cut it needs no `editingAllowed` gate; a reviewer may select the whole manuscript to
+              // copy it exactly as they may select any smaller range.
+              disabled: !editor,
+              disabledReason: editor ? undefined : 'No document to select.',
+              label: 'Select all',
+              /*
+               * `focus` after `selectAll`, and the two sequential `commands` calls mirror
+               * `cutSelection` above deliberately. Selecting from a menu item means the document
+               * does not have focus -- the menu button does -- and ProseMirror paints no selection
+               * at all through a view that is not focused, so without this the whole manuscript was
+               * selected in the editor's state while the writer saw nothing happen.
+               *
+               * `scrollIntoView: false` for the same reason `cutSelection` passes it: `selectAll`
+               * leaves the selection head at the end of the document, so the default scroll jumps
+               * to the last page -- which, with no visible selection, read as "Select all scrolls
+               * me to the bottom" and nothing else. Selecting everything should leave the writer
+               * looking at the page they were already on.
+               */
+              onSelect: () => {
+                if (!editor) return;
+                const region = editorRegionRef.current;
+                const scrollTop = region?.scrollTop;
+                editor.commands.selectAll();
+                /*
+                 * `view.focus()` rather than Tiptap's `focus` command, and the difference matters:
+                 * the command defers the real `view.focus()` into a `requestAnimationFrame`, so its
+                 * callback can land *after* the writer has already opened another menu -- and
+                 * `OverflowMenu` closes on focus leaving it, so the menu they just opened would
+                 * shut by itself a frame later. Four existing Cut/Copy tests, which reopen the Edit
+                 * menu after selecting, failed exactly that way before this was made synchronous.
+                 */
+                editor.view.focus();
+                if (region && scrollTop !== undefined) region.scrollTop = scrollTop;
+              },
+            },
+          ]}
           fileMenuItems={[
             {
               disabled: !editingAllowed,
-              disabledReason: !editingAllowed
-                ? awaitingFirstSync
-                  ? 'Read-only: connecting to the collaboration server'
-                  : syncDenied
-                    ? 'Read-only: access to this screenplay could not be confirmed'
-                    : syncTimedOut
-                      ? 'Read-only: still trying to connect to the collaboration server'
-                      : 'Read-only: this screenplay is not your account’s editable one'
-                : undefined,
+              disabledReason: readOnlyMenuReason,
               label: 'Document settings…',
               onSelect: () => setSettingsDialogOpen(true),
             },
@@ -2229,15 +2413,7 @@ export function App({
               // milestone is offered wherever this screenplay is genuinely this writer's to
               // change right now, not a second, independently-computed availability rule.
               disabled: !editingAllowed,
-              disabledReason: !editingAllowed
-                ? awaitingFirstSync
-                  ? 'Read-only: connecting to the collaboration server'
-                  : syncDenied
-                    ? 'Read-only: access to this screenplay could not be confirmed'
-                    : syncTimedOut
-                      ? 'Read-only: still trying to connect to the collaboration server'
-                      : 'Read-only: this screenplay is not your account’s editable one'
-                : undefined,
+              disabledReason: readOnlyMenuReason,
               label: 'Save named revision…',
               onSelect: () => setNamedRevisionDialogOpen(true),
             },
@@ -2344,6 +2520,42 @@ export function App({
             },
           ]}
           fileMenuRef={fileMenuRef}
+          formatMenuItems={[
+            {
+              label: 'Element type',
+              submenuItems: screenplayElementTypes.map((element) => ({
+                disabled: !editingAllowed,
+                disabledReason: readOnlyMenuReason,
+                label: displayElement(element),
+                onSelect: () => changeElement(element),
+              })),
+            },
+          ]}
+          viewMenuItems={[
+            {
+              label: panels.navigator ? 'Hide Navigator' : 'Show Navigator',
+              onSelect: () => togglePanel('navigator'),
+            },
+            {
+              label: panels.inspector ? 'Hide Inspector' : 'Show Inspector',
+              onSelect: () => togglePanel('inspector'),
+            },
+            {
+              label: dark ? 'Light canvas' : 'Dark canvas',
+              onSelect: () => setDark((value) => !value),
+            },
+            {
+              label: 'Zoom',
+              submenuItems: [
+                { label: 'Fit width', onSelect: () => chooseZoomPreset('fit-width') },
+                { label: 'Fit page', onSelect: () => chooseZoomPreset('fit-page') },
+                ...ZOOM_PRESET_PERCENTS.map((percent) => ({
+                  label: `${percent}%`,
+                  onSelect: () => chooseZoomPreset(String(percent)),
+                })),
+              ],
+            },
+          ]}
         />
       }
       outOfFlow={

@@ -4,53 +4,53 @@ import { createRef } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { ApplicationMenubar } from './applicationMenubar.js';
 
-/** The five menus plan.md still has to activate. Written out here rather than imported from the
+/** The two menus plan.md still has to activate. Written out here rather than imported from the
  * component: the module exports components only (a Fast Refresh requirement the lint config enforces),
  * and a test that restates the expected labels is in any case a better check than one that compares the
  * implementation to itself. */
-const INERT_MENU_LABELS = ['Edit', 'View', 'Format', 'Tools', 'Help'] as const;
+const INERT_MENU_LABELS = ['Tools', 'Help'] as const;
+
+const ONLY_FILE_ITEM = [{ label: 'Only item', onSelect: vi.fn() }];
 
 /**
  * The menu bar, now one component rendered by the editor and by the read-only revision comparison
  * both. What matters here is the same pair of properties the toolbar's tests check: the whole bar is
  * present on either screen, and an item that cannot act is really disabled -- a native `disabled`
- * `<button>` carrying its reason, never an enabled-looking item whose handler quietly declines.
+ * `<button>` carrying its reason, never an enabled-looking item whose handler quietly declines. New
+ * to this slice: Edit, View and Format are real menus built from caller-supplied items exactly like
+ * File already was, and a menu given no items (the prop omitted, or passed `[]`) does not render at
+ * all -- not as a button, not as a label.
  */
 function menubar(): HTMLElement {
   return screen.getByRole('navigation', { name: 'Application menu' });
 }
 
-async function openFileMenu(user: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> {
-  await user.click(screen.getByRole('button', { name: 'File menu' }));
+async function openMenu(
+  user: ReturnType<typeof userEvent.setup>,
+  triggerName: string,
+): Promise<HTMLElement> {
+  await user.click(screen.getByRole('button', { name: triggerName }));
   return screen.getByRole('menu');
 }
 
 describe('application menubar', () => {
-  it('renders the File menu, the five labels still to come, and the canvas toggle', () => {
-    render(
-      <ApplicationMenubar
-        canvasToggle={{ dark: false, onToggle: vi.fn() }}
-        fileMenuItems={[{ label: 'Only item', onSelect: vi.fn() }]}
-      />,
-    );
+  it('renders the File menu alone, with the two labels still to come, when no other menu is given items', () => {
+    render(<ApplicationMenubar fileMenuItems={ONLY_FILE_ITEM} />);
 
     expect(within(menubar()).getByRole('button', { name: 'File menu' })).toBeInTheDocument();
     for (const label of INERT_MENU_LABELS) {
       expect(within(menubar()).getByText(label)).toBeInTheDocument();
     }
-    expect(within(menubar()).getByRole('button', { name: 'Dark canvas' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit menu' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'View menu' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Format menu' })).toBeNull();
   });
 
-  /** The five are labels, not controls: plan.md schedules activating them later, and until then a
+  /** The two are labels, not controls: plan.md schedules activating them later, and until then a
    * `<span>` is the honest rendering -- nothing announces them as operable, so there is no disabled
    * state for them to get wrong. */
-  it('leaves the five still-to-come menus as inert labels rather than controls', () => {
-    render(
-      <ApplicationMenubar
-        canvasToggle={{ dark: false, onToggle: vi.fn() }}
-        fileMenuItems={[{ label: 'Only item', onSelect: vi.fn() }]}
-      />,
-    );
+  it('leaves the two still-to-come menus as inert labels rather than controls', () => {
+    render(<ApplicationMenubar fileMenuItems={ONLY_FILE_ITEM} />);
 
     for (const label of INERT_MENU_LABELS) {
       expect(screen.queryByRole('button', { name: label })).toBeNull();
@@ -58,35 +58,11 @@ describe('application menubar', () => {
     }
   });
 
-  it('names the canvas toggle for the state it moves to, and reports the click', async () => {
-    const user = userEvent.setup();
-    const onToggle = vi.fn();
-    const { rerender } = render(
-      <ApplicationMenubar
-        canvasToggle={{ dark: false, onToggle }}
-        fileMenuItems={[{ label: 'Only item', onSelect: vi.fn() }]}
-      />,
-    );
-
-    await user.click(screen.getByRole('button', { name: 'Dark canvas' }));
-    expect(onToggle).toHaveBeenCalledTimes(1);
-
-    rerender(
-      <ApplicationMenubar
-        canvasToggle={{ dark: true, onToggle }}
-        fileMenuItems={[{ label: 'Only item', onSelect: vi.fn() }]}
-      />,
-    );
-    expect(screen.getByRole('button', { name: 'Light canvas' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Dark canvas' })).toBeNull();
-  });
-
   it('renders the caller’s File items in order and fires the chosen one', async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
     render(
       <ApplicationMenubar
-        canvasToggle={{ dark: false, onToggle: vi.fn() }}
         fileMenuItems={[
           { label: 'First…', onSelect },
           { label: 'Second…', onSelect: vi.fn() },
@@ -94,7 +70,7 @@ describe('application menubar', () => {
       />,
     );
 
-    const menu = await openFileMenu(user);
+    const menu = await openMenu(user, 'File menu');
     expect(
       within(menu)
         .getAllByRole('menuitem')
@@ -119,7 +95,6 @@ describe('application menubar', () => {
     const neverCalled = vi.fn();
     render(
       <ApplicationMenubar
-        canvasToggle={{ dark: false, onToggle: vi.fn() }}
         fileMenuItems={[
           {
             disabled: true,
@@ -132,7 +107,7 @@ describe('application menubar', () => {
       />,
     );
 
-    const menu = await openFileMenu(user);
+    const menu = await openMenu(user, 'File menu');
     const save = within(menu).getByRole('menuitem', { name: 'Save…' });
     expect(save).toBeDisabled();
     expect(save).toHaveAttribute('title', 'Nothing here to save.');
@@ -147,29 +122,119 @@ describe('application menubar', () => {
     const user = userEvent.setup();
     render(
       <ApplicationMenubar
-        canvasToggle={{ dark: false, onToggle: vi.fn() }}
         fileMenuItems={[{ disabled: true, disabledReason: 'No.', label: 'Save…' }]}
       />,
     );
 
-    const menu = await openFileMenu(user);
+    const menu = await openMenu(user, 'File menu');
     await user.click(within(menu).getByRole('menuitem', { name: 'Save…' }));
     expect(within(menu).getByRole('menuitem', { name: 'Save…' })).toBeDisabled();
   });
 
   it('attaches the caller’s ref to the File menu wrapper, so focus can be returned to its trigger', () => {
     const ref = createRef<HTMLDivElement>();
-    render(
-      <ApplicationMenubar
-        canvasToggle={{ dark: false, onToggle: vi.fn() }}
-        fileMenuItems={[{ label: 'Only item', onSelect: vi.fn() }]}
-        fileMenuRef={ref}
-      />,
-    );
+    render(<ApplicationMenubar fileMenuItems={ONLY_FILE_ITEM} fileMenuRef={ref} />);
 
     expect(ref.current).toHaveClass('menu-file');
     expect(ref.current?.querySelector('.overflow-menu-trigger')).toBe(
       screen.getByRole('button', { name: 'File menu' }),
     );
+  });
+
+  describe('Edit, View and Format: a menu with no items does not render at all', () => {
+    it('renders Edit when given items, and fires the chosen one', async () => {
+      const user = userEvent.setup();
+      const onSelect = vi.fn();
+      render(
+        <ApplicationMenubar
+          editMenuItems={[{ label: 'Undo', onSelect }]}
+          fileMenuItems={ONLY_FILE_ITEM}
+        />,
+      );
+
+      expect(within(menubar()).getByRole('button', { name: 'Edit menu' })).toBeInTheDocument();
+      const menu = await openMenu(user, 'Edit menu');
+      await user.click(within(menu).getByRole('menuitem', { name: 'Undo' }));
+      expect(onSelect).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not render Edit when the prop is omitted', () => {
+      render(<ApplicationMenubar fileMenuItems={ONLY_FILE_ITEM} />);
+      expect(screen.queryByRole('button', { name: 'Edit menu' })).toBeNull();
+    });
+
+    /** The empty-array case is distinct from "omitted" in TypeScript's eyes and must be proven
+     * separately: a caller that always passes an array (built from a list that happens to be
+     * empty, e.g. every submenu child disabled and the caller choosing to drop the parent too)
+     * must get the identical "cut" behaviour, not a menu with a trigger and nothing inside it. */
+    it('does not render Edit when given an empty array either', () => {
+      render(<ApplicationMenubar editMenuItems={[]} fileMenuItems={ONLY_FILE_ITEM} />);
+      expect(screen.queryByRole('button', { name: 'Edit menu' })).toBeNull();
+    });
+
+    it('renders View when given items, and fires the chosen one', async () => {
+      const user = userEvent.setup();
+      const onSelect = vi.fn();
+      render(
+        <ApplicationMenubar
+          fileMenuItems={ONLY_FILE_ITEM}
+          viewMenuItems={[{ label: 'Dark canvas', onSelect }]}
+        />,
+      );
+
+      expect(within(menubar()).getByRole('button', { name: 'View menu' })).toBeInTheDocument();
+      const menu = await openMenu(user, 'View menu');
+      await user.click(within(menu).getByRole('menuitem', { name: 'Dark canvas' }));
+      expect(onSelect).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not render View when the prop is omitted or empty', () => {
+      const { rerender } = render(<ApplicationMenubar fileMenuItems={ONLY_FILE_ITEM} />);
+      expect(screen.queryByRole('button', { name: 'View menu' })).toBeNull();
+
+      rerender(<ApplicationMenubar fileMenuItems={ONLY_FILE_ITEM} viewMenuItems={[]} />);
+      expect(screen.queryByRole('button', { name: 'View menu' })).toBeNull();
+    });
+
+    it('renders Format when given items, and fires the chosen one', async () => {
+      const user = userEvent.setup();
+      const onSelect = vi.fn();
+      render(
+        <ApplicationMenubar
+          fileMenuItems={ONLY_FILE_ITEM}
+          formatMenuItems={[{ label: 'Scene Heading', onSelect }]}
+        />,
+      );
+
+      expect(within(menubar()).getByRole('button', { name: 'Format menu' })).toBeInTheDocument();
+      const menu = await openMenu(user, 'Format menu');
+      await user.click(within(menu).getByRole('menuitem', { name: 'Scene Heading' }));
+      expect(onSelect).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not render Format when the prop is omitted or empty', () => {
+      const { rerender } = render(<ApplicationMenubar fileMenuItems={ONLY_FILE_ITEM} />);
+      expect(screen.queryByRole('button', { name: 'Format menu' })).toBeNull();
+
+      rerender(<ApplicationMenubar fileMenuItems={ONLY_FILE_ITEM} formatMenuItems={[]} />);
+      expect(screen.queryByRole('button', { name: 'Format menu' })).toBeNull();
+    });
+
+    /** The comparison route's own real shape: File and View real, Edit and Format cut entirely --
+     * proven together so a reader sees the actual combination this slice ships, not just each
+     * menu's presence rule in isolation. */
+    it('renders exactly File and View, with Edit and Format absent, matching the comparison route’s own choice', () => {
+      render(
+        <ApplicationMenubar
+          fileMenuItems={ONLY_FILE_ITEM}
+          viewMenuItems={[{ label: 'Dark canvas', onSelect: vi.fn() }]}
+        />,
+      );
+
+      expect(within(menubar()).getByRole('button', { name: 'File menu' })).toBeInTheDocument();
+      expect(within(menubar()).getByRole('button', { name: 'View menu' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Edit menu' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Format menu' })).toBeNull();
+    });
   });
 });

@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { Editor } from '@tiptap/core';
 import { AllSelection, TextSelection } from '@tiptap/pm/state';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as Y from 'yjs';
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import {
@@ -928,7 +928,10 @@ describe('local semantic screenplay editor', () => {
 
     const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
     await user.click(screen.getByRole('button', { name: 'Close inspector' }));
-    await user.click(screen.getByRole('button', { name: 'Dark canvas' }));
+    // The dark-canvas toggle moved into the View menu this slice (`progress/menus-slice-1.md`);
+    // it is no longer a standalone button in the menubar row.
+    await user.click(screen.getByRole('button', { name: 'View menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Dark canvas' }));
     await user.click(screen.getByRole('button', { name: 'Zoom in' }));
 
     expect(screen.getByRole('main')).toHaveClass('dark');
@@ -2965,5 +2968,369 @@ describe('role-driven read-only', () => {
     expect(action).toBeEnabled();
     await user.click(action);
     expect(onMakeEditable).toHaveBeenCalledOnce();
+  });
+});
+
+/**
+ * The Edit, View and Format menus (`progress/menus-slice-1.md`) -- `applicationMenubar.test.tsx`
+ * already proves the shared "no items, no menu" mechanism and `OverflowMenu.test.tsx` already
+ * proves submenu mechanics in general; what belongs here is that this app's own three menus are
+ * wired to the capabilities they claim to surface -- the same undo/redo the toolbar already
+ * drives, the same element list the toolbar's own `<select>` offers, and a genuinely-working
+ * Cut/Copy rather than a control that looks live and silently does nothing
+ * (`progress/paste-sanitization.md` requirement 2, the rule every gated item here follows).
+ */
+describe('Edit, View and Format menus', () => {
+  /**
+   * jsdom has no Clipboard API at all (`navigator.clipboard` is `undefined` by default, confirmed
+   * directly against the installed jsdom) -- every test below that needs Cut or Copy to actually
+   * run installs this first, and the one test that deliberately leaves it uninstalled is proving
+   * the opposite case: that the Edit menu notices and disables itself rather than calling into
+   * nothing.
+   */
+  function stubClipboardWrite(
+    writeText: ReturnType<typeof vi.fn> = vi.fn().mockResolvedValue(undefined),
+  ): ReturnType<typeof vi.fn> {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    return writeText;
+  }
+
+  // `configurable: true` above is what makes this safe: without it, a second
+  // `Object.defineProperty` call (the next test that stubs the clipboard) would throw.
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'clipboard');
+  });
+
+  async function openMenu(
+    user: ReturnType<typeof userEvent.setup>,
+    triggerName: string,
+  ): Promise<HTMLElement> {
+    await user.click(screen.getByRole('button', { name: triggerName }));
+    return screen.getByRole('menu');
+  }
+
+  it('lists Undo, Redo, Cut, Copy and Select all, with no Paste', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const menu = await openMenu(user, 'Edit menu');
+    expect(
+      within(menu)
+        .getAllByRole('menuitem')
+        .map((item) => item.textContent),
+    ).toEqual(['Undo', 'Redo', 'Cut', 'Copy', 'Select all']);
+  });
+
+  it('mirrors the toolbar’s own undo/redo availability and action', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    let menu = await openMenu(user, 'Edit menu');
+    expect(within(menu).getByRole('menuitem', { name: 'Undo' })).toBeDisabled();
+    expect(within(menu).getByRole('menuitem', { name: 'Undo' })).toHaveAttribute(
+      'title',
+      'Nothing to undo.',
+    );
+    expect(within(menu).getByRole('menuitem', { name: 'Redo' })).toBeDisabled();
+    await user.keyboard('{Escape}');
+
+    await user.click(screen.getByRole('button', { name: /1\. INT\. APARTMENT/i }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Active screenplay element' }),
+      'character',
+    );
+    expect(getBlock(canvas, firstSceneId)).toHaveAttribute('data-screenplay-element', 'character');
+
+    menu = await openMenu(user, 'Edit menu');
+    const undo = within(menu).getByRole('menuitem', { name: 'Undo' });
+    expect(undo).toBeEnabled();
+    await user.click(undo);
+    expect(getBlock(canvas, firstSceneId)).toHaveAttribute(
+      'data-screenplay-element',
+      'scene_heading',
+    );
+
+    menu = await openMenu(user, 'Edit menu');
+    const redo = within(menu).getByRole('menuitem', { name: 'Redo' });
+    expect(redo).toBeEnabled();
+    await user.click(redo);
+    expect(getBlock(canvas, firstSceneId)).toHaveAttribute('data-screenplay-element', 'character');
+  });
+
+  it('disables Cut and Copy until something is selected, naming why', async () => {
+    const user = userEvent.setup();
+    stubClipboardWrite();
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const menu = await openMenu(user, 'Edit menu');
+    const cut = within(menu).getByRole('menuitem', { name: 'Cut' });
+    const copy = within(menu).getByRole('menuitem', { name: 'Copy' });
+    expect(cut).toBeDisabled();
+    expect(cut).toHaveAttribute('title', 'Select text in the document first.');
+    expect(copy).toBeDisabled();
+    expect(copy).toHaveAttribute('title', 'Select text in the document first.');
+  });
+
+  /*
+   * The defect this covers: `selectAll` alone moved the selection in the editor's state and left
+   * focus on the menu item that was just clicked. ProseMirror paints no selection through an
+   * unfocused view, so the whole manuscript was selected and the writer saw nothing at all -- and
+   * because `selectAll` leaves the selection head at the end of the document, the default
+   * `scrollIntoView` then jumped to the last page, which is the only feedback there was.
+   *
+   * The scroll half of that is not assertable here: jsdom performs no layout, so there is no
+   * scroll position to read. What is assertable, and is the actual cause of the invisible
+   * selection, is that focus returns to the canvas -- `App.tsx` passes `scrollIntoView: false`
+   * alongside it for the other half.
+   */
+  it('returns focus to the canvas when Select all runs, so the selection is actually visible', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    // Focus starts on the menu item, not the document: `openMenu` clicks the trigger, and the
+    // click on "Select all" below leaves focus inside the menu unless something moves it back.
+    const menu = await openMenu(user, 'Edit menu');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Select all' }));
+
+    /*
+     * `waitFor` is kept deliberately even though `App.tsx` now calls `view.focus()` synchronously:
+     * it also passes against the deferred Tiptap `focus` command this started out using, so the
+     * test does not silently become a timing assertion about which of the two is in place. The
+     * requirement is that focus ends up on the canvas, not when.
+     */
+    await waitFor(() => expect(canvas).toHaveFocus());
+
+    // ...and the selection really is the whole document, not merely a focused caret: Cut and Copy
+    // both gate on a non-empty selection, so an enabled Cut is that selection observed from the UI.
+    const reopened = await openMenu(user, 'Edit menu');
+    expect(within(reopened).getByRole('menuitem', { name: 'Cut' })).toBeEnabled();
+  });
+
+  it('disables Cut and Copy when the browser has no Clipboard API, naming why', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    let menu = await openMenu(user, 'Edit menu');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Select all' }));
+
+    // `@testing-library/user-event`'s own `setup()` installs a working in-memory clipboard stub
+    // on `navigator.clipboard` unconditionally, for its own `user.copy()`/`user.paste()` helpers --
+    // confirmed directly, not assumed: a fresh jsdom window has no `navigator.clipboard` at all,
+    // but one exists by the time any `userEvent` interaction has run. The absence this test wants
+    // to prove therefore has to be forced back, the same way a real engine without the Clipboard
+    // API would present it, rather than taken for granted from an untouched environment.
+    //
+    // `clipboardWriteSupported` (App.tsx) is read fresh on every render rather than kept in React
+    // state, so mutating the global alone changes nothing on screen until something actually
+    // triggers a render -- `rerender` is that something, standing in for whatever would ordinarily
+    // cause one (a prop change, a sibling state update) in a screen this test does not otherwise
+    // touch.
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+    rerender(<App />);
+
+    menu = await openMenu(user, 'Edit menu');
+    const copy = within(menu).getByRole('menuitem', { name: 'Copy' });
+    expect(copy).toBeDisabled();
+    expect(copy).toHaveAttribute('title', 'Clipboard access is not available in this browser.');
+  });
+
+  /**
+   * Copy's text is read from the editor's own ProseMirror model (`editor.state.selection`), not
+   * from the browser's native DOM Selection -- `copySelectionText`'s own comment in App.tsx
+   * explains why that distinction is load-bearing rather than stylistic: activating a real
+   * `<button>` moves DOM focus onto it first, which would leave a native-Selection-based read
+   * seeing nothing by the time this handler runs. "Select all" is the realistic way a writer
+   * reaches a selection worth copying from this menu, so it is used here rather than a
+   * directly-dispatched `TextSelection`, which would not exercise the same click-then-click path a
+   * writer actually takes.
+   */
+  it('copies the selected text to the clipboard', async () => {
+    const user = userEvent.setup();
+    const writeText = stubClipboardWrite();
+    const script = persistedScreenplay(
+      '44443333-0000-4000-8000-000000000004',
+      'Clipboard Draft',
+      'INT. APARTMENT - MORNING',
+    );
+    render(<App initial={script} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    let menu = await openMenu(user, 'Edit menu');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Select all' }));
+
+    menu = await openMenu(user, 'Edit menu');
+    const copy = within(menu).getByRole('menuitem', { name: 'Copy' });
+    expect(copy).toBeEnabled();
+    await user.click(copy);
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('INT. APARTMENT - MORNING'));
+  });
+
+  it('cuts: copies, then removes the selected text -- only once the clipboard write succeeds', async () => {
+    const user = userEvent.setup();
+    const writeText = stubClipboardWrite();
+    const script = persistedScreenplay(
+      '44443333-0000-4000-8000-000000000005',
+      'Clipboard Draft',
+      'INT. APARTMENT - MORNING',
+    );
+    render(<App initial={script} />);
+    const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    let menu = await openMenu(user, 'Edit menu');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Select all' }));
+
+    menu = await openMenu(user, 'Edit menu');
+    const cut = within(menu).getByRole('menuitem', { name: 'Cut' });
+    expect(cut).toBeEnabled();
+    await user.click(cut);
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('INT. APARTMENT - MORNING'));
+    // "Select all" selected the whole document, so this Cut removes every block, not merely the
+    // text inside one -- the same outcome a writer gets from "select all, then cut" in any other
+    // editor. `canvas.textContent` is empty either way: ProseMirror leaves one empty block behind
+    // to satisfy the schema's own non-empty-document requirement (confirmed directly rather than
+    // assumed -- see this test's own history in `progress/menus-slice-1.md`), with a freshly
+    // generated id rather than the original scene heading's, so asserting on the original block id
+    // surviving would be asserting something that was never true of a real "select all, cut".
+    await waitFor(() => expect(canvas.textContent).toBe(''));
+  });
+
+  /** Write-then-delete, in that order: a rejected clipboard write must leave the document exactly
+   * as it was, with the same failure surfaced the export items already use, rather than losing the
+   * writer's selected text for nothing. */
+  it('tells the writer a Cut failed instead of deleting text that was never actually copied', async () => {
+    const user = userEvent.setup();
+    stubClipboardWrite(vi.fn().mockRejectedValue(new Error('Clipboard write was denied.')));
+    const script = persistedScreenplay(
+      '44443333-0000-4000-8000-000000000006',
+      'Clipboard Draft',
+      'INT. APARTMENT - MORNING',
+    );
+    const scriptBlockId = '44443333-8d05-4e6e-bac7-e471e8df33a1';
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    render(<App initial={script} />);
+    const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    let menu = await openMenu(user, 'Edit menu');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Select all' }));
+
+    menu = await openMenu(user, 'Edit menu');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Cut' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Cut failed');
+    expect(alert).toHaveTextContent('Clipboard write was denied.');
+    expect(getBlock(canvas, scriptBlockId).textContent).toBe('INT. APARTMENT - MORNING');
+
+    consoleError.mockRestore();
+  });
+
+  /** Copy never touches the document, so a reviewer may use it exactly as an owner or editor can;
+   * Cut does, so it stays gated on `editingAllowed` -- the same split `changeElement` draws, now
+   * drawn for the clipboard too. */
+  it('lets a reviewer copy but not cut', async () => {
+    const user = userEvent.setup();
+    stubClipboardWrite();
+    const script = persistedScreenplay(
+      '44443333-0000-4000-8000-000000000007',
+      'Clipboard Draft',
+      'INT. APARTMENT - MORNING',
+    );
+    render(<App initial={script} viewerRole="reviewer" />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    let menu = await openMenu(user, 'Edit menu');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Select all' }));
+
+    menu = await openMenu(user, 'Edit menu');
+    const copy = within(menu).getByRole('menuitem', { name: 'Copy' });
+    const cut = within(menu).getByRole('menuitem', { name: 'Cut' });
+    expect(copy).toBeEnabled();
+    expect(cut).toBeDisabled();
+    expect(cut).toHaveAttribute('title', expect.stringMatching(/Read-only/u));
+  });
+
+  it('offers the editor’s own element list under Format > Element type, converting the active block', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    // `firstSceneId` is the active block on mount with no navigation needed -- it is the first
+    // block in the default fixture, which is where ProseMirror's own initial selection sits.
+    const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const formatMenu = await openMenu(user, 'Format menu');
+    await user.click(within(formatMenu).getByRole('menuitem', { name: 'Element type' }));
+    const submenu = screen.getAllByRole('menu')[1]!;
+    expect(
+      within(submenu)
+        .getAllByRole('menuitem')
+        .map((item) => item.textContent),
+    ).toEqual([
+      'Scene Heading',
+      'Action',
+      'Character',
+      'Dialogue',
+      'Parenthetical',
+      'Transition',
+      'Shot',
+    ]);
+
+    await user.click(within(submenu).getByRole('menuitem', { name: 'Character' }));
+    expect(getBlock(canvas, firstSceneId)).toHaveAttribute('data-screenplay-element', 'character');
+  });
+
+  it('disables every Element type choice, carrying one reason, when editing is not allowed', async () => {
+    const user = userEvent.setup();
+    const script = persistedScreenplay(
+      '44443333-0000-4000-8000-000000000008',
+      'Read-only Draft',
+      'INT. APARTMENT - MORNING',
+    );
+    render(<App entitlementReadOnly={{ message: 'Read-only for this test.' }} initial={script} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const formatMenu = await openMenu(user, 'Format menu');
+    expect(within(formatMenu).getByRole('menuitem', { name: 'Element type' })).toBeDisabled();
+  });
+
+  it('offers Navigator, Inspector, dark canvas and a Zoom submenu reusing the toolbar’s own presets', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const viewMenu = await openMenu(user, 'View menu');
+    expect(
+      within(viewMenu)
+        .getAllByRole('menuitem')
+        .map((item) => item.textContent),
+    ).toEqual(['Hide Navigator', 'Hide Inspector', 'Dark canvas', 'Zoom ›']);
+
+    await user.click(within(viewMenu).getByRole('menuitem', { name: 'Zoom' }));
+    const zoomSubmenu = screen.getAllByRole('menu')[1]!;
+    expect(within(zoomSubmenu).getByRole('menuitem', { name: 'Fit width' })).toBeEnabled();
+    expect(within(zoomSubmenu).getByRole('menuitem', { name: 'Fit page' })).toBeEnabled();
+    await user.click(within(zoomSubmenu).getByRole('menuitem', { name: '50%' }));
+    expect(screen.getByLabelText('Zoom level')).toHaveTextContent('50%');
+  });
+
+  it('toggles Navigator and Inspector from the View menu, flipping the item’s own label', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    let menu = await openMenu(user, 'View menu');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Hide Navigator' }));
+    expect(screen.queryByRole('complementary', { name: 'Navigator' })).not.toBeInTheDocument();
+
+    menu = await openMenu(user, 'View menu');
+    expect(within(menu).getByRole('menuitem', { name: 'Show Navigator' })).toBeInTheDocument();
   });
 });

@@ -999,12 +999,45 @@ test('the inline diff reads as the document with changes marked in place, and di
   expect(editorFrame.elementSelectOptions.every((option) => !option.disabled)).toBe(true);
   expect(comparisonFrame.elementSelectOptions).toEqual([{ disabled: true, value: '' }]);
 
-  // The menubar: the same children in the same order -- the File menu, the five labels plan.md still
-  // has to activate, the spacer, and the canvas toggle -- and the same controls by accessible name.
-  expect(comparisonFrame.menubarChildren).toEqual(editorFrame.menubarChildren);
-  expect(comparisonFrame.menubarControls.map((control) => control.name)).toEqual(
-    editorFrame.menubarControls.map((control) => control.name),
-  );
+  /**
+   * The menubar. File and View are identical on both screens (asserted below by their own
+   * controls, and the File menu's items separately below that); the two still-inert labels
+   * (Tools, Help -- plan.md still has to activate them) are identical too. **Edit and Format exist
+   * only on the editor** -- the owner's own decision, not left implicit the way it would be if this
+   * spec still asserted a bare equality between the two children lists: a comparison is a read-only
+   * reading view of two stored snapshots, and neither "change the text" nor "change an element's
+   * type" applies to one. Rendering either menu anyway, full of disabled items that all share one
+   * repeated sentence, would be noise in exactly the spot the File menu's six items prove is
+   * supposed to carry a specific, nameable reason apiece. This is a fourth permitted difference
+   * between the two frames, alongside disabled state, panel contents, and the presence indicator
+   * below -- `ApplicationMenubar` cuts a menu entirely rather than render it empty or disabled
+   * (`applicationMenubar.tsx`'s own comment), which is what makes the comparison's children list
+   * shorter rather than merely different.
+   */
+  expect(editorFrame.menubarChildren).toEqual([
+    { className: 'menubar-menu menu-file', tag: 'DIV', text: 'File' },
+    { className: 'menubar-menu menu-edit', tag: 'DIV', text: 'Edit' },
+    { className: 'menubar-menu menu-view', tag: 'DIV', text: 'View' },
+    { className: 'menubar-menu menu-format', tag: 'DIV', text: 'Format' },
+    { className: 'menubar-inert', tag: 'SPAN', text: 'Tools' },
+    { className: 'menubar-inert', tag: 'SPAN', text: 'Help' },
+  ]);
+  expect(comparisonFrame.menubarChildren).toEqual([
+    { className: 'menubar-menu menu-file', tag: 'DIV', text: 'File' },
+    { className: 'menubar-menu menu-view', tag: 'DIV', text: 'View' },
+    { className: 'menubar-inert', tag: 'SPAN', text: 'Tools' },
+    { className: 'menubar-inert', tag: 'SPAN', text: 'Help' },
+  ]);
+  expect(editorFrame.menubarControls.map((control) => control.name)).toEqual([
+    'File menu',
+    'Edit menu',
+    'View menu',
+    'Format menu',
+  ]);
+  expect(comparisonFrame.menubarControls.map((control) => control.name)).toEqual([
+    'File menu',
+    'View menu',
+  ]);
   expect(editorFrame.menubarControls.filter((control) => control.disabled)).toEqual([]);
   expect(comparisonFrame.menubarControls.filter((control) => control.disabled)).toEqual([]);
 
@@ -1020,7 +1053,8 @@ test('the inline diff reads as the document with changes marked in place, and di
     'Document settings…',
     'Save named revision…',
     // The screenplay-invitations slice: the editor offers this to an owner or editor, and the
-    // comparison carries it disabled for the same reason it carries the five around it that way.
+    // comparison carries it disabled for the same reason it carries every other item in this
+    // array that way.
     'Share…',
     // The three exports are grouped behind one "Download" submenu parent (OverflowMenu.tsx's
     // `submenuItems`), unreachable in the DOM as separate items until that submenu opens -- this
