@@ -804,18 +804,21 @@ describe('revision diff page: the editor’s chrome, not a plainer page', () => 
     expect(main()).not.toHaveClass('dark');
   });
 
-  /** View is the one menu, besides File, that this read-only comparison renders at all -- Edit and
-   * Format are omitted outright (the owner's decision, `progress/menus-slice-1.md`), because
-   * neither verb applies to a stored snapshot and a menu full of disabled items sharing one
-   * repeated reason would be noise, not explanation, unlike File's own six items, each disabled
-   * for its own specific, nameable reason. */
-  it('omits Edit and Format entirely, rather than rendering either full of disabled items', () => {
+  /** View is the one menu, besides File, that this read-only comparison renders at all -- Edit,
+   * Format and Tools are omitted outright (the owner's decision, `progress/menus-slice-1.md` for
+   * Edit/Format, `progress/menus-slice-2.md` for Tools), because none of the three verbs applies
+   * to a stored snapshot. Edit and Format would be a menu full of disabled items sharing one
+   * repeated reason, which is noise, not explanation, unlike File's own six items, each disabled
+   * for its own specific, nameable reason; Tools has no such reason to give at all, because this
+   * comparison is two stored snapshots and "the word count" has no single referent across them. */
+  it('omits Edit, Format and Tools entirely, rather than rendering any of them full of disabled items', () => {
     renderWith(diffResult(older, newer));
 
     expect(screen.getByRole('button', { name: 'File menu' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'View menu' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Edit menu' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Format menu' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Tools menu' })).toBeNull();
   });
 
   /** The View menu's own item set: the two panel toggles, the dark-canvas preference, and a Zoom

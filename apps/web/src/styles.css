@@ -2949,6 +2949,38 @@ select:focus-visible,
   font-size: 11px;
 }
 
+/*
+ * Tools > Word count (`progress/menus-slice-2.md`). `--text-09` and `--text-13` are both already
+ * used inside `.dialog` elsewhere (`.dialog-field`, `.inspector-value`) and neither is one of the
+ * `.dark`-redefined tokens (only `--text-04`/`--text-07` are -- see this file's own `.dark` block
+ * and the "stays white" container list above it), so this needs no extra dark-theme handling of
+ * its own: it reads the same whichever shell it sits inside, exactly like the rest of `.dialog`.
+ */
+.word-count-stats {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  gap: 4px;
+}
+
+.word-count-stat {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.word-count-stat dt {
+  color: var(--text-09);
+  font-size: 12px;
+}
+
+.word-count-stat dd {
+  margin: 0;
+  color: var(--text-13);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .dialog-actions {
   display: flex;
   justify-content: flex-end;

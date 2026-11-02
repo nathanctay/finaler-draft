@@ -13,9 +13,11 @@ import {
   type ScreenplayBlock,
   type TitlePage,
 } from '@finaler-draft/screenplay';
+import { paginateScreenplay } from '@finaler-draft/layout';
 import { App } from './App.js';
 import { api, MessageApiError, type PersistedScreenplay } from './api.js';
 import { pageStackMinHeightIn } from './pagination.js';
+import { countWords } from './wordCount.js';
 import * as screenplayEditorModule from './screenplayEditor.js';
 import {
   createLocalScreenplayEditorInit,
@@ -3332,5 +3334,165 @@ describe('Edit, View and Format menus', () => {
 
     menu = await openMenu(user, 'View menu');
     expect(within(menu).getByRole('menuitem', { name: 'Show Navigator' })).toBeInTheDocument();
+  });
+});
+
+/**
+ * Tools > Word count (`progress/menus-slice-2.md`). What matters most here, per that scope's own
+ * framing, is that the dialog's numbers can never disagree with the status bar's own word count --
+ * both trace back to the identical `wordsInProjection` (`wordCount.ts`) -- and that a selection
+ * reports Docs-style "N of M" against the document, never a second, independently-computed total.
+ * The tokenizer agreement itself (a selection spanning the whole document equals the document
+ * count) is pinned at the unit level in `wordCount.test.ts`; this describe block is the
+ * integration proof that `App.tsx` actually wires the real editor's selection and the real
+ * pagination plugin's `pageCount` into that dialog, not a second copy of the arithmetic.
+ */
+describe('Tools menu: Word count', () => {
+  const wordCountScript = persistedScreenplay(
+    '55556666-0000-4000-8000-000000000001',
+    'Word Count Draft',
+    'INT. APARTMENT - MORNING',
+  );
+  const scriptText = 'INT. APARTMENT - MORNING';
+  // Computed from the same `countWords` the dialog itself calls (`wordCount.ts`) and the plain
+  // `.length` `charactersInProjection` uses -- not retyped as a literal, so this test cannot drift
+  // from what those functions actually do if either one's definition ever changes.
+  const expectedWords = countWords(scriptText);
+  const expectedCharacters = scriptText.length;
+  // The pagination plugin's own algorithm (`packages/layout`'s `paginateScreenplay`), run here
+  // against the identical blocks and settings `computePaginationState` (paginationExtension.ts)
+  // runs it against -- the real page count for this fixture, not an assumed "it's probably 1".
+  const expectedPages = paginateScreenplay(
+    wordCountScript.screenplay.blocks,
+    DEFAULT_DOCUMENT_SETTINGS,
+  ).pages.length;
+
+  // A local copy of the "Edit, View and Format menus" describe block's own `openMenu` helper
+  // (above): that one is scoped to its own `describe`, not the module, so a sibling block needing
+  // the identical open-a-menu-and-return-its-list behaviour defines it again rather than reaching
+  // across describes for it.
+  async function openMenu(
+    user: ReturnType<typeof userEvent.setup>,
+    triggerName: string,
+  ): Promise<HTMLElement> {
+    await user.click(screen.getByRole('button', { name: triggerName }));
+    return screen.getByRole('menu');
+  }
+
+  async function openWordCountDialog(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole('button', { name: 'Tools menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Word count…' }));
+    return screen.getByRole('dialog', { name: 'Word count' });
+  }
+
+  it('lists exactly one item, Word count…', async () => {
+    const user = userEvent.setup();
+    render(<App initial={wordCountScript} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'Tools menu' }));
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
+      'Word count…',
+    ]);
+  });
+
+  it('reports the document’s own words, characters and pages, with no selection framing, while nothing is selected', async () => {
+    const user = userEvent.setup();
+    render(<App initial={wordCountScript} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const dialog = await openWordCountDialog(user);
+    expect(within(dialog).getByText(String(expectedWords))).toBeInTheDocument();
+    expect(within(dialog).getByText(String(expectedCharacters))).toBeInTheDocument();
+    // Pages is sourced from the pagination plugin's own async state (`App.tsx`'s `syncPageCount`),
+    // which settles after a render later than the canvas's own first appearance -- the identical
+    // property the page-stack-height test above this describe block already has to account for.
+    await waitFor(() => {
+      expect(within(dialog).getByText(String(expectedPages))).toBeInTheDocument();
+    });
+    // The Docs-style "N of M" framing must not appear anywhere while there is no selection.
+    expect(within(dialog).queryByText(/of/)).not.toBeInTheDocument();
+  });
+
+  /**
+   * The property this scope's brief names as the one that matters most: the dialog can never
+   * disagree with the status bar. Both read `wordsInProjection` directly, so this also doubles as
+   * the regression test for that shared import -- restoring a second, independent word count in
+   * either place would still pass every other test here, but would be free to drift from this
+   * one the instant the two counts were computed differently.
+   */
+  it('never disagrees with the status bar’s own word count', async () => {
+    const user = userEvent.setup();
+    render(<App initial={wordCountScript} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    expect(
+      screen.getByText(`Synced · ${expectedWords} words · no print pagination`),
+    ).toBeInTheDocument();
+
+    const dialog = await openWordCountDialog(user);
+    expect(within(dialog).getByText(String(expectedWords))).toBeInTheDocument();
+  });
+
+  /**
+   * Docs' own convention: "Words: N of M" while a selection is active. "Select all" is used here
+   * for the identical reason the Edit menu's own Copy/Cut tests use it (this file's "Edit, View
+   * and Format menus" describe block, above) -- it is the realistic way a writer reaches a
+   * selection from this menu, and jsdom cannot drive a real mousedown-drag selection at all. A
+   * selection spanning the whole document is also exactly the case `wordCount.test.ts` pins at
+   * the unit level, so the selection and document totals below are expected to be equal, not
+   * merely both present.
+   */
+  it('reports "selection of document" for words and characters once the whole document is selected, leaving pages alone', async () => {
+    const user = userEvent.setup();
+    render(<App initial={wordCountScript} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const editMenu = await openMenu(user, 'Edit menu');
+    await user.click(within(editMenu).getByRole('menuitem', { name: 'Select all' }));
+
+    const dialog = await openWordCountDialog(user);
+    expect(within(dialog).getByText(`${expectedWords} of ${expectedWords}`)).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(`${expectedCharacters} of ${expectedCharacters}`),
+    ).toBeInTheDocument();
+    // Pages never gets the "of" framing -- there is no such thing as "pages in a selection" (this
+    // module's own doc comment, wordCountDialog.tsx) -- so it is still the one plain number.
+    await waitFor(() => {
+      expect(within(dialog).getByText(String(expectedPages))).toBeInTheDocument();
+    });
+  });
+
+  it('closes on Escape, returning focus to the Tools menu trigger', async () => {
+    const user = userEvent.setup();
+    render(<App initial={wordCountScript} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await openWordCountDialog(user);
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Tools menu' })).toHaveFocus();
+  });
+
+  /**
+   * Counting words never mutates the document, so -- unlike "Document settings…" and "Save named
+   * revision…" -- this item carries no `editingAllowed` gate: a reviewer on a read-only
+   * entitlement may count words exactly as they may still copy text (this scope's own framing,
+   * `progress/menus-slice-2.md`). Proven the same way the Edit menu's own Copy is proven reachable
+   * under the identical read-only fixture (`lets a reviewer copy but not cut`, above).
+   */
+  it('stays enabled while editing is not allowed', async () => {
+    const user = userEvent.setup();
+    render(
+      <App
+        entitlementReadOnly={{ message: 'Read-only for this test.' }}
+        initial={wordCountScript}
+      />,
+    );
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'Tools menu' }));
+    expect(screen.getByRole('menuitem', { name: 'Word count…' })).toBeEnabled();
   });
 });
