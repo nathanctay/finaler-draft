@@ -1001,31 +1001,33 @@ test('the inline diff reads as the document with changes marked in place, and di
 
   /**
    * The menubar. File and View are identical on both screens (asserted below by their own
-   * controls, and the File menu's items separately below that); the two still-inert labels
-   * (Tools, Help -- plan.md still has to activate them) are identical too. **Edit and Format exist
-   * only on the editor** -- the owner's own decision, not left implicit the way it would be if this
-   * spec still asserted a bare equality between the two children lists: a comparison is a read-only
-   * reading view of two stored snapshots, and neither "change the text" nor "change an element's
-   * type" applies to one. Rendering either menu anyway, full of disabled items that all share one
-   * repeated sentence, would be noise in exactly the spot the File menu's six items prove is
-   * supposed to carry a specific, nameable reason apiece. This is a fourth permitted difference
-   * between the two frames, alongside disabled state, panel contents, and the presence indicator
-   * below -- `ApplicationMenubar` cuts a menu entirely rather than render it empty or disabled
-   * (`applicationMenubar.tsx`'s own comment), which is what makes the comparison's children list
-   * shorter rather than merely different.
+   * controls, and the File menu's items separately below that); the one still-inert label (Help
+   * -- plan.md still has to activate it) is identical too. **Edit, Format and Tools exist only on
+   * the editor** -- the owner's own decision, not left implicit the way it would be if this spec
+   * still asserted a bare equality between the two children lists. Edit and Format: a comparison
+   * is a read-only reading view of two stored snapshots, and neither "change the text" nor "change
+   * an element's type" applies to one -- rendering either menu anyway, full of disabled items that
+   * all share one repeated sentence, would be noise in exactly the spot the File menu's six items
+   * prove is supposed to carry a specific, nameable reason apiece. Tools (`progress/menus-slice-
+   * 2.md`, Word count) is the same outcome for a different reason: its one item has no single
+   * document to count across two stored snapshots, so there is no "disabled, because..." sentence
+   * to give it either. This is a fourth permitted difference between the two frames, alongside
+   * disabled state, panel contents, and the presence indicator below -- `ApplicationMenubar` cuts
+   * a menu entirely rather than render it empty or disabled (`applicationMenubar.tsx`'s own
+   * comment), which is what makes the comparison's children list shorter rather than merely
+   * different.
    */
   expect(editorFrame.menubarChildren).toEqual([
     { className: 'menubar-menu menu-file', tag: 'DIV', text: 'File' },
     { className: 'menubar-menu menu-edit', tag: 'DIV', text: 'Edit' },
     { className: 'menubar-menu menu-view', tag: 'DIV', text: 'View' },
     { className: 'menubar-menu menu-format', tag: 'DIV', text: 'Format' },
-    { className: 'menubar-inert', tag: 'SPAN', text: 'Tools' },
+    { className: 'menubar-menu menu-tools', tag: 'DIV', text: 'Tools' },
     { className: 'menubar-inert', tag: 'SPAN', text: 'Help' },
   ]);
   expect(comparisonFrame.menubarChildren).toEqual([
     { className: 'menubar-menu menu-file', tag: 'DIV', text: 'File' },
     { className: 'menubar-menu menu-view', tag: 'DIV', text: 'View' },
-    { className: 'menubar-inert', tag: 'SPAN', text: 'Tools' },
     { className: 'menubar-inert', tag: 'SPAN', text: 'Help' },
   ]);
   expect(editorFrame.menubarControls.map((control) => control.name)).toEqual([
@@ -1033,6 +1035,7 @@ test('the inline diff reads as the document with changes marked in place, and di
     'Edit menu',
     'View menu',
     'Format menu',
+    'Tools menu',
   ]);
   expect(comparisonFrame.menubarControls.map((control) => control.name)).toEqual([
     'File menu',

@@ -283,10 +283,10 @@ function RevisionDiffPage() {
       dark={dark}
       menubar={
         /*
-         * The same menubar component the editor renders, with the same File item set and the same two
-         * still-inert labels (Tools, Help) beside it. Every File item that has no meaning on a
-         * read-only comparison of two stored snapshots is a really-disabled menu item with its reason
-         * as its tooltip -- the behaviour `OverflowMenu` already had for the editor's own export items.
+         * The same menubar component the editor renders, with the same File item set and the one
+         * still-inert label (Help) beside it. Every File item that has no meaning on a read-only
+         * comparison of two stored snapshots is a really-disabled menu item with its reason as its
+         * tooltip -- the behaviour `OverflowMenu` already had for the editor's own export items.
          *
          * "Revision history…" is the one File item that is genuinely live, because it genuinely
          * applies: this comparison came from that list and a reader can go back to it. It leads to the
@@ -294,13 +294,17 @@ function RevisionDiffPage() {
          * visible control is ordinary, and dropping it from the menu to avoid the overlap would make
          * the one item that works disappear.
          *
-         * **Edit and Format are omitted outright** (`progress/menus-slice-1.md`) rather than rendered
-         * full of disabled items: neither verb applies to a stored snapshot at all, and unlike the File
-         * menu's six items above -- each one disabled for its own specific, nameable reason a reader
-         * might actually come looking for -- an Edit or a Format menu here would be a wall of disabled
-         * entries sharing one repeated sentence ("this is a read-only comparison"). That is noise, not
-         * explanation, and `ApplicationMenubar` cuts a menu with no items entirely rather than render
-         * it as a label or as a disabled shell -- see that module's own comment.
+         * **Edit, Format and Tools are omitted outright** (`progress/menus-slice-1.md` for Edit and
+         * Format, `progress/menus-slice-2.md` for Tools) rather than rendered full of disabled items:
+         * none of the three verbs applies to a stored snapshot at all. For Edit and Format specifically,
+         * unlike the File menu's six items above -- each one disabled for its own specific, nameable
+         * reason a reader might actually come looking for -- either menu here would be a wall of
+         * disabled entries sharing one repeated sentence ("this is a read-only comparison"). That is
+         * noise, not explanation. Tools is a different, simpler case: its one item, Word count, has no
+         * single document to count at all here -- a comparison is two stored snapshots, not one -- so
+         * there is no "disabled, because..." sentence to give it either; it is simply not offered.
+         * `ApplicationMenubar` cuts a menu with no items entirely rather than render it as a label or as
+         * a disabled shell -- see that module's own comment.
          *
          * **View renders**, because it genuinely applies: this comparison has its own zoom state
          * (`zoomPercent` below) and its own dark-canvas preference, both real view preferences over a
