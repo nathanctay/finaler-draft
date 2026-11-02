@@ -17,29 +17,30 @@ import type { Ref } from 'react';
  * That is what lets the comparison's File menu be honest about what it cannot do without this module
  * inventing a second disabled-item convention.
  *
- * **Edit, View and Format became real menus this slice** (`progress/menus-slice-1.md`); Tools and
- * Help are later slices and stay the inert labels below. Each of the three new menus takes its
- * items the identical way File already did -- a plain array, built and gated entirely by the
- * caller -- rather than this module inventing a second shape for "menu with items" versus "menu
- * that is still a label". **A menu with no items is not rendered at all**, not rendered disabled
- * and not rendered as a label: the owner's rule is that an empty menu gets cut, which is what lets
- * the read-only revision comparison render View (it has real view preferences to offer: Navigator,
- * Inspector, dark canvas, zoom) while omitting Edit and Format outright (nothing on a stored
- * snapshot answers to either verb) instead of filling either with a wall of disabled items sharing
- * one repeated reason -- see that route's own comment on why that would be noise, not explanation,
- * unlike the File menu's disabled items, each of which explains one specific thing a reader might
- * have come looking for.
+ * **Edit, View and Format became real menus in slice 1** (`progress/menus-slice-1.md`); **Tools
+ * became one this slice** (`progress/menus-slice-2.md`, Word count). Help remains the one label
+ * still to come. Every real menu takes its items the identical way File already did -- a plain
+ * array, built and gated entirely by the caller -- rather than this module inventing a second
+ * shape for "menu with items" versus "menu that is still a label". **A menu with no items is not
+ * rendered at all**, not rendered disabled and not rendered as a label: the owner's rule is that
+ * an empty menu gets cut, which is what lets the read-only revision comparison render View (it
+ * has real view preferences to offer: Navigator, Inspector, dark canvas, zoom) while omitting
+ * Edit, Format and Tools outright (nothing on a stored snapshot answers to any of the three --
+ * Tools' own reasoning is the diff route's own comment: a comparison is two stored snapshots, and
+ * "the word count" has no single referent across them) instead of filling any of them with a wall
+ * of disabled items sharing one repeated reason -- see that route's own comment on why that would
+ * be noise, not explanation, unlike the File menu's disabled items, each of which explains one
+ * specific thing a reader might have come looking for.
  */
 
 /**
- * The two menus plan.md still schedules for a later increment, still inert `<span>`s rather than
- * controls. Listed here rather than written twice because they are identical on every screen that
- * wears the menubar -- and because being a `<span>` is the point: an inert label is not a control,
- * so it has no disabled state to get wrong, and no screen reader announces it as something a reader
- * can operate. The moment one of them becomes a real menu it becomes a prop, exactly as Edit, View
- * and Format already did.
+ * The one menu plan.md still schedules for a later increment, still an inert `<span>` rather than
+ * a control. Being a `<span>` is the point: an inert label is not a control, so it has no disabled
+ * state to get wrong, and no screen reader announces it as something a reader can operate. The
+ * moment it becomes a real menu it becomes a prop, exactly as Edit, View, Format and Tools already
+ * did.
  */
-const INERT_MENU_LABELS = ['Tools', 'Help'] as const;
+const INERT_MENU_LABELS = ['Help'] as const;
 
 export interface ApplicationMenubarProps {
   /**
@@ -62,6 +63,19 @@ export interface ApplicationMenubarProps {
   /** The Format menu's items. Omitted (or empty) on the read-only revision comparison -- nothing
    * about a stored snapshot's element types is this route's to change. */
   readonly formatMenuItems?: readonly OverflowMenuItem[] | undefined;
+  /**
+   * The Tools menu's items. Omitted (or empty) on the read-only revision comparison -- see this
+   * module's own top comment and that route's own comment on why "the word count" has no single
+   * referent across two stored snapshots being compared.
+   */
+  readonly toolsMenuItems?: readonly OverflowMenuItem[] | undefined;
+  /**
+   * Attached to the `.menu-tools` wrapper, the identical purpose `fileMenuRef` above serves for
+   * File: `App.tsx` uses it to return focus to the Tools menu's trigger after the Word count
+   * dialog closes. A screen with no Tools menu at all (the read-only revision comparison) passes
+   * nothing.
+   */
+  readonly toolsMenuRef?: Ref<HTMLDivElement>;
   /** The View menu's items. Present on every screen that renders this component: a comparison has
    * its own zoom state and its own dark-canvas preference (the route's own comment explains why
    * those genuinely apply to a stored snapshot), so View is never empty. */
@@ -82,6 +96,8 @@ export function ApplicationMenubar({
   fileMenuItems,
   fileMenuRef,
   formatMenuItems,
+  toolsMenuItems,
+  toolsMenuRef,
   viewMenuItems,
 }: ApplicationMenubarProps) {
   return (
@@ -102,6 +118,11 @@ export function ApplicationMenubar({
       {hasItems(formatMenuItems) && (
         <div className="menubar-menu menu-format">
           <OverflowMenu items={[...formatMenuItems]} label="Format menu" triggerContent="Format" />
+        </div>
+      )}
+      {hasItems(toolsMenuItems) && (
+        <div className="menubar-menu menu-tools" ref={toolsMenuRef}>
+          <OverflowMenu items={[...toolsMenuItems]} label="Tools menu" triggerContent="Tools" />
         </div>
       )}
       {INERT_MENU_LABELS.map((label) => (

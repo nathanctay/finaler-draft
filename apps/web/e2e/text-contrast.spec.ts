@@ -197,6 +197,29 @@ const CASES: readonly ContrastCase[] = [
     themes: BOTH,
   },
   {
+    /*
+     * The *enabled* dialog action button, added after a regression that reached the lead's review:
+     * a slice set `color` on `.dialog` to force this button's text to the light theme, on the
+     * reasoning that `.dialog` is a surface that stays white in both themes. That is true of the
+     * dialog, and false of this button, which sets `background: var(--surface-03)` -- one of the
+     * tokens `.dark` *does* redefine. So the button genuinely goes dark while the dialog behind it
+     * stays white, and its `color: inherit` following the theme is correct rather than a bug.
+     * Forcing the light theme's near-black onto it measured 1.5:1 in the dark theme, down from
+     * 8.4:1.
+     *
+     * The disabled variant below could not catch that: it sets its own explicit `--text-04`, so no
+     * `color` on an ancestor reaches it. This case is the enabled one, which inherits, and is
+     * therefore the one that moves when a dialog ancestor's text colour changes.
+     */
+    name: '.dialog-actions button (enabled -- its own background follows the theme)',
+    markup:
+      '<div class="dialog"><div class="dialog-actions"><button type="button">Close</button></div></div>',
+    target: '.dialog-actions button',
+    minimum: REAL_TEXT,
+    shell: true,
+    themes: BOTH,
+  },
+  {
     name: '.primary-button:disabled',
     markup:
       '<div class="dialog"><div class="dialog-actions"><button class="primary-button" disabled type="button">Save revision</button></div></div>',

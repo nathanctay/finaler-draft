@@ -18,10 +18,11 @@ import { expect, test } from '@playwright/test';
  * from four different ancestors at once.
  *
  * The markup below is a faithful copy of what `applicationMenubar.tsx` renders for File, Edit,
- * View and Format side by side (the real class list each wrapper carries, `OverflowMenu`'s own
- * list/submenu structure), not an approximation -- `styles.css`'s cascade is what is under test,
- * so the exact classes and nesting are the point, the same reasoning `submenu-position.spec.ts`
- * gives for its own markup.
+ * View, Format and Tools side by side (the real class list each wrapper carries, `OverflowMenu`'s
+ * own list/submenu structure), not an approximation -- `styles.css`'s cascade is what is under
+ * test, so the exact classes and nesting are the point, the same reasoning
+ * `submenu-position.spec.ts` gives for its own markup. Tools (`progress/menus-slice-2.md`) is a
+ * plain trigger with no submenu of its own, the same shape Edit and View already are here.
  */
 const MENUBAR_MARKUP = `
 <nav class="menubar" aria-label="Application menu">
@@ -64,11 +65,15 @@ const MENUBAR_MARKUP = `
       </div>
     </div>
   </div>
-  <span class="menubar-inert">Tools</span>
+  <div class="menubar-menu menu-tools">
+    <div class="overflow-menu">
+      <button class="overflow-menu-trigger" id="tools-trigger" type="button">Tools</button>
+    </div>
+  </div>
   <span class="menubar-inert">Help</span>
 </nav>`;
 
-test('Edit, View and Format render as flush, label-sized triggers, matching File rather than OverflowMenu’s own pill default', async ({
+test('Edit, View, Format and Tools render as flush, label-sized triggers, matching File rather than OverflowMenu’s own pill default', async ({
   page,
 }) => {
   await page.goto('/sign-in');
@@ -87,14 +92,15 @@ test('Edit, View and Format render as flush, label-sized triggers, matching File
       edit: styleOf('edit-trigger'),
       file: styleOf('file-trigger'),
       format: styleOf('format-trigger'),
+      tools: styleOf('tools-trigger'),
       view: styleOf('view-trigger'),
     };
   }, MENUBAR_MARKUP);
 
-  // All four must actually have been laid out, or every comparison below is vacuously true.
+  // All must actually have been laid out, or every comparison below is vacuously true.
   expect(styles.file.height).toBeGreaterThan(0);
 
-  for (const trigger of [styles.edit, styles.view, styles.format]) {
+  for (const trigger of [styles.edit, styles.view, styles.format, styles.tools]) {
     expect(trigger.height).toBeCloseTo(styles.file.height, 1);
     expect(trigger.borderRadius).toBe(styles.file.borderRadius);
     expect(trigger.fontWeight).toBe(styles.file.fontWeight);

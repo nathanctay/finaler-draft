@@ -81,6 +81,12 @@ import {
 } from './titlePageState.js';
 import { DocumentSettingsDialog } from './documentSettingsDialog.js';
 import { NamedRevisionDialog } from './namedRevisionDialog.js';
+import { WordCountDialog } from './wordCountDialog.js';
+import {
+  charactersInProjection,
+  countWordsAndCharactersInRange,
+  wordsInProjection,
+} from './wordCount.js';
 import { ParticipantIndicator } from './components/ParticipantIndicator.js';
 import { Toast } from './components/Toast.js';
 import {
@@ -101,19 +107,6 @@ import {
 } from './zoom.js';
 
 type Panel = 'navigator' | 'inspector';
-
-function wordsInProjection(projection: LocalScreenplayProjection): number {
-  if (!projection.valid) {
-    return 0;
-  }
-
-  return projection.screenplay.blocks.reduce((total: number, block: ScreenplayBlock) => {
-    if (block.type === 'page_break' || block.type === 'dual_dialogue') {
-      return total;
-    }
-    return total + (block.text.trim() === '' ? 0 : block.text.trim().split(/\s+/u).length);
-  }, 0);
-}
 
 function activeScene(
   activeBlockId: string | undefined,
@@ -750,7 +743,12 @@ export function App({
   // `namedRevisionDialog.tsx`'s own comment for why this has a real pending/error state, unlike
   // `settingsDialogOpen` above.
   const [namedRevisionDialogOpen, setNamedRevisionDialogOpen] = useState(false);
+  // Tools > Word count (`progress/menus-slice-2.md`). Unlike `settingsDialogOpen`/
+  // `namedRevisionDialogOpen` above, this opens a dialog that never mutates the document, so it
+  // carries no `editingAllowed` gate anywhere -- not here, and not on the menu item that opens it.
+  const [wordCountDialogOpen, setWordCountDialogOpen] = useState(false);
   const fileMenuRef = useRef<HTMLDivElement>(null);
+  const toolsMenuRef = useRef<HTMLDivElement>(null);
   const latestProjection = useRef<LocalScreenplayProjection | undefined>(undefined);
   // `main.tsx` applies the specification's fixed defaults once at bootstrap, before any
   // screenplay has loaded (see that module's own comment for why). Once one has, its own
@@ -1672,12 +1670,41 @@ export function App({
     fileMenuRef.current?.querySelector<HTMLButtonElement>('.overflow-menu-trigger')?.focus();
   };
 
+  // Tools > Word count's own equivalent of `closeSettingsDialog` above, returning focus to the
+  // Tools menu's trigger rather than File's.
+  const closeWordCountDialog = () => {
+    setWordCountDialogOpen(false);
+    toolsMenuRef.current?.querySelector<HTMLButtonElement>('.overflow-menu-trigger')?.focus();
+  };
+
   const scenes = useMemo(
     () => (projection.valid ? deriveScenes(projection.screenplay.blocks) : []),
     [projection],
   );
   const selectedScene = activeScene(activeBlockId, scenes);
   const wordCount = wordsInProjection(projection);
+  const characterCount = charactersInProjection(projection);
+  /**
+   * The Word count dialog's selection-aware half (Docs-style "Words: 12 of 345"), read fresh from
+   * the editor's own live ProseMirror selection on every render rather than captured once when
+   * the dialog opens. That is safe, not merely convenient: `.dialog-overlay` is a fixed,
+   * full-viewport overlay with no `pointer-events: none`, so it blocks every click to the canvas
+   * underneath for as long as the dialog is open -- the selection genuinely cannot change during
+   * that time, the same property that lets `DocumentSettingsDialog`'s own fields read live state
+   * with no snapshot-and-refresh dance either.
+   *
+   * `undefined` with no selection (or no editor at all) -- never a selection count of `0` -- is
+   * what tells `WordCountDialog` to report the document's total alone rather than a "N of M"
+   * pair; see `WordCountStat`'s own doc comment (`wordCountDialog.tsx`).
+   */
+  const wordCountSelection =
+    editor && hasSelection
+      ? countWordsAndCharactersInRange(
+          editor.state.doc,
+          editor.state.selection.from,
+          editor.state.selection.to,
+        )
+      : undefined;
 
   const selectScene = (scene: DerivedScene) => {
     if (!editor) {
@@ -2531,6 +2558,17 @@ export function App({
               })),
             },
           ]}
+          toolsMenuItems={[
+            {
+              // Word count never touches the document (`progress/menus-slice-2.md`), so unlike
+              // "Document settings…" and "Save named revision…" above, this carries no
+              // `editingAllowed` gate at all -- a reviewer on a read-only entitlement may count
+              // words exactly as they may still copy text.
+              label: 'Word count…',
+              onSelect: () => setWordCountDialogOpen(true),
+            },
+          ]}
+          toolsMenuRef={toolsMenuRef}
           viewMenuItems={[
             {
               label: panels.navigator ? 'Hide Navigator' : 'Show Navigator',
@@ -2573,6 +2611,17 @@ export function App({
               onSave={async (label) => {
                 await api.createNamedRevision(initial.id, label, initial.currentEpoch);
               }}
+            />
+          )}
+          {wordCountDialogOpen && (
+            <WordCountDialog
+              characters={{
+                documentTotal: characterCount,
+                selection: wordCountSelection?.characters,
+              }}
+              onClose={closeWordCountDialog}
+              pages={pageCount}
+              words={{ documentTotal: wordCount, selection: wordCountSelection?.words }}
             />
           )}
           {toast !== undefined && (
