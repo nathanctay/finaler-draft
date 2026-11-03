@@ -401,6 +401,24 @@ async function runEditThenSignal(
       ? reconstruction.doc.getXmlFragment('default').toString()
       : '';
 
+    /*
+     * TEMPORARY CI DIAGNOSTIC round 2 -- remove with this branch.
+     *
+     * Round 1 produced a contradiction: `logDurabilityState` one line above reported the edit
+     * present (`hasText=true`) on CI, and then the assertion on this very `reconstructedText`
+     * failed saying it was absent. Both reconstruct the same screenplay from the same single
+     * checkpoint. So round 1 instrumented the wrong thing: it logged *its own* reconstruction, not
+     * the value actually asserted. This logs the asserted value itself, so the two can be compared
+     * directly rather than assumed equal.
+     */
+    console.log(
+      `CIDIAG2 ${signal}/asserted-value len=${String(reconstructedText.length)} ` +
+        `hasLine=${String(reconstructedText.includes(lineText))} ` +
+        `reconstructionWasUndefined=${String(reconstruction === undefined)} ` +
+        `checkpointCount=${String(checkpointCount)} exited=${String(exited)} ` +
+        `head=${JSON.stringify(reconstructedText.slice(0, 120))}`,
+    );
+
     return {
       exitedWithinTimeout: exited,
       checkpointExists: checkpointCount >= 2,
