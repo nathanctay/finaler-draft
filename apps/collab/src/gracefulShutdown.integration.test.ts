@@ -209,6 +209,52 @@ async function waitForDurableText(screenplayId: string, lineText: string): Promi
   return false;
 }
 
+/**
+ * TEMPORARY CI DIAGNOSTIC -- remove with this branch.
+ *
+ * `gracefulShutdown.integration.test.ts` has failed four times on CI and has never once reproduced
+ * locally (6/6 alone, 3/3 alongside `collaboration.integration.test.ts`, 5/5 with both in parallel
+ * under 24 CPU hogs on a 10-core machine). Two speculative fixes have been merged and neither
+ * worked, so this branch stops guessing and uses CI itself as the instrument.
+ *
+ * The question it answers: the test confirms the edit is durable (`waitForDurableText` succeeds,
+ * and its `expect` sits before the kill so a failure there would throw first), and then the final
+ * reconstruction returns the seed block without the edit. Something between those two points
+ * removes the edit from what `reconstructDocumentState` rebuilds. The prime suspect is the
+ * checkpoint: reconstruction takes the newest checkpoint (`order by id desc`) and replays only
+ * updates past its `through_sequence`, so a checkpoint whose `through_sequence` absorbs the edit's
+ * row without carrying its content would produce exactly this -- durable one moment, gone the next.
+ * That would be a product durability defect rather than a test-harness race, which is why it is
+ * worth one CI run to know.
+ */
+async function logDurabilityState(
+  label: string,
+  screenplayId: string,
+  lineText: string,
+): Promise<void> {
+  const updates = await pool!.query<{ sequence: string; bytes: number }>(
+    `select sequence::text as sequence, octet_length(update) as bytes
+       from document_yjs_updates where screenplay_id = $1 order by sequence`,
+    [screenplayId],
+  );
+  const checkpoints = await pool!.query<{ id: string; throughSequence: string; bytes: number }>(
+    `select id::text as id, through_sequence::text as "throughSequence",
+            octet_length(merged_update) as bytes
+       from document_yjs_checkpoints where screenplay_id = $1 order by id`,
+    [screenplayId],
+  );
+  const { reconstructDocumentState } = await import('./updateLog.js');
+  const state = await reconstructDocumentState(pool!, screenplayId, 0);
+  const text = state ? state.doc.getXmlFragment('default').toString() : '';
+  console.log(
+    `CIDIAG ${label} ` +
+      `updates=[${updates.rows.map((r) => `${r.sequence}:${String(r.bytes)}b`).join(',')}] ` +
+      `checkpoints=[${checkpoints.rows.map((r) => `id${r.id}/through${r.throughSequence}/${String(r.bytes)}b`).join(',')}] ` +
+      `reconThrough=${state ? String(state.throughSequence) : 'none'} ` +
+      `hasText=${String(text.includes(lineText))} textLen=${String(text.length)}`,
+  );
+}
+
 async function runEditThenSignal(
   seed: { screenplayId: string; actorId: string },
   signal: 'SIGTERM' | 'SIGKILL',
@@ -321,6 +367,11 @@ async function runEditThenSignal(
      * the child's environment above, not by being quick.
      */
     const durable = await waitForDurableText(screenplayId, lineText);
+    await logDurabilityState(
+      `${signal}/at-durability durable=${String(durable)}`,
+      screenplayId,
+      lineText,
+    );
     expect(durable).toBe(true);
 
     provider.destroy();
@@ -344,6 +395,7 @@ async function runEditThenSignal(
     const checkpointCount = checkpointCountRow.rows[0]?.count ?? 0;
 
     const { reconstructDocumentState } = await import('./updateLog.js');
+    await logDurabilityState(`${signal}/after-exit`, screenplayId, lineText);
     const reconstruction = await reconstructDocumentState(pool!, screenplayId, 0);
     const reconstructedText = reconstruction
       ? reconstruction.doc.getXmlFragment('default').toString()
