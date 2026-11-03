@@ -122,3 +122,72 @@ Removed afterwards.
   meant no production deploy with no notification. That is arguably the more valuable fix -- the
   flake cost two deploys only because nothing announced their absence -- and it is a workflow change
   rather than a test change, so it belongs to its own slice.
+
+## Reopened, 2026-11-03: the first fix was wrong, and why
+
+The note above said: _"If this fails again on `main` after this change, the diagnosis above is wrong
+and should be reopened rather than retried."_ It failed again, on the very next pipeline that ran it
+(`06d8757`, the feedback branch with main merged in), with the `bd964b5` signature -- the `SIGKILL`
+case missing its text. So this is the reopening.
+
+### What the first fix got wrong
+
+It replaced the fixed 250ms sleep with a poll for the **update-log row count** rising above a
+baseline. That is a _proxy_ for "the edit is durable", not the thing itself, and the two come apart:
+the count can rise for a row that is not this edit. Worse, the proxy returns in single-digit
+milliseconds, so it also removed the slack the 250ms sleep had been accidentally providing. The net
+effect was to make the undershoot **more** likely, not less -- which is exactly what the next CI run
+showed.
+
+The second contributing factor was environmental and had been missed entirely: CI runs
+`collaboration.integration.test.ts` and `gracefulShutdown.integration.test.ts` **in the same vitest
+invocation**, so they execute concurrently. Every local reproduction attempt had run the shutdown
+file alone, which is a materially easier environment than the one that fails.
+
+### The fix: wait for the asserted condition, not a proxy for it
+
+`waitForDurableText` now polls `reconstructDocumentState` -- the _same_ function the final assertion
+uses -- until the reconstructed document actually contains the edit's text. What is waited for and
+what is asserted can no longer drift apart, and the wait is immune to which other rows happen to
+exist in the log.
+
+### Proven this time, by reproducing the CI failure locally
+
+The previous entry had to admit it could not reproduce the failure. This one can:
+
+- **Removing the durability wait reproduces CI's exact message in 3 of 4 runs** --
+  `expected '<screenplayblock element="action" id=…' to contain 'A line that survives even a kill -9.'`
+  That is the mutation test the first attempt lacked, and it confirms both that the failure mode is
+  "killed before the edit was durable" and that this wait is what prevents it.
+- With the wait in place: **6/6 passes** running the file alone, and **3/3 passes** running it
+  alongside `collaboration.integration.test.ts` the way CI does.
+
+### A measurement error worth recording, because it produced a confident wrong answer
+
+The first diagnostic run concluded "the poll fires on the initial-sync update, not the edit", from
+output showing `textPresentAtPoll=false` on every run. That diagnostic was **vacuous**: it extracted
+the text with `String(state)`, but `reconstructDocumentState` returns a wrapper whose text comes from
+`state.doc.getXmlFragment('default').toString()`. `String(state)` is `"[object Object]"`, so the
+check could never match, and every run reported `false` regardless of the truth. Measured correctly,
+the single update row _is_ the edit and its durability coincides with the count rising -- the
+opposite of what was reported.
+
+The same mistake was then copied into the replacement poll, which failed 6/6 for that reason alone
+and briefly looked like a much deeper problem.
+
+This is the fourth time on this project that an assertion which cannot fail has produced a confident
+wrong conclusion. The rule it argues for: a diagnostic is a test, and an instrument that reports the
+same answer whatever the system does must be calibrated against a known-true case before anything is
+concluded from it.
+
+### Gates
+
+| Gate                                                       | Result                                                                       |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `pnpm lint`                                                | exit 0                                                                       |
+| `pnpm typecheck`                                           | exit 0                                                                       |
+| `pnpm test`                                                | exit 0 -- `apps/collab` 15 files                                             |
+| `pnpm test:integration`                                    | exit 0 -- `apps/collab` 32/32, `apps/api` 101/101, `packages/database` 11/11 |
+| `pnpm format:check`                                        | exit 0, bare and last                                                        |
+| subject file alone                                         | 6/6                                                                          |
+| subject file alongside `collaboration.integration.test.ts` | 3/3                                                                          |
