@@ -89,11 +89,37 @@ describe.skipIf(!adminUrl)('graceful shutdown durability', () => {
     expect(termOutcome.checkpointExists).toBe(true);
     expect(termOutcome.reconstructedText).toContain('A line saved by a graceful shutdown.');
 
-    const killOutcome = await runEditThenSignal(
+    /*
+     * TEMPORARY, for CI verification of the reconstruction fix -- removed before this merges.
+     *
+     * Two things this buys that a single attempt cannot. First, samples: this scenario has never
+     * reproduced locally and failed four times on CI, so one green attempt is barely evidence.
+     * Second, and more important, it records whether the race window was *actually exercised* --
+     * five passes mean nothing if no compaction ever interleaved with the reads. `raceWitnessed`
+     * counts attempts where a second checkpoint existed by the time the post-exit read ran, which
+     * is precisely the interleaving that used to lose the edit.
+     */
+    const KILL_ATTEMPTS = 5;
+    let raceWitnessed = 0;
+    let killOutcome = await runEditThenSignal(
       killSeed,
       'SIGKILL',
       'A line that survives even a kill -9.',
     );
+    if (killOutcome.checkpointCountAtRead > 1) raceWitnessed += 1;
+    for (let attempt = 2; attempt <= KILL_ATTEMPTS; attempt += 1) {
+      const extraSeed = await seedScreenplay(`kill-${String(attempt)}`);
+      const extraOutcome = await runEditThenSignal(
+        extraSeed,
+        'SIGKILL',
+        'A line that survives even a kill -9.',
+      );
+      if (extraOutcome.checkpointCountAtRead > 1) raceWitnessed += 1;
+      expect(extraOutcome.exitedWithinTimeout).toBe(true);
+      expect(extraOutcome.reconstructedText).toContain('A line that survives even a kill -9.');
+      killOutcome = extraOutcome;
+    }
+    console.log(`CIFIX attempts=${String(KILL_ATTEMPTS)} raceWitnessed=${String(raceWitnessed)}`);
     expect(killOutcome.exitedWithinTimeout).toBe(true);
     // The defining contrast: no graceful hook ran, so compaction never happened here --
     // confirming the checkpoint in the SIGTERM case above is really attributable to the signal
@@ -101,7 +127,8 @@ describe.skipIf(!adminUrl)('graceful shutdown durability', () => {
     expect(killOutcome.checkpointExists).toBe(false);
     // And yet the edit itself is still fully recoverable, from the append-only log alone.
     expect(killOutcome.reconstructedText).toContain('A line that survives even a kill -9.');
-  }, 30_000);
+    // Temporary budget for the repeated attempts above; reverts to 30_000 with that loop.
+  }, 240_000);
 });
 
 async function seedScreenplay(label: string): Promise<{ screenplayId: string; actorId: string }> {
@@ -213,7 +240,12 @@ async function runEditThenSignal(
   seed: { screenplayId: string; actorId: string },
   signal: 'SIGTERM' | 'SIGKILL',
   lineText: string,
-): Promise<{ exitedWithinTimeout: boolean; checkpointExists: boolean; reconstructedText: string }> {
+): Promise<{
+  exitedWithinTimeout: boolean;
+  checkpointExists: boolean;
+  checkpointCountAtRead: number;
+  reconstructedText: string;
+}> {
   const { screenplayId, actorId } = seed;
   const port = await findFreePort();
 
@@ -349,9 +381,18 @@ async function runEditThenSignal(
       ? reconstruction.doc.getXmlFragment('default').toString()
       : '';
 
+    const checkpointCountAtRead = await pool!
+      .query<{
+        count: number;
+      }>('select count(*)::int as count from document_yjs_checkpoints where screenplay_id = $1', [
+        screenplayId,
+      ])
+      .then((r) => r.rows[0]?.count ?? 0);
+
     return {
       exitedWithinTimeout: exited,
       checkpointExists: checkpointCount >= 2,
+      checkpointCountAtRead,
       reconstructedText,
     };
   } finally {

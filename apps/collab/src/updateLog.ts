@@ -142,16 +142,54 @@ export async function updatesAfter(
  * reconstruct from, and `database.ts`'s `createFetch` falls back to seeding fresh from
  * `canonical_screenplay` in that case, exactly as it did before this slice.
  *
- * Deliberately reads the checkpoint and the tail as two separate queries rather than one join --
- * `updatesAfter` needs `checkpoint.throughSequence` as an input, so the second query cannot run
- * until the first resolves. No transaction or lock is taken here: reading a checkpoint that is
- * concurrently being superseded by a new one is safe by construction, because
- * `createCheckpoint`'s deletes only ever remove rows the *new* checkpoint already absorbs, so a
- * reader who read an older checkpoint and an now-slightly-stale tail either reconstructs the same
- * state a moment sooner, or -- if a row it was about to read got deleted between the two queries
- * -- has already read a checkpoint recent enough that the deleted row's content was already
- * folded into some checkpoint at or before the one this reader is using. See
- * `updateLog.test.ts`'s reconstruction tests for this exact interleaving made concrete.
+ * **Read order is load-bearing, and this is the fix for a real defect.** The previous version read
+ * the checkpoint and then the tail, and carried a written argument that doing so was safe: that a
+ * row deleted between the two queries must already have been "folded into some checkpoint at or
+ * before the one this reader is using". That argument is false, and the interleaving it dismissed
+ * loses a committed edit outright:
+ *
+ *  1. this reader reads checkpoint `C1` (say `through_sequence` 0, holding only the seed);
+ *  2. a compaction commits -- inserting `C2` (`through_sequence` 7, holding the seed *and* the
+ *     writer's edit) and, in the same transaction, deleting update rows 1..7;
+ *  3. this reader's tail query asks for rows after sequence 0 and finds none, because they are
+ *     gone;
+ *  4. it reconstructs `C1` alone. The edit has vanished from the result -- while sitting safely in
+ *     `C2`, which this reader never looked at.
+ *
+ * The deleted rows' content was folded into a checkpoint *after* the one the reader held, not at or
+ * before it, which is exactly the case the old reasoning excluded. Nothing is lost on disk; a read
+ * silently omits it. That matters well beyond a test, because `database.ts`'s `createFetch` -- the
+ * live path that loads a document when a writer opens it -- is one of two production callers, and a
+ * load landing in that window hands the writer a document missing their recent edits.
+ *
+ * The comment it replaced also cited `updateLog.test.ts` for "this exact interleaving made
+ * concrete". No such test existed: that file covers compaction against a concurrent *append* and
+ * compaction against another *compaction*, both thoroughly, but never reconstruction against a
+ * concurrent compaction. A safety argument was asserted, documented as tested, and never exercised.
+ *
+ * **Why the order below is correct**, resting on two invariants that hold by construction: a
+ * checkpoint row is never deleted (confirmed: no `delete from document_yjs_checkpoints` exists
+ * anywhere), and an update row is deleted in exactly one place -- `createCheckpoint` -- in the same
+ * transaction that inserts the checkpoint absorbing it. So:
+ *
+ *  - the floor read bounds the tail scan, exactly as before, so this costs one extra single-row
+ *    indexed lookup and reads no more update rows than the old version did;
+ *  - the tail is read *before* the checkpoint that will actually be applied;
+ *  - therefore, for any sequence `s` belonging in the final state, `s` is either covered by that
+ *    checkpoint or present in the tail -- never neither. Suppose `s` were missing from both: `s`
+ *    passed the tail filter (the floor can only be older than the applied checkpoint, as
+ *    `through_sequence` advances monotonically), so it was absent only if deleted before the tail
+ *    read, which implies an absorbing checkpoint with `through_sequence >= s` committed before the
+ *    tail read -- and the checkpoint read *after* the tail therefore sees it, giving
+ *    `through_sequence >= s` and contradicting `s` being uncovered.
+ *
+ * No transaction, no advisory lock, and no dependence on the isolation level. A read-verify-retry
+ * loop was prototyped first and does also close the race, but it is strictly weaker: it is
+ * probabilistic rather than proven, and it keeps the window open for however long the retries take.
+ *
+ * Returns `undefined` when there is no checkpoint at all: a document that has never been opened
+ * collaboratively (or never survived its first compaction) has nothing here to reconstruct from,
+ * and `createFetch` falls back to seeding fresh from `canonical_screenplay`, exactly as before.
  */
 export interface Reconstruction {
   doc: Y.Doc;
@@ -167,13 +205,23 @@ export async function reconstructDocumentState(
   screenplayId: string,
   epoch: number,
 ): Promise<Reconstruction | undefined> {
+  // A floor, purely to bound the tail scan. Its `mergedUpdate` is deliberately *not* the one
+  // applied -- see this function's own comment for why the applied checkpoint must be read last.
+  const floor = await latestCheckpoint(queryable, screenplayId, epoch);
+  if (!floor) return undefined;
+  const tail = await updatesAfter(queryable, screenplayId, epoch, floor.throughSequence);
+  // Read after the tail. A compaction committing in between is now harmless: whatever it deleted,
+  // it absorbed into this checkpoint first.
   const checkpoint = await latestCheckpoint(queryable, screenplayId, epoch);
   if (!checkpoint) return undefined;
   const doc = new Y.Doc();
   Y.applyUpdate(doc, checkpoint.mergedUpdate);
-  const tail = await updatesAfter(queryable, screenplayId, epoch, checkpoint.throughSequence);
   for (const row of tail) {
-    Y.applyUpdate(doc, row.update);
+    // Skip anything the applied checkpoint already absorbed. Re-applying an absorbed update would
+    // be harmless -- Yjs updates are idempotent -- but this keeps the replay to real work only.
+    if (row.sequence > checkpoint.throughSequence) {
+      Y.applyUpdate(doc, row.update);
+    }
   }
   return { doc, throughSequence: checkpoint.throughSequence };
 }
