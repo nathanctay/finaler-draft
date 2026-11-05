@@ -173,25 +173,35 @@ async function waitForPortOpen(port: number, timeoutMs = 10_000): Promise<void> 
   }
 }
 
-/** Rows in the append-only update log for a screenplay, across every epoch. */
-async function countUpdateLogRows(screenplayId: string): Promise<number> {
-  const row = await pool!.query<{ count: number }>(
-    'select count(*)::int as count from document_yjs_updates where screenplay_id = $1',
-    [screenplayId],
-  );
-  return row.rows[0]?.count ?? 0;
-}
-
 /**
- * Polls until the update log has grown past `baseline`, which is how this test knows an edit is
- * durable without guessing at a sleep. Returns false on timeout rather than throwing, so the caller
- * asserts on it and the failure reads as "the edit never reached the log" instead of as an opaque
- * rejection.
+ * Polls the durable update log until the reconstructed document actually contains `lineText`.
+ *
+ * This asserts the precondition the test needs, rather than a proxy for it, and that distinction is
+ * the whole point: an earlier version of this polled for the update-log *row count* to rise above a
+ * baseline, which looked equivalent and was not. Measured directly, the count reaches 1 while the
+ * reconstruction still does not contain the edit -- the row it sees is the one the initial
+ * collaborative open appends, not this edit. That poll therefore returned almost immediately, on
+ * the wrong event, and because it also removed the slack the previous fixed 250ms sleep had
+ * accidentally been providing, it made the `SIGKILL` case *more* likely to be killed before its
+ * edit was durable, not less. It failed on CI on its first run.
+ *
+ * `reconstructDocumentState` is the same function the final assertion uses, so what is waited for
+ * and what is asserted cannot drift apart.
+ *
+ * Returns false on timeout rather than throwing, so the caller asserts on it and a failure reads as
+ * "the edit never became durable" instead of as an opaque rejection.
  */
-async function waitForUpdateCountAbove(screenplayId: string, baseline: number): Promise<boolean> {
-  const deadline = Date.now() + 10_000;
+async function waitForDurableText(screenplayId: string, lineText: string): Promise<boolean> {
+  const { reconstructDocumentState } = await import('./updateLog.js');
+  const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
-    if ((await countUpdateLogRows(screenplayId)) > baseline) {
+    const state = await reconstructDocumentState(pool!, screenplayId, 0);
+    // The identical extraction the final assertion uses -- `reconstructDocumentState` returns a
+    // wrapper, not a string, so stringifying it directly yields "[object Object]" and a check
+    // against it can never match. That mistake is exactly how an earlier version of this poll
+    // reported a false negative on every single run.
+    const text = state ? state.doc.getXmlFragment('default').toString() : '';
+    if (text.includes(lineText)) {
       return true;
     }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
@@ -279,11 +289,6 @@ async function runEditThenSignal(
       provider.on('authenticationFailed', onFailed);
     });
 
-    // The update-log baseline this edit will be observed against. Read *before* the edit, because
-    // opening a document collaboratively for the first time can itself append, so "any rows at all"
-    // is not evidence that this edit in particular landed.
-    const updateCountBeforeEdit = await countUpdateLogRows(screenplayId);
-
     // A real edit: insert an actual screenplay block carrying `lineText`, the same shape the
     // editor itself produces -- not a synthetic Yjs primitive unrelated to what this application
     // actually persists.
@@ -315,8 +320,8 @@ async function runEditThenSignal(
      * killing the process. The second condition is removed by the long `COLLAB_DEBOUNCE_MS` set in
      * the child's environment above, not by being quick.
      */
-    const updateLogged = await waitForUpdateCountAbove(screenplayId, updateCountBeforeEdit);
-    expect(updateLogged).toBe(true);
+    const durable = await waitForDurableText(screenplayId, lineText);
+    expect(durable).toBe(true);
 
     provider.destroy();
     websocketProvider.destroy();

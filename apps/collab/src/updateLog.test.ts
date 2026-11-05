@@ -5,6 +5,7 @@ import {
   appendUpdate,
   createCheckpoint,
   latestCheckpoint,
+  type Queryable,
   reconstructDocumentState,
   updatesAfter,
   writeCheckpoint,
@@ -628,5 +629,113 @@ describe('latestCheckpoint / updatesAfter', () => {
     });
     const rows = await updatesAfter(pool, SCREENPLAY_A, EPOCH, s1);
     expect(rows.map((r) => r.sequence)).toEqual([s2]);
+  });
+});
+
+describe('reconstructDocumentState against a concurrent compaction', () => {
+  /**
+   * Drives the one interleaving the old implementation lost an edit in, deterministically: let
+   * reconstruction's reads begin, run a *complete* compaction the moment the query named by
+   * `after` resolves, then let the remaining reads proceed. No sleeps and no timing -- the
+   * interleaving is forced, so this either reproduces every run or never.
+   */
+  function compactingQueryable(
+    pool: ReturnType<typeof createFakePool>['pool'],
+    after: 'checkpoint-read' | 'tail-read',
+  ): { query: Queryable['query'] } {
+    let fired = false;
+    return {
+      async query<Row = unknown>(text: string, values?: readonly unknown[]) {
+        const isCheckpointRead = text.includes('through_sequence as');
+        const isTailRead =
+          text.includes('from document_yjs_updates') && text.includes('sequence >');
+        const matched = after === 'checkpoint-read' ? isCheckpointRead : isTailRead;
+        /*
+         * `pool.query` is typed against pg's `QueryResultRow` constraint, while `Queryable.query`
+         * -- the interface the production code actually depends on -- leaves `Row` unconstrained.
+         * The two signatures disagree about the *bound*, not the shape, so this forwards with a
+         * mutable copy of `values` (pg wants `any[]`, not `readonly unknown[]`) and re-asserts the
+         * row type on the way out. Nothing is converted; the rows are whatever the fake returned.
+         */
+        const result = (await pool.query(text, values ? [...values] : undefined)) as unknown as {
+          rows: Row[];
+        };
+        if (matched && !fired) {
+          fired = true;
+          await createCheckpoint(pool, { screenplayId: SCREENPLAY_A, epoch: EPOCH });
+        }
+        return result;
+      },
+    };
+  }
+
+  /** A seeded base checkpoint plus one logged edit -- `createFetch`'s first-open checkpoint and a
+   * single `onChange` append, which is the state the graceful-shutdown scenario kills a server in. */
+  async function seedCheckpointAndOneEdit(pool: ReturnType<typeof createFakePool>['pool']) {
+    const base = docWithText('seed');
+    await writeCheckpoint(pool, {
+      screenplayId: SCREENPLAY_A,
+      epoch: EPOCH,
+      throughSequence: 0,
+      doc: base,
+    });
+    const update = captureUpdate(base, () => base.getText('body').insert(4, '-EDIT'));
+    await appendUpdate(pool, {
+      screenplayId: SCREENPLAY_A,
+      epoch: EPOCH,
+      update,
+      actorId: 'writer',
+    });
+    return base;
+  }
+
+  it('keeps a committed edit when a compaction commits in the middle of its reads', async () => {
+    const { pool } = createFakePool();
+    const live = await seedCheckpointAndOneEdit(pool);
+
+    // Undisturbed first. Without this the test below could "pass" against a state that never
+    // held the edit in the first place.
+    const quiet = await reconstructDocumentState(pool, SCREENPLAY_A, EPOCH);
+    expect(quiet!.doc.getText('body').toString()).toBe(live.getText('body').toString());
+
+    // Then with a compaction forced into each of the two windows in turn. Both must survive: the
+    // defect lived in the first, and the second is the window the fix's own re-read opens.
+    for (const after of ['checkpoint-read', 'tail-read'] as const) {
+      const { pool: racedPool } = createFakePool();
+      const racedLive = await seedCheckpointAndOneEdit(racedPool);
+      const raced = await reconstructDocumentState(
+        compactingQueryable(racedPool, after),
+        SCREENPLAY_A,
+        EPOCH,
+      );
+      expect(raced!.doc.getText('body').toString()).toBe(racedLive.getText('body').toString());
+    }
+  });
+
+  it('mutation guard: reading the applied checkpoint *before* the tail -- the old order -- genuinely loses the edit, proving the test above is sensitive to the order it exists to pin', async () => {
+    /*
+     * A deliberate re-implementation of the previous read order, in the same spirit as the
+     * lock-free stand-in above: it proves the test methodology would actually fail if the fix in
+     * `reconstructDocumentState` were reverted, without editing and restoring the real source file
+     * from inside a unit test. If this ever starts passing, the test above has stopped being
+     * evidence of anything.
+     */
+    const { pool } = createFakePool();
+    await seedCheckpointAndOneEdit(pool);
+    const queryable = compactingQueryable(pool, 'checkpoint-read');
+
+    const checkpoint = await latestCheckpoint(queryable, SCREENPLAY_A, EPOCH);
+    const tail = await updatesAfter(queryable, SCREENPLAY_A, EPOCH, checkpoint!.throughSequence);
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, checkpoint!.mergedUpdate);
+    for (const row of tail) {
+      Y.applyUpdate(doc, row.update);
+    }
+
+    // The edit is gone from this reconstruction -- the exact production defect.
+    expect(doc.getText('body').toString()).toBe('seed');
+    // ...while a correct read of the very same database still has it, so nothing was ever lost.
+    const correct = await reconstructDocumentState(pool, SCREENPLAY_A, EPOCH);
+    expect(correct!.doc.getText('body').toString()).toBe('seed-EDIT');
   });
 });
