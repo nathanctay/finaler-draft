@@ -67,6 +67,7 @@ describe('parseServerEnvironment', () => {
       STRIPE_PRICE_ID_MONTHLY: 'price_test_FAKE_monthly',
       STRIPE_PRICE_ID_ANNUAL: 'price_test_FAKE_annual',
       COLLAB_TOKEN_SECRET: 'y'.repeat(32),
+      FEEDBACK_MAIL_TO: 'owner@example.test',
     });
     expect(findPersistenceEnvironment(environment)).toEqual({
       DATABASE_URL: 'postgresql://localhost/finaler',
@@ -80,6 +81,7 @@ describe('parseServerEnvironment', () => {
       STRIPE_PRICE_ID_MONTHLY: 'price_test_FAKE_monthly',
       STRIPE_PRICE_ID_ANNUAL: 'price_test_FAKE_annual',
       COLLAB_TOKEN_SECRET: 'y'.repeat(32),
+      FEEDBACK_MAIL_TO: 'owner@example.test',
     });
   });
 
@@ -151,6 +153,7 @@ describe('parseServerEnvironment', () => {
           STRIPE_PRICE_ID_MONTHLY: 'price_test_FAKE_monthly',
           STRIPE_PRICE_ID_ANNUAL: 'price_test_FAKE_annual',
           COLLAB_TOKEN_SECRET: 'x'.repeat(32),
+          FEEDBACK_MAIL_TO: 'owner@example.test',
         }),
       ),
     ).toMatchObject({ RESEND_API_KEY: 're_test_key', MAIL_FROM_ADDRESS: 'noreply@example.test' });
@@ -203,6 +206,7 @@ describe('parseServerEnvironment', () => {
           STRIPE_PRICE_ID_MONTHLY: 'price_test_FAKE_monthly',
           STRIPE_PRICE_ID_ANNUAL: 'price_test_FAKE_annual',
           COLLAB_TOKEN_SECRET: 'z'.repeat(32),
+          FEEDBACK_MAIL_TO: 'owner@example.test',
         }),
       ),
     ).toMatchObject({ COLLAB_TOKEN_SECRET: 'z'.repeat(32) });
@@ -287,6 +291,7 @@ describe('parseServerEnvironment', () => {
           STRIPE_PRICE_ID_MONTHLY: 'price_test_FAKE_monthly',
           STRIPE_PRICE_ID_ANNUAL: 'price_test_FAKE_annual',
           COLLAB_TOKEN_SECRET: 'x'.repeat(32),
+          FEEDBACK_MAIL_TO: 'owner@example.test',
         }),
       ),
     ).toMatchObject({
@@ -295,5 +300,59 @@ describe('parseServerEnvironment', () => {
       STRIPE_PRICE_ID_MONTHLY: 'price_test_FAKE_monthly',
       STRIPE_PRICE_ID_ANNUAL: 'price_test_FAKE_annual',
     });
+  });
+
+  it('does not require a feedback destination address outside production', () => {
+    expect(
+      requirePersistenceEnvironment(
+        parseServerEnvironment({
+          NODE_ENV: 'test',
+          DATABASE_URL: 'postgresql://localhost/finaler',
+          BETTER_AUTH_SECRET: 'x'.repeat(32),
+          BETTER_AUTH_URL: 'http://127.0.0.1:4174',
+        }),
+      ),
+    ).not.toHaveProperty('FEEDBACK_MAIL_TO');
+  });
+
+  it('refuses to start in production without a feedback destination address, even with Resend, Stripe, and the collab token secret configured', () => {
+    expect(() =>
+      requirePersistenceEnvironment(
+        parseServerEnvironment({
+          NODE_ENV: 'production',
+          DATABASE_URL: 'postgresql://localhost/finaler',
+          BETTER_AUTH_SECRET: 'x'.repeat(32),
+          BETTER_AUTH_URL: 'https://app.example.test',
+          RESEND_API_KEY: 're_test_key',
+          MAIL_FROM_ADDRESS: 'noreply@example.test',
+          STRIPE_SECRET_KEY: 'sk_test_FAKE',
+          STRIPE_WEBHOOK_SECRET: 'whsec_test_FAKE',
+          STRIPE_PRICE_ID_MONTHLY: 'price_test_FAKE_monthly',
+          STRIPE_PRICE_ID_ANNUAL: 'price_test_FAKE_annual',
+          COLLAB_TOKEN_SECRET: 'x'.repeat(32),
+        }),
+      ),
+    ).toThrow(/FEEDBACK_MAIL_TO/);
+  });
+
+  it('starts in production once a feedback destination address is present, alongside everything else', () => {
+    expect(
+      requirePersistenceEnvironment(
+        parseServerEnvironment({
+          NODE_ENV: 'production',
+          DATABASE_URL: 'postgresql://localhost/finaler',
+          BETTER_AUTH_SECRET: 'x'.repeat(32),
+          BETTER_AUTH_URL: 'https://app.example.test',
+          RESEND_API_KEY: 're_test_key',
+          MAIL_FROM_ADDRESS: 'noreply@example.test',
+          STRIPE_SECRET_KEY: 'sk_test_FAKE',
+          STRIPE_WEBHOOK_SECRET: 'whsec_test_FAKE',
+          STRIPE_PRICE_ID_MONTHLY: 'price_test_FAKE_monthly',
+          STRIPE_PRICE_ID_ANNUAL: 'price_test_FAKE_annual',
+          COLLAB_TOKEN_SECRET: 'x'.repeat(32),
+          FEEDBACK_MAIL_TO: 'owner@example.test',
+        }),
+      ),
+    ).toMatchObject({ FEEDBACK_MAIL_TO: 'owner@example.test' });
   });
 });

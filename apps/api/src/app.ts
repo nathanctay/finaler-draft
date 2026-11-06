@@ -29,6 +29,12 @@ import { mintConnectionToken, CONNECTION_TOKEN_TTL_MS } from '@finaler-draft/col
 import type { EntitlementStore } from './entitlementStore.js';
 import type { MailMessage } from '@finaler-draft/auth-server/mail';
 import {
+  FEEDBACK_RATE_LIMIT_WINDOW_MS,
+  FEEDBACK_SUBMISSIONS_PER_HOUR,
+  submitFeedbackInput,
+  type FeedbackStore,
+} from './feedback.js';
+import {
   ForbiddenError,
   type ProjectStore,
   createProjectInput,
@@ -205,6 +211,20 @@ export interface BuildAppOptions {
    * registered, matching every other optional store.
    */
   sharing?: SharingStore;
+  /**
+   * Backs `POST /api/feedback` -- the "Send feedback" capture path. No other route is ever
+   * registered for this store: there is deliberately no `GET` anywhere that reads from it. See
+   * `feedback.ts`'s own module comment for why that absence is the whole of the security property
+   * the owner asked for, and `feedbackNoReadPath.test.ts` for how it is proven against this app's
+   * real, enumerated route tree.
+   *
+   * Absent means the route is not registered at all, matching every other optional store here --
+   * though unlike `stripe`/`billing`/`collab`, this one is never gated behind whether an email
+   * *destination* is configured (`server.ts` always constructs it whenever persistence exists):
+   * the database insert this route performs is authoritative and does not depend on where, or
+   * whether, the best-effort notification email goes.
+   */
+  feedback?: FeedbackStore;
 }
 
 const idParam = z.object({ id: z.string().uuid() });
@@ -636,6 +656,12 @@ const respondToInvitationResponseSchema = z.discriminatedUnion('outcome', [
 ]);
 const revokeInvitationResponseSchema = z.object({ outcome: z.literal('revoked') });
 
+// The "Send feedback" capture path. Mirrors `SubmittedFeedback` (feedback.ts) field for field,
+// the same convention every other response schema in this file follows -- there is deliberately
+// no richer shape to return here (no echoed body, no echoed context): the caller already has
+// both, and the response's only job is confirming the row now exists and saying when.
+const feedbackResponseSchema = z.object({ id: z.string().uuid(), createdAt: z.string() });
+
 /**
  * Pure projection from an `EntitlementSnapshot` to the wire shape `GET /api/entitlement` returns.
  * `cooldownEndsAt` is derived here, not left for a client to compute from `slotUpdatedAt` plus a
@@ -1060,7 +1086,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
       options.collab ||
       options.revisions ||
       options.restore ||
-      options.sharing)
+      options.sharing ||
+      options.feedback)
   ) {
     // Runs as `preValidation`, not `preHandler`. Fastify's request lifecycle runs
     // preValidation -> schema validation -> preHandler -> the route handler, and before this
@@ -1094,7 +1121,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
         // owner-or-editor membership on the project (`sharing.ts`'s own check). The inviter-side
         // routes sit under `/api/projects` and `/api/screenplays`, already listed above.
         !request.url.startsWith('/api/invitations') &&
-        !request.url.startsWith('/api/shared-screenplays')
+        !request.url.startsWith('/api/shared-screenplays') &&
+        // The "Send feedback" capture path. Carries the same authenticated-actor and same-origin
+        // requirements as every other route here -- there is no anonymous path to support (the
+        // brief is explicit: the one entry point is the signed-in Help menu), and the row this
+        // route writes is attributed to `request.actorId`, never to anything a caller could name
+        // in the body.
+        !request.url.startsWith('/api/feedback')
       )
         return;
       // Checked ahead of the session lookup: a forged cross-origin request is rejected outright
@@ -1843,6 +1876,45 @@ export async function buildApp(options: BuildAppOptions = {}) {
           return reply.code(403).send({ error: 'Project editor access required to share' });
         return result;
       },
+    );
+  }
+  if (options.auth && options.feedback) {
+    const feedback = options.feedback;
+    typedApp.post(
+      '/api/feedback',
+      {
+        // Replaces, rather than supplements, the global per-client IP cap this plugin attached
+        // to every other route above (`fastifyRateLimit`'s `onRoute` hook is an if/else: a route
+        // that declares its own `config.rateLimit` never also gets the plugin's default one --
+        // confirmed by reading the installed `@fastify/rate-limit` source, not assumed from the
+        // README's "plus the global one" phrasing, which describes the *merge* of unspecified
+        // fields, not two independently-active checks). That is the correct tradeoff for this one
+        // route, not an oversight: the owner asked for this limit keyed per *user*, not per IP,
+        // specifically because several writers can share an office IP and the point of this limit
+        // is bounding one account's submissions, not one address's. An unauthenticated flood
+        // against this path is still cheap and still rejected (401, by the `preValidation` hook
+        // above) before it ever reaches this `preHandler`; what this limit actually bounds is a
+        // signed-in writer submitting faster than `FEEDBACK_SUBMISSIONS_PER_HOUR` allows.
+        //
+        // `hook: 'preHandler'`, not the inherited default `'onRequest'`: `keyGenerator` needs
+        // `request.actorId`, which the `preValidation` hook above has not set yet at `onRequest`
+        // time. Fastify's lifecycle is onRequest -> preParsing -> preValidation -> preHandler, so
+        // `preHandler` is the earliest point this limit can key on the authenticated actor at all.
+        config: {
+          rateLimit: {
+            max: FEEDBACK_SUBMISSIONS_PER_HOUR,
+            timeWindow: FEEDBACK_RATE_LIMIT_WINDOW_MS,
+            hook: 'preHandler',
+            keyGenerator: (request) => request.actorId!,
+          },
+        },
+        schema: {
+          body: submitFeedbackInput,
+          response: { 201: feedbackResponseSchema },
+        },
+      },
+      async (request, reply) =>
+        reply.code(201).send(await feedback.submitFeedback(request.actorId!, request.body)),
     );
   }
   if (options.serveClient) {
