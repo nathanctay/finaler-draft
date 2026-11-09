@@ -399,4 +399,86 @@ describe('API client', () => {
       });
     });
   });
+
+  /**
+   * The Help menu's "Send feedback" (`feedbackDialog.tsx`, `progress/menus-slice-3.md`). Unlike
+   * the dialog's own test suite, which spies `api.submitFeedback` away entirely, this exercises
+   * the real implementation against a fetch mock -- the one place that actually proves it posts
+   * to `/api/feedback`, with the exact `{body, context}` shape `apps/api/src/feedback.ts`'s
+   * `.strict()` schema expects and nothing else, and that `screenplayId` genuinely disappears from
+   * the request body when omitted rather than being sent as a literal `undefined`.
+   */
+  describe('submitFeedback', () => {
+    it('posts to /api/feedback with exactly {body, context}, and parses the created row', async () => {
+      fetchMock.mockResolvedValue(
+        response({
+          id: '11111111-1111-4111-8111-111111111111',
+          createdAt: '2026-09-02T00:00:00.000Z',
+        }),
+      );
+
+      await expect(
+        // A deliberately synthetic SHA, not this checkout's own: the value is supplied by the
+        // caller and echoed back, never read from `APP_VERSION`, and a real-looking SHA here
+        // invited the misreading that this assertion is coupled to the build.
+        api.submitFeedback('The save indicator never clears.', {
+          appVersion: '0000000000000000000000000000000000000000',
+          route: '/projects/p/screenplays/s',
+          screenplayId,
+        }),
+      ).resolves.toEqual({
+        id: '11111111-1111-4111-8111-111111111111',
+        createdAt: '2026-09-02T00:00:00.000Z',
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/feedback',
+        expect.objectContaining({
+          body: JSON.stringify({
+            body: 'The save indicator never clears.',
+            context: {
+              appVersion: '0000000000000000000000000000000000000000',
+              route: '/projects/p/screenplays/s',
+              screenplayId,
+            },
+          }),
+          credentials: 'include',
+          method: 'POST',
+        }),
+      );
+    });
+
+    it('omits screenplayId from the request body entirely when the context has none, rather than sending it as a literal undefined', async () => {
+      fetchMock.mockResolvedValue(
+        response({
+          id: '11111111-1111-4111-8111-111111111111',
+          createdAt: '2026-09-02T00:00:00.000Z',
+        }),
+      );
+
+      await api.submitFeedback('A problem with no screenplay in view.', {
+        appVersion: 'dev',
+        route: '/projects',
+      });
+
+      const [, init] = fetchMock.mock.calls[0]!;
+      const sentBody: { context: Record<string, unknown> } = JSON.parse(init!.body as string);
+      expect(Object.hasOwn(sentBody.context, 'screenplayId')).toBe(false);
+    });
+
+    /** The one refusal the brief calls out by name: `apps/api/src/app.ts`'s per-user rate limit
+     * answers a 429 with the identical `{error: string}` shape every other `jsonWithServerMessage`
+     * caller already expects, so this needs no special-case parsing -- only this test, proving the
+     * existing mechanism actually reaches this new caller too. */
+    it('keeps the server-provided message from a 429 rate-limit response', async () => {
+      fetchMock.mockResolvedValue(response({ error: 'Too many requests' }, false, 429));
+
+      await expect(
+        api.submitFeedback('A problem.', { appVersion: 'dev', route: '/projects' }),
+      ).rejects.toMatchObject({ serverMessage: 'Too many requests', status: 429 });
+      await expect(
+        api.submitFeedback('A problem.', { appVersion: 'dev', route: '/projects' }),
+      ).rejects.toBeInstanceOf(MessageApiError);
+    });
+  });
 });

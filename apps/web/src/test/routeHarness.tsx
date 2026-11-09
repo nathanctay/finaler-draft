@@ -61,6 +61,20 @@ export const routeState: {
   mutationError: boolean;
   mutationErrorValue: unknown;
   navigate: ReturnType<typeof vi.fn>;
+  /**
+   * Stands in for `useLocation()`'s own `pathname` -- Help > Send feedback's `context.route`
+   * (`progress/menus-slice-3.md`), read by the three routes that build that context. `''` by
+   * default (every existing test, which never exercises Send feedback, is unaffected); a test that
+   * does sets this to the resolved path it wants that route to report.
+   *
+   * Not `Route.fullPath`: that getter's `_fullPath` is set by `BaseRoute.init()`
+   * (`@tanstack/router-core`'s `route.js`), which only ever runs once a route is attached to a
+   * real, built route tree -- true of this app's real `routeTree.gen.ts`, never true of a route
+   * module imported standalone the way every test in this file does. `Route.fullPath` reads as
+   * `undefined` in exactly that situation, confirmed by trying it first and watching every
+   * `route-prop` assertion fail with an undefined value rather than the expected path.
+   */
+  pathname: string;
   query: QueryState;
   /**
    * Per-`queryKey` overrides, keyed by `JSON.stringify(queryKey)`. A page with only one
@@ -80,6 +94,7 @@ export const routeState: {
   mutationErrorValue: undefined,
   revisionId,
   navigate: vi.fn(),
+  pathname: '',
   query: { data: undefined, isError: false, isLoading: false },
   queries: {},
   screenplayId,
@@ -181,6 +196,7 @@ export async function reactRouterMock(
       <a href={to}>{children}</a>
     ),
     Outlet: () => <div>Outlet</div>,
+    useLocation: () => ({ pathname: routeState.pathname }),
     useMatches: () => routeState.matches,
     useNavigate: () => routeState.navigate,
     useParams: () => ({
@@ -213,6 +229,7 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
       onOpenSharing,
       onReloadRestoredDocument,
       onScreenplayRenamed,
+      route,
       viewerRole,
     }: {
       accountMenu?: React.ReactNode;
@@ -232,6 +249,7 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
       onOpenSharing?: () => void;
       onReloadRestoredDocument?: () => void;
       onScreenplayRenamed?: (title: string) => void;
+      route?: string;
       viewerRole?: 'owner' | 'editor' | 'reviewer';
     }) => {
       const [mountId] = react.useState(() => ++routeState.editorMounts);
@@ -247,6 +265,11 @@ export async function editorModuleMock(): Promise<Record<string, unknown>> {
               whether the route handed one in. */}
           {accountMenu !== undefined && <div data-testid="account-menu-slot">{accountMenu}</div>}
           {breadcrumb !== undefined && <div data-testid="breadcrumb-slot">{breadcrumb}</div>}
+          {/* Help > Send feedback's own `context.route` (`progress/menus-slice-3.md`). Surfaced
+              here, the same way `viewerRole` just below is, so a route test can prove the route
+              actually threads its own `useLocation().pathname` through, without the
+              Tiptap-backed `App`. */}
+          {route !== undefined && <span data-testid="route-prop">{route}</span>}
           {/* The screenplay-invitations slice's read-only fix: the route hands the editor the
               viewer's own effective role, and `App` ranks `'reviewer'` ahead of entitlement as a
               read-only reason (App.tsx's `viewerRole` and `readOnlyReason`). Surfaced here so a
@@ -341,6 +364,7 @@ export function resetRouteHarness() {
   routeState.mutationError = false;
   routeState.mutationErrorValue = undefined;
   routeState.navigate.mockReset();
+  routeState.pathname = '';
   routeState.query = { data: undefined, isError: false, isLoading: false };
   // The screenplay-invitations slice added two further concurrent queries to the dashboard, and the
   // single shared `routeState.query` fallback cannot serve three keys at once -- without a default,

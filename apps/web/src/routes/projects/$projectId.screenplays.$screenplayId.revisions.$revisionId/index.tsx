@@ -1,6 +1,12 @@
 import { lazy, Suspense, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { createFileRoute, redirect, useNavigate, useParams } from '@tanstack/react-router';
+import {
+  createFileRoute,
+  redirect,
+  useLocation,
+  useNavigate,
+  useParams,
+} from '@tanstack/react-router';
 import { z } from 'zod';
 import { api, type PersistedScreenplay, type RevisionDetail } from '../../../api.js';
 import {
@@ -56,6 +62,10 @@ function RevisionPreviewPage() {
     from: '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId/',
   });
   const navigate = useNavigate();
+  // Help > Send feedback's own `context.route` (`progress/menus-slice-3.md`) -- see the live
+  // screenplay route's identical comment for why this is `useLocation()`'s `pathname` and not
+  // `Route.fullPath`.
+  const { pathname } = useLocation();
   const queryClient = useQueryClient();
   const [restoreDialogOpen, setRestoreDialogOpen] = useState(false);
   const revision = useQuery({
@@ -127,6 +137,7 @@ function RevisionPreviewPage() {
         }}
         initial={initial}
         key={revisionId}
+        route={pathname}
       />
       {restoreDialogOpen && screenplay.data && (
         <RestoreRevisionDialog

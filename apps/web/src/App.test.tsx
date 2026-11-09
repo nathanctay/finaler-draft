@@ -15,7 +15,8 @@ import {
 } from '@finaler-draft/screenplay';
 import { paginateScreenplay } from '@finaler-draft/layout';
 import { App } from './App.js';
-import { api, MessageApiError, type PersistedScreenplay } from './api.js';
+import { ApiError, api, MessageApiError, type PersistedScreenplay } from './api.js';
+import { APP_VERSION } from './appVersion.js';
 import { pageStackMinHeightIn } from './pagination.js';
 import { countWords } from './wordCount.js';
 import * as screenplayEditorModule from './screenplayEditor.js';
@@ -3494,5 +3495,154 @@ describe('Tools menu: Word count', () => {
 
     await user.click(screen.getByRole('button', { name: 'Tools menu' }));
     expect(screen.getByRole('menuitem', { name: 'Word count…' })).toBeEnabled();
+  });
+});
+
+describe('Help menu: Send feedback and Keyboard shortcuts', () => {
+  const helpScript = persistedScreenplay(
+    '77778888-0000-4000-8000-000000000001',
+    'Help Menu Draft',
+    'INT. APARTMENT - MORNING',
+  );
+
+  async function openHelpDialog(user: ReturnType<typeof userEvent.setup>, itemName: string) {
+    await user.click(screen.getByRole('button', { name: 'Help menu' }));
+    await user.click(screen.getByRole('menuitem', { name: itemName }));
+  }
+
+  it('lists exactly two items, Send feedback… and Keyboard shortcuts…', async () => {
+    const user = userEvent.setup();
+    render(<App initial={helpScript} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    await user.click(screen.getByRole('button', { name: 'Help menu' }));
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
+      'Send feedback…',
+      'Keyboard shortcuts…',
+    ]);
+  });
+
+  describe('Send feedback', () => {
+    it('submits the trimmed message with this screen’s route, this screenplay’s id, and the build’s APP_VERSION, then closes', async () => {
+      const submitSpy = vi
+        .spyOn(api, 'submitFeedback')
+        .mockResolvedValue({ id: 'feedback-1', createdAt: new Date().toISOString() });
+      const user = userEvent.setup();
+      render(<App initial={helpScript} route="/projects/p/screenplays/s" />);
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+      await openHelpDialog(user, 'Send feedback…');
+      const dialog = screen.getByRole('dialog', { name: 'Send feedback' });
+      await user.type(
+        within(dialog).getByRole('textbox', { name: 'Feedback message' }),
+        '  The save indicator never clears.  ',
+      );
+      await user.click(within(dialog).getByRole('button', { name: 'Send' }));
+
+      await waitFor(() =>
+        expect(submitSpy).toHaveBeenCalledWith('The save indicator never clears.', {
+          appVersion: APP_VERSION,
+          route: '/projects/p/screenplays/s',
+          screenplayId: helpScript.id,
+        }),
+      );
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(screen.getByRole('button', { name: 'Help menu' })).toHaveFocus();
+      submitSpy.mockRestore();
+    });
+
+    /** `route` is a prop the many other tests in this file never pass -- this is the one that
+     * proves the fallback (`App.tsx`'s `UNKNOWN_ROUTE`) is reachable and sane, not merely declared
+     * and never exercised. */
+    it('falls back to a non-empty placeholder route when the caller supplies none', async () => {
+      const submitSpy = vi
+        .spyOn(api, 'submitFeedback')
+        .mockResolvedValue({ id: 'feedback-1', createdAt: new Date().toISOString() });
+      const user = userEvent.setup();
+      render(<App initial={helpScript} />);
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+      await openHelpDialog(user, 'Send feedback…');
+      await user.type(screen.getByRole('textbox', { name: 'Feedback message' }), 'A problem.');
+      await user.click(screen.getByRole('button', { name: 'Send' }));
+
+      await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
+      const [, context] = submitSpy.mock.calls[0]!;
+      expect(context.route.length).toBeGreaterThan(0);
+      submitSpy.mockRestore();
+    });
+
+    it('closes on Escape, returning focus to the Help menu trigger', async () => {
+      const user = userEvent.setup();
+      render(<App initial={helpScript} />);
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+      await openHelpDialog(user, 'Send feedback…');
+      await user.keyboard('{Escape}');
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Help menu' })).toHaveFocus();
+    });
+
+    /**
+     * The brief's own named case: a 429 must read as its own sentence, not a generic failure --
+     * going to matter more once the owner lowers the rate limit from its current opening value.
+     */
+    it('gives a 429 its own sentence rather than a generic failure, and leaves the dialog open', async () => {
+      const submitSpy = vi.spyOn(api, 'submitFeedback').mockRejectedValue(new ApiError(429));
+      const user = userEvent.setup();
+      render(<App initial={helpScript} />);
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+      await openHelpDialog(user, 'Send feedback…');
+      await user.type(screen.getByRole('textbox', { name: 'Feedback message' }), 'A problem.');
+      await user.click(screen.getByRole('button', { name: 'Send' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        "You've sent a lot of feedback recently",
+      );
+      expect(screen.getByRole('dialog', { name: 'Send feedback' })).toBeVisible();
+      submitSpy.mockRestore();
+    });
+
+    /** Neither Help item touches the document (this module's own comment, matching Word count's
+     * identical exemption), so unlike "Document settings…" this carries no `editingAllowed` gate --
+     * a reviewer, or a writer reading a historical revision, may report a problem exactly as they
+     * may still copy text or count words. */
+    it('stays enabled while editing is not allowed', async () => {
+      const user = userEvent.setup();
+      render(
+        <App entitlementReadOnly={{ message: 'Read-only for this test.' }} initial={helpScript} />,
+      );
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+      await user.click(screen.getByRole('button', { name: 'Help menu' }));
+      expect(screen.getByRole('menuitem', { name: 'Send feedback…' })).toBeEnabled();
+      expect(screen.getByRole('menuitem', { name: 'Keyboard shortcuts…' })).toBeEnabled();
+    });
+  });
+
+  describe('Keyboard shortcuts', () => {
+    it('opens a dialog listing the documented shortcuts, with Undo among them', async () => {
+      const user = userEvent.setup();
+      render(<App initial={helpScript} />);
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+      await openHelpDialog(user, 'Keyboard shortcuts…');
+      const dialog = screen.getByRole('dialog', { name: 'Keyboard shortcuts' });
+      expect(within(dialog).getByText('Undo')).toBeInTheDocument();
+    });
+
+    it('closes on Escape, returning focus to the Help menu trigger', async () => {
+      const user = userEvent.setup();
+      render(<App initial={helpScript} />);
+      await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+      await openHelpDialog(user, 'Keyboard shortcuts…');
+      await user.keyboard('{Escape}');
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Help menu' })).toHaveFocus();
+    });
   });
 });

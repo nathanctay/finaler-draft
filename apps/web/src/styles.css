@@ -2818,12 +2818,30 @@ select:focus-visible,
 }
 
 .dialog-field input[type='number'],
-.dialog-field input[type='text'] {
+.dialog-field input[type='text'],
+.dialog-field textarea {
   width: 100%;
   border: 1px solid var(--border-04);
   border-radius: 2px;
   padding: 6px 8px;
+  font: inherit;
   font-size: 13px;
+}
+
+/* Help > Send feedback's own textarea (`feedbackDialog.tsx`) is the one `.dialog-field` control
+   that needs its own resize behaviour -- a single-line `input` has none to set. */
+.dialog-field textarea {
+  resize: vertical;
+}
+
+/* The live character counter beneath the feedback textarea. Stacked onto `.muted` (the markup
+   carries both classes) for the colour, which is already dialog-safe in both themes (`.muted`'s
+   own `--text-07` is one of the tokens `.dialog` re-anchors to its on-white value, the "stays
+   white in both themes" container list near the top of this file) -- this rule only adds the one
+   thing `.muted` does not set anywhere else it is used. */
+.feedback-dialog-count {
+  margin: 0;
+  text-align: right;
 }
 
 /* The screenplay-invitations slice's sharing dialog (sharingDialog.tsx). Wider than `.dialog`'s own
@@ -2979,6 +2997,64 @@ select:focus-visible,
   color: var(--text-13);
   font-size: 12px;
   font-weight: 600;
+}
+
+/*
+ * Help > Keyboard shortcuts (`progress/menus-slice-3.md`). Slightly wider than `.dialog`'s own
+ * 360px default, the same reasoning `.sharing-dialog` gives for its own width override: a row here
+ * carries a key combination and a sentence describing it, and the narrower default pushed longer
+ * descriptions into an awkward wrap against the key column.
+ */
+.keyboard-shortcuts-dialog {
+  width: min(440px, calc(100vw - 32px));
+}
+
+.keyboard-shortcuts-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  gap: 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.keyboard-shortcut-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.keyboard-shortcut-keys {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/*
+ * `--surface-09` and `--text-13` are both already used elsewhere inside `.dialog`
+ * (`word-count-stat`'s own comment names the identical pairing's safety) and neither is one of
+ * the tokens `.dark` redefines -- this chip is deliberately not a themed sub-surface at all, so
+ * unlike `.dialog-actions button` it needs no `color: inherit` trick to stay readable: it simply
+ * never goes dark in the first place, the same "stays white in both themes" property this file's
+ * own container list gives `.dialog` itself.
+ */
+.keyboard-shortcut-keys kbd {
+  border: 1px solid var(--border-04);
+  border-radius: 3px;
+  background: var(--surface-09);
+  padding: 1px 6px;
+  color: var(--text-13);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.keyboard-shortcut-description {
+  margin: 0;
+  color: var(--text-09);
+  font-size: 12px;
 }
 
 .dialog-actions {

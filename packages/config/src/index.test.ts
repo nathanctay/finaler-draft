@@ -3,6 +3,7 @@ import {
   COLLAB_RESTORED_MESSAGE_TYPE,
   DEFAULT_COLLAB_DEV_PORT,
   encodeCollabRestoredMessage,
+  FEEDBACK_BODY_MAX_LENGTH,
   formatCollabDocumentName,
   parseCollabDocumentName,
   parseCollabRestoredMessage,
@@ -16,6 +17,15 @@ describe('password policy', () => {
     expect(PASSWORD_MIN_LENGTH).toBe(12);
     expect(PASSWORD_MAX_LENGTH).toBe(128);
     expect(PASSWORD_REQUIREMENTS_MESSAGE).toBe('Password must be 12–128 characters.');
+  });
+});
+
+describe('FEEDBACK_BODY_MAX_LENGTH', () => {
+  it('is the one bound shared by apps/api’s submitFeedbackInput schema and the feedback dialog', () => {
+    // 4000 itself is the owner's own value (progress/feedback-capture.md); the point of this test
+    // is not re-deriving it but pinning the shared constant, so a change to it is a deliberate
+    // edit of this one export, never a silent drift between a schema and a dialog.
+    expect(FEEDBACK_BODY_MAX_LENGTH).toBe(4000);
   });
 });
 

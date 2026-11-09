@@ -18,11 +18,12 @@ import { expect, test } from '@playwright/test';
  * from four different ancestors at once.
  *
  * The markup below is a faithful copy of what `applicationMenubar.tsx` renders for File, Edit,
- * View, Format and Tools side by side (the real class list each wrapper carries, `OverflowMenu`'s
- * own list/submenu structure), not an approximation -- `styles.css`'s cascade is what is under
- * test, so the exact classes and nesting are the point, the same reasoning
- * `submenu-position.spec.ts` gives for its own markup. Tools (`progress/menus-slice-2.md`) is a
- * plain trigger with no submenu of its own, the same shape Edit and View already are here.
+ * View, Format, Tools and Help side by side (the real class list each wrapper carries,
+ * `OverflowMenu`'s own list/submenu structure), not an approximation -- `styles.css`'s cascade is
+ * what is under test, so the exact classes and nesting are the point, the same reasoning
+ * `submenu-position.spec.ts` gives for its own markup. Tools (`progress/menus-slice-2.md`) and
+ * Help (`progress/menus-slice-3.md`) are both plain triggers with no submenu of their own, the
+ * same shape Edit and View already are here.
  */
 const MENUBAR_MARKUP = `
 <nav class="menubar" aria-label="Application menu">
@@ -70,10 +71,14 @@ const MENUBAR_MARKUP = `
       <button class="overflow-menu-trigger" id="tools-trigger" type="button">Tools</button>
     </div>
   </div>
-  <span class="menubar-inert">Help</span>
+  <div class="menubar-menu menu-help">
+    <div class="overflow-menu">
+      <button class="overflow-menu-trigger" id="help-trigger" type="button">Help</button>
+    </div>
+  </div>
 </nav>`;
 
-test('Edit, View, Format and Tools render as flush, label-sized triggers, matching File rather than OverflowMenu’s own pill default', async ({
+test('Edit, View, Format, Tools and Help render as flush, label-sized triggers, matching File rather than OverflowMenu’s own pill default', async ({
   page,
 }) => {
   await page.goto('/sign-in');
@@ -92,6 +97,7 @@ test('Edit, View, Format and Tools render as flush, label-sized triggers, matchi
       edit: styleOf('edit-trigger'),
       file: styleOf('file-trigger'),
       format: styleOf('format-trigger'),
+      help: styleOf('help-trigger'),
       tools: styleOf('tools-trigger'),
       view: styleOf('view-trigger'),
     };
@@ -100,7 +106,7 @@ test('Edit, View, Format and Tools render as flush, label-sized triggers, matchi
   // All must actually have been laid out, or every comparison below is vacuously true.
   expect(styles.file.height).toBeGreaterThan(0);
 
-  for (const trigger of [styles.edit, styles.view, styles.format, styles.tools]) {
+  for (const trigger of [styles.edit, styles.view, styles.format, styles.tools, styles.help]) {
     expect(trigger.height).toBeCloseTo(styles.file.height, 1);
     expect(trigger.borderRadius).toBe(styles.file.borderRadius);
     expect(trigger.fontWeight).toBe(styles.file.fontWeight);

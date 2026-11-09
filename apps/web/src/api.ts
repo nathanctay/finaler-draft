@@ -489,6 +489,28 @@ function appUrl(path: string): string {
   return new URL(path, window.location.origin).toString();
 }
 
+/**
+ * The Help menu's "Send feedback" (`feedbackDialog.tsx`), mirroring `apps/api/src/feedback.ts`'s
+ * `feedbackContextInput` field for field -- `screenplayId` optional for the same reason the server
+ * schema leaves it so (the Help menu can in principle be reached from a screen with no screenplay
+ * in view), `.strict()`'s own enforcement living entirely on the server since this is a plain
+ * client-side request shape, not a validator. `appVersion` is never typed by the writer; every
+ * caller sources it from `appVersion.ts`'s `APP_VERSION`.
+ */
+export interface FeedbackContext {
+  readonly route: string;
+  readonly screenplayId?: string | undefined;
+  readonly appVersion: string;
+}
+
+// Mirrors apps/api/src/app.ts's `feedbackResponseSchema` field for field. The response is never
+// read by this dialog beyond confirming the request succeeded -- there is no "your feedback" list
+// anywhere in this app, by design (`progress/feedback-capture.md`'s "no read path at all") -- but
+// `jsonWithServerMessage` still parses it, the same as every other mutation here, so a response
+// that silently stopped matching the server's own shape would fail loudly rather than being
+// handed to a caller as untyped `unknown`.
+const feedbackResponseSchema = z.object({ id: z.string().uuid(), createdAt: z.string() });
+
 export const api = {
   session,
   // Typed the same way `signUp` below is (`{token}`, not `z.unknown()`) so `sign-in.tsx` can read
@@ -716,6 +738,17 @@ export const api = {
       { body: JSON.stringify({ response }), method: 'POST' },
     ),
   sharedScreenplays: () => json('/api/shared-screenplays', z.array(sharedScreenplaySchema)),
+  // `jsonWithServerMessage`, not the plain `json` helper: a refusal here is specifically the
+  // 429 `apps/api/src/app.ts`'s own per-user rate limit answers with (`{error: 'Too many
+  // requests'}`, the identical `{error: string}` shape every other `jsonWithServerMessage` caller
+  // already expects) -- `feedbackDialog.tsx` checks `status === 429` to give that refusal its own
+  // sentence rather than a bare "Request failed (429)", which the brief calls out by name as the
+  // one response this dialog must not treat as a generic failure.
+  submitFeedback: (body: string, context: FeedbackContext) =>
+    jsonWithServerMessage('/api/feedback', feedbackResponseSchema, {
+      body: JSON.stringify({ body, context }),
+      method: 'POST',
+    }),
 };
 
 /**
