@@ -96,6 +96,20 @@ export default defineRailway(() => {
       // secret would mean a leak of either compromised both.
       COLLAB_TOKEN_SECRET: preserve(),
       DATABASE_URL: preserve(),
+      /*
+       * The "Send feedback" notification destination (`apps/api/src/feedback.ts`). Declared here
+       * for the reason this file's own header warns about: a variable set in the dashboard but
+       * absent from this file is **deleted** by the next `railway config apply`, and
+       * `requirePersistenceEnvironment` throws on a missing `FEEDBACK_MAIL_TO` in production -- so
+       * omitting it here arms a crash-loop that fires on a later, unrelated infrastructure apply,
+       * with nothing connecting the two.
+       *
+       * That is not hypothetical. This variable's absence already cost two failed production
+       * deploys and a three-day crash-loop (progress/deploy-visibility.md): the API refused to
+       * boot, `/api/health` never answered, and the Railway healthcheck failed six times per
+       * deploy with no notification to anyone.
+       */
+      FEEDBACK_MAIL_TO: preserve(),
       MAIL_FROM_ADDRESS: preserve(),
       NODE_ENV: preserve(),
       PORT: preserve(),
