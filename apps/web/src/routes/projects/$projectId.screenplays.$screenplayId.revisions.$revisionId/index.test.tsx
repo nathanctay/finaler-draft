@@ -101,6 +101,20 @@ describe('revision preview page', () => {
     expect(screen.queryByRole('button', { name: 'Revision history…' })).not.toBeInTheDocument();
   });
 
+  /** Help > Send feedback's own `context.route` (`progress/menus-slice-3.md`): this route hands
+   * the editor `useLocation()`'s own resolved `pathname`, distinct from the live screenplay
+   * route's. */
+  it('hands the editor the router’s own resolved pathname, for Send feedback to attach to a report', async () => {
+    routeState.pathname = `/projects/${projectId}/screenplays/${screenplayId}/revisions/${revisionId}`;
+    routeState.query = { data: revisionDetail, isError: false, isLoading: false };
+    render(<RevisionPreviewPage />);
+
+    await screen.findByTestId('editor-instance');
+    expect(screen.getByTestId('route-prop')).toHaveTextContent(
+      `/projects/${projectId}/screenplays/${screenplayId}/revisions/${revisionId}`,
+    );
+  });
+
   /**
    * The banner's way back, and the destination is the point of the test, not the label: it goes to
    * this route's parent -- the revision history -- not to the live editor it used to go to. The

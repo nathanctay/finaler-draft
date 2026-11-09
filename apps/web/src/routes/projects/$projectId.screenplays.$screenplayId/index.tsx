@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate, useParams } from '@tanstack/react-router';
+import { createFileRoute, useLocation, useNavigate, useParams } from '@tanstack/react-router';
 import { z } from 'zod';
 import { AccountMenu } from '../../../accountMenu.js';
 import { api, type FetchedScreenplay, type PersistedScreenplay } from '../../../api.js';
@@ -26,6 +26,12 @@ function ScreenplayPage() {
     from: '/projects/$projectId/screenplays/$screenplayId/',
   });
   const navigate = useNavigate();
+  // Help > Send feedback's own `context.route` (`progress/menus-slice-3.md`). `useLocation()`'s
+  // own `pathname` -- the router's resolved current path, not a path hand-assembled from
+  // `window.location` -- rather than `Route.fullPath`: that getter only resolves once a route is
+  // attached to a real, built route tree (`@tanstack/router-core`'s `BaseRoute.init()`), which is
+  // never true of this route rendered standalone in a unit test.
+  const { pathname } = useLocation();
   const queryClient = useQueryClient();
   const [sharingOpen, setSharingOpen] = useState(false);
   // This query is intentionally consumed once. The editor owns the immutable route snapshot thereafter.
@@ -177,6 +183,7 @@ function ScreenplayPage() {
         onReloadRestoredDocument={() => {
           void queryClient.invalidateQueries({ queryKey: ['screenplay', screenplayId] });
         }}
+        route={pathname}
         viewerRole={fetched.role}
       />
     </Suspense>

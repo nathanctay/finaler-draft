@@ -20,6 +20,23 @@ export const PASSWORD_REQUIREMENTS_MESSAGE = `Password must be ${PASSWORD_MIN_LE
 export const RESOURCE_TITLE_MAX_LENGTH = 200;
 
 /**
+ * The maximum length of a "Send feedback" message body -- shared between `apps/api`'s
+ * `submitFeedbackInput` zod schema (`feedback.ts`: `z.string().trim().min(1).max(FEEDBACK_BODY_MAX_LENGTH)`)
+ * and the Help menu's feedback dialog (`apps/web`'s `feedbackDialog.tsx`), for the identical reason
+ * `RESOURCE_TITLE_MAX_LENGTH` is shared above: one constant, not two literal `4000`s independently
+ * maintained in a server package and a browser package. The dialog reads this to show the limit and
+ * disable submission before a round trip, rather than letting the server be the first place a
+ * writer learns their message was too long; a bound that drifted from the server's own would mean
+ * the dialog accepting a message the server would still reject with a 400.
+ *
+ * 4000 is long enough for a detailed bug report and far short of anything that could carry a scene
+ * -- see `progress/feedback-capture.md` for why this bound exists at all (a denial-of-service floor
+ * independent of the per-user rate limit, since one oversized request still costs one large insert
+ * and, once a notifier is configured, one large email).
+ */
+export const FEEDBACK_BODY_MAX_LENGTH = 4000;
+
+/**
  * The port `apps/collab` (the Hocuspocus collaboration server) binds to in a real local
  * `pnpm dev` run, absent an explicit `COLLAB_PORT` override (`apps/collab/src/environment.ts`'s
  * `resolveCollabPort`) -- and the port `apps/web`'s dev server points its own default

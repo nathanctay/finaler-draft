@@ -1,11 +1,19 @@
 import { useQuery } from '@tanstack/react-query';
-import { createFileRoute, Link, redirect, useNavigate, useParams } from '@tanstack/react-router';
+import {
+  createFileRoute,
+  Link,
+  redirect,
+  useLocation,
+  useNavigate,
+  useParams,
+} from '@tanstack/react-router';
 import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { z } from 'zod';
 import type { ScreenplayElementKind } from '@finaler-draft/screenplay/pageFormat';
 import type { TextDiffSegment } from '@finaler-draft/screenplay';
 import { AccountMenu } from '../../accountMenu.js';
 import { api, type RevisionDiffResult } from '../../api.js';
+import { APP_VERSION } from '../../appVersion.js';
 import { ApplicationMenubar } from '../../applicationMenubar.js';
 import { ApplicationShell, ApplicationTitlebar } from '../../applicationShell.js';
 import { ApplicationToolbar } from '../../applicationToolbar.js';
@@ -14,6 +22,7 @@ import {
   type DiffNavigatorCharacter,
   type DiffNavigatorScene,
 } from '../../diffNavigator.js';
+import { FeedbackDialog } from '../../feedbackDialog.js';
 import { InspectorPanel } from '../../inspectorPanel.js';
 import { NavigatorPanel, type NavigatorEntry } from '../../navigatorPanel.js';
 import {
@@ -157,6 +166,12 @@ function RevisionDiffPage() {
     from: '/projects/$projectId/screenplays/$screenplayId/revisions/$revisionId/diff',
   });
   const navigate = useNavigate();
+  // Help > Send feedback's own `context.route` (`progress/menus-slice-3.md`) -- `useLocation()`'s
+  // own `pathname`, not `Route.fullPath`: that getter only resolves once a route is attached to a
+  // real, built route tree (`@tanstack/router-core`'s `BaseRoute.init()`), never true of this
+  // route rendered standalone in a unit test, matching the live screenplay route's identical
+  // comment.
+  const { pathname } = useLocation();
   const diffQuery = useQuery({
     queryKey: ['revisionDiff', screenplayId, revisionId],
     queryFn: () => api.revisionDiff(screenplayId, revisionId),
@@ -176,9 +191,19 @@ function RevisionDiffPage() {
   const [navigatorTab, setNavigatorTab] = useState<NavigatorTabId>('scenes');
   const [selectedSceneId, setSelectedSceneId] = useState<string | undefined>(undefined);
   const [selectedCharacterName, setSelectedCharacterName] = useState<string | undefined>(undefined);
+  // Help > Send feedback (`progress/menus-slice-3.md`). No Keyboard shortcuts here -- see
+  // `menubar`'s own comment below for why: this screen has no editor for a shortcut list to
+  // describe.
+  const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false);
+  const helpMenuRef = useRef<HTMLDivElement>(null);
 
   const togglePanel = (panel: 'inspector' | 'navigator') =>
     setPanels((current) => ({ ...current, [panel]: !current[panel] }));
+
+  const closeFeedbackDialog = () => {
+    setFeedbackDialogOpen(false);
+    helpMenuRef.current?.querySelector<HTMLButtonElement>('.overflow-menu-trigger')?.focus();
+  };
 
   /*
    * A jump is a scroll, not a caret move: there is no caret on this screen. The target is the
@@ -283,10 +308,10 @@ function RevisionDiffPage() {
       dark={dark}
       menubar={
         /*
-         * The same menubar component the editor renders, with the same File item set and the one
-         * still-inert label (Help) beside it. Every File item that has no meaning on a read-only
-         * comparison of two stored snapshots is a really-disabled menu item with its reason as its
-         * tooltip -- the behaviour `OverflowMenu` already had for the editor's own export items.
+         * The same menubar component the editor renders, with the same File item set. Every File
+         * item that has no meaning on a read-only comparison of two stored snapshots is a
+         * really-disabled menu item with its reason as its tooltip -- the behaviour `OverflowMenu`
+         * already had for the editor's own export items.
          *
          * "Revision history…" is the one File item that is genuinely live, because it genuinely
          * applies: this comparison came from that list and a reader can go back to it. It leads to the
@@ -309,6 +334,15 @@ function RevisionDiffPage() {
          * **View renders**, because it genuinely applies: this comparison has its own zoom state
          * (`zoomPercent` below) and its own dark-canvas preference, both real view preferences over a
          * real, if read-only, canvas -- not a document operation with nothing here to act on.
+         *
+         * **Help renders too, this slice (`progress/menus-slice-3.md`), but with only one of its two
+         * items.** "Send feedback…" applies to this screen exactly as it does to the editor -- a
+         * reader hitting a problem here needs no editor to report it, and nothing about the item
+         * touches the comparison's own read-only state. "Keyboard shortcuts…" is omitted outright,
+         * for the simplest reason any menu item here is omitted rather than disabled: there is no
+         * editor on this screen at all, so a list of editing shortcuts would describe controls this
+         * view structurally does not have -- not "disabled, because read-only", but "does not apply,
+         * because there is nothing here that could ever use them".
          */
         <ApplicationMenubar
           fileMenuItems={[
@@ -376,6 +410,13 @@ function RevisionDiffPage() {
               ],
             },
           ]}
+          helpMenuItems={[
+            {
+              label: 'Send feedback…',
+              onSelect: () => setFeedbackDialogOpen(true),
+            },
+          ]}
+          helpMenuRef={helpMenuRef}
           viewMenuItems={[
             {
               label: panels.navigator ? 'Hide Navigator' : 'Show Navigator',
@@ -416,13 +457,27 @@ function RevisionDiffPage() {
         />
       }
       outOfFlow={
-        /* The print refusal: `display: none` on screen, so it occupies no grid row, and the only
-         * thing `@media print` leaves visible (styles.css). See `.diff-print-refusal`. */
-        <p className="diff-print-refusal">
-          This comparison is a screen-only reading view, not a script. It is not paginated like the
-          document and must not be printed or circulated as one — export the screenplay itself
-          instead.
-        </p>
+        <>
+          {/* The print refusal: `display: none` on screen, so it occupies no grid row, and the
+           * only thing `@media print` leaves visible (styles.css). See `.diff-print-refusal`. */}
+          <p className="diff-print-refusal">
+            This comparison is a screen-only reading view, not a script. It is not paginated like
+            the document and must not be printed or circulated as one — export the screenplay itself
+            instead.
+          </p>
+          {feedbackDialogOpen && (
+            <FeedbackDialog
+              onClose={closeFeedbackDialog}
+              onSubmit={async (body) => {
+                await api.submitFeedback(body, {
+                  appVersion: APP_VERSION,
+                  route: pathname,
+                  screenplayId,
+                });
+              }}
+            />
+          )}
+        </>
       }
       statusbar={
         /*

@@ -1,9 +1,10 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { diffScreenplays, type Screenplay, type ScreenplayBlock } from '@finaler-draft/screenplay';
 import { DEFAULT_DOCUMENT_SETTINGS } from '@finaler-draft/screenplay/pageFormat';
-import type { RevisionDiffResult, ScreenplayDiff, SessionUser } from '../../api.js';
+import { api, type RevisionDiffResult, type ScreenplayDiff, type SessionUser } from '../../api.js';
+import { APP_VERSION } from '../../appVersion.js';
 import { humanizeRevisionDiffSide } from '../../revisionDisplay.js';
 import {
   projectId,
@@ -804,18 +805,20 @@ describe('revision diff page: the editor’s chrome, not a plainer page', () => 
     expect(main()).not.toHaveClass('dark');
   });
 
-  /** View is the one menu, besides File, that this read-only comparison renders at all -- Edit,
-   * Format and Tools are omitted outright (the owner's decision, `progress/menus-slice-1.md` for
-   * Edit/Format, `progress/menus-slice-2.md` for Tools), because none of the three verbs applies
-   * to a stored snapshot. Edit and Format would be a menu full of disabled items sharing one
-   * repeated reason, which is noise, not explanation, unlike File's own six items, each disabled
-   * for its own specific, nameable reason; Tools has no such reason to give at all, because this
-   * comparison is two stored snapshots and "the word count" has no single referent across them. */
+  /** View and Help are the two menus, besides File, that this read-only comparison renders at
+   * all -- Edit, Format and Tools are omitted outright (the owner's decision,
+   * `progress/menus-slice-1.md` for Edit/Format, `progress/menus-slice-2.md` for Tools), because
+   * none of the three verbs applies to a stored snapshot. Edit and Format would be a menu full of
+   * disabled items sharing one repeated reason, which is noise, not explanation, unlike File's own
+   * six items, each disabled for its own specific, nameable reason; Tools has no such reason to
+   * give at all, because this comparison is two stored snapshots and "the word count" has no
+   * single referent across them. */
   it('omits Edit, Format and Tools entirely, rather than rendering any of them full of disabled items', () => {
     renderWith(diffResult(older, newer));
 
     expect(screen.getByRole('button', { name: 'File menu' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'View menu' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Help menu' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Edit menu' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Format menu' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Tools menu' })).toBeNull();
@@ -847,6 +850,55 @@ describe('revision diff page: the editor’s chrome, not a plainer page', () => 
 
     await user.click(within(zoomSubmenu).getByRole('menuitem', { name: '50%' }));
     expect(screen.getByLabelText('Zoom level')).toHaveTextContent('50%');
+  });
+
+  /**
+   * Help's one item on this screen (`progress/menus-slice-3.md`). "Keyboard shortcuts…" is
+   * omitted outright -- this view's own module comment explains why: there is no editor here, so
+   * a list of editing shortcuts would describe controls this screen structurally does not have.
+   * "Send feedback…" applies exactly as it does on the editor, and submits with this route's own
+   * resolved `useLocation().pathname` and the real `screenplayId`/`appVersion`, matching
+   * `App.tsx`'s identical item.
+   */
+  describe('Help menu', () => {
+    it('lists exactly one item, Send feedback…, with Keyboard shortcuts omitted', async () => {
+      const user = userEvent.setup();
+      renderWith(diffResult(older, newer));
+
+      await user.click(screen.getByRole('button', { name: 'Help menu' }));
+      expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
+        'Send feedback…',
+      ]);
+    });
+
+    it('submits with this route’s own resolved pathname, the screenplay id, and the build’s APP_VERSION, then closes, returning focus to the Help menu trigger', async () => {
+      routeState.pathname = `/projects/${projectId}/screenplays/${screenplayId}/revisions/${revisionId}/diff`;
+      const submitSpy = vi
+        .spyOn(api, 'submitFeedback')
+        .mockResolvedValue({ id: 'feedback-1', createdAt: new Date().toISOString() });
+      const user = userEvent.setup();
+      renderWith(diffResult(older, newer));
+
+      await user.click(screen.getByRole('button', { name: 'Help menu' }));
+      await user.click(screen.getByRole('menuitem', { name: 'Send feedback…' }));
+      const dialog = screen.getByRole('dialog', { name: 'Send feedback' });
+      await user.type(
+        within(dialog).getByRole('textbox', { name: 'Feedback message' }),
+        'The diff mislabels a moved scene.',
+      );
+      await user.click(within(dialog).getByRole('button', { name: 'Send' }));
+
+      await waitFor(() =>
+        expect(submitSpy).toHaveBeenCalledWith('The diff mislabels a moved scene.', {
+          appVersion: APP_VERSION,
+          route: `/projects/${projectId}/screenplays/${screenplayId}/revisions/${revisionId}/diff`,
+          screenplayId,
+        }),
+      );
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(screen.getByRole('button', { name: 'Help menu' })).toHaveFocus();
+      submitSpy.mockRestore();
+    });
   });
 
   /**

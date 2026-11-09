@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
+import { FEEDBACK_BODY_MAX_LENGTH } from '@finaler-draft/config';
 import {
   createPostgresFeedbackStore,
   feedbackContextInput,
-  FEEDBACK_BODY_MAX_LENGTH,
   submitFeedbackInput,
   type FeedbackNotification,
   type FeedbackNotifier,

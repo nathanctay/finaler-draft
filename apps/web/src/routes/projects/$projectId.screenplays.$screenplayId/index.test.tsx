@@ -173,6 +173,31 @@ describe('screenplay page', () => {
     expect(screen.queryByTestId('breadcrumb-slot')).not.toBeInTheDocument();
   });
 
+  /** Help > Send feedback's own `context.route` (`progress/menus-slice-3.md`): this route hands
+   * the editor `useLocation()`'s own resolved `pathname`, not a path hand-assembled from
+   * `window.location`. */
+  it('hands the editor the router’s own resolved pathname, for Send feedback to attach to a report', () => {
+    routeState.pathname = `/projects/${projectId}/screenplays/${screenplayId}`;
+    setQueries({
+      id: screenplayId,
+      projectId,
+      screenplay: {
+        annotations: [],
+        blocks: [],
+        id: screenplayId,
+        schemaVersion: 1,
+        title: 'A Working Draft',
+        titlePages: [],
+      },
+      title: 'A Working Draft',
+      version: 1,
+    });
+    render(<ScreenplayPage />);
+    expect(screen.getByTestId('route-prop')).toHaveTextContent(
+      `/projects/${projectId}/screenplays/${screenplayId}`,
+    );
+  });
+
   it('navigates to the revision-history route when the editor requests it', async () => {
     setQueries({
       id: screenplayId,

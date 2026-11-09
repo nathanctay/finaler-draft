@@ -220,6 +220,30 @@ const CASES: readonly ContrastCase[] = [
     themes: BOTH,
   },
   {
+    /**
+     * Help > Keyboard shortcuts (`progress/menus-slice-3.md`). `.keyboard-shortcut-keys kbd` paints
+     * its own explicit background (`--surface-09`) and colour (`--text-13`), deliberately neither
+     * of them a token `.dark` redefines -- the chip is a "stays light in both themes" surface by
+     * construction, the same category `.dialog` itself belongs to, rather than a themed sub-surface
+     * needing a `color: inherit` rescue the way `.dialog-actions button` does.
+     */
+    name: '.keyboard-shortcut-keys kbd (its own surface, stays light under both themes)',
+    markup:
+      '<div class="dialog"><span class="keyboard-shortcut-keys"><kbd>Cmd+Z</kbd></span></div>',
+    target: '.keyboard-shortcut-keys kbd',
+    minimum: REAL_TEXT,
+    shell: true,
+    themes: BOTH,
+  },
+  {
+    name: '.keyboard-shortcut-description',
+    markup: '<div class="dialog"><span class="keyboard-shortcut-description">Undo</span></div>',
+    target: '.keyboard-shortcut-description',
+    minimum: REAL_TEXT,
+    shell: true,
+    themes: BOTH,
+  },
+  {
     name: '.primary-button:disabled',
     markup:
       '<div class="dialog"><div class="dialog-actions"><button class="primary-button" disabled type="button">Save revision</button></div></div>',

@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 import { z } from 'zod';
+import { FEEDBACK_BODY_MAX_LENGTH } from '@finaler-draft/config';
 
 /**
  * The "Send feedback" capture path: a signed-in writer types a message in the app (reached from
@@ -37,13 +38,17 @@ import { z } from 'zod';
  */
 
 /**
- * 4000 characters -- generous for a feedback message (this is not a document editor), and a
- * bound against the identical denial-of-service shape the rate limit alone doesn't close: a
- * single request with an enormous body still costs one multi-megabyte insert and, once a
- * notifier is configured, one multi-megabyte email, regardless of how many requests per hour the
- * caller is allowed to make.
+ * `FEEDBACK_BODY_MAX_LENGTH` itself now lives in `@finaler-draft/config` (the "Help menu" slice,
+ * `progress/menus-slice-3.md`), the identical move `RESOURCE_TITLE_MAX_LENGTH` made for
+ * `projects.ts` -- the feedback dialog (`apps/web`'s `feedbackDialog.tsx`) needs the same bound to
+ * show the limit and refuse a doomed submission before a round trip, and a second `4000` literal
+ * maintained there independently is exactly the drift risk that constant's own comment names.
+ * 4000 characters is generous for a feedback message (this is not a document editor), and a bound
+ * against the identical denial-of-service shape the rate limit alone doesn't close: a single
+ * request with an enormous body still costs one multi-megabyte insert and, once a notifier is
+ * configured, one multi-megabyte email, regardless of how many requests per hour the caller is
+ * allowed to make.
  */
-export const FEEDBACK_BODY_MAX_LENGTH = 4000;
 
 /** Bounded for the same reason `FEEDBACK_BODY_MAX_LENGTH` is: a route/screen name has no
  * legitimate reason to approach this length, and an unbounded string here would be exactly as

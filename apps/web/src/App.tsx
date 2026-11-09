@@ -71,6 +71,7 @@ import { ApplicationToolbar } from './applicationToolbar.js';
 import { InspectorPanel } from './inspectorPanel.js';
 import { NavigatorPanel } from './navigatorPanel.js';
 import { api, MessageApiError, type EffectiveRole, type PersistedScreenplay } from './api.js';
+import { APP_VERSION } from './appVersion.js';
 import { COLLAB_WS_URL } from './collabConfig.js';
 import { applyPageGeometryCssVariables } from './pageGeometryCss.js';
 import { TitlePageView } from './titlePageEditor.js';
@@ -80,6 +81,8 @@ import {
   type TitlePageState,
 } from './titlePageState.js';
 import { DocumentSettingsDialog } from './documentSettingsDialog.js';
+import { FeedbackDialog } from './feedbackDialog.js';
+import { KeyboardShortcutsDialog } from './keyboardShortcutsDialog.js';
 import { NamedRevisionDialog } from './namedRevisionDialog.js';
 import { WordCountDialog } from './wordCountDialog.js';
 import {
@@ -155,6 +158,13 @@ const NAVIGATOR_TABS = [
 ] as const;
 
 type NavigatorTabId = (typeof NAVIGATOR_TABS)[number]['id'];
+
+/** `route`'s own fallback, the identical role `legacyInitial` below plays for `initial`: a value
+ * only a caller that never supplies the real one (almost every test in this file) ever sees. Never
+ * sent by any real caller -- the live screenplay route and the historical-revision preview both
+ * always supply their own `useLocation().pathname` -- so a feedback report genuinely carrying this
+ * string would mean a route was added that forgot to pass one, not a writer on some fourth screen. */
+const UNKNOWN_ROUTE = 'unknown';
 
 const legacyInitial: PersistedScreenplay = {
   id: '7c7c5f7b-c2f0-47a0-a639-dfd0c5702b87',
@@ -346,6 +356,7 @@ export function App({
   onOpenSharing,
   onReloadRestoredDocument,
   onScreenplayRenamed,
+  route = UNKNOWN_ROUTE,
   viewerRole,
 }: {
   /**
@@ -423,6 +434,21 @@ export function App({
    * `undefined` and this is never called.
    */
   onScreenplayRenamed?: (title: string) => void;
+  /**
+   * Help > Send feedback's own `context.route` (`progress/menus-slice-3.md`,
+   * `apps/api/src/feedback.ts`'s `feedbackContextInput`) -- the screen the writer was on when they
+   * reported a problem. A plain string, not something this component derives, for the identical
+   * reason `onOpenRevisionHistory` is a callback rather than a navigation this component performs
+   * itself: `App` stays free of `@tanstack/react-router`, so each caller supplies its own route's
+   * `useLocation().pathname` (the live screenplay route, the historical-revision preview) -- the
+   * router's own resolved current path, not a path hand-assembled from `window.location`. Not
+   * `Route.fullPath`: that getter only resolves once a route is attached to a real, built route
+   * tree (`@tanstack/router-core`'s `BaseRoute.init()`), which a unit test rendering one route
+   * standalone never does -- confirmed by trying it first and watching it read `undefined`.
+   * Defaults to `UNKNOWN_ROUTE` so the many tests in this file that never exercise Send feedback,
+   * and so never pass this, are unaffected; every real caller always supplies its own.
+   */
+  route?: string | undefined;
   /**
    * The viewer's own effective role on this screenplay, from the same
    * `GET /api/screenplays/:id` response that authorized the read (api.ts's
@@ -747,8 +773,15 @@ export function App({
   // `namedRevisionDialogOpen` above, this opens a dialog that never mutates the document, so it
   // carries no `editingAllowed` gate anywhere -- not here, and not on the menu item that opens it.
   const [wordCountDialogOpen, setWordCountDialogOpen] = useState(false);
+  // Help > Send feedback and Help > Keyboard shortcuts (`progress/menus-slice-3.md`). Neither
+  // mutates the document, so -- matching `wordCountDialogOpen` above -- neither carries an
+  // `editingAllowed` gate: a reviewer, or a writer reading a historical revision, may report a
+  // problem or look up a shortcut exactly as they may count words.
+  const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false);
+  const [keyboardShortcutsDialogOpen, setKeyboardShortcutsDialogOpen] = useState(false);
   const fileMenuRef = useRef<HTMLDivElement>(null);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
+  const helpMenuRef = useRef<HTMLDivElement>(null);
   const latestProjection = useRef<LocalScreenplayProjection | undefined>(undefined);
   // `main.tsx` applies the specification's fixed defaults once at bootstrap, before any
   // screenplay has loaded (see that module's own comment for why). Once one has, its own
@@ -1677,6 +1710,18 @@ export function App({
     toolsMenuRef.current?.querySelector<HTMLButtonElement>('.overflow-menu-trigger')?.focus();
   };
 
+  // Help's own equivalents of `closeWordCountDialog` above, returning focus to the Help menu's
+  // trigger rather than Tools'.
+  const closeFeedbackDialog = () => {
+    setFeedbackDialogOpen(false);
+    helpMenuRef.current?.querySelector<HTMLButtonElement>('.overflow-menu-trigger')?.focus();
+  };
+
+  const closeKeyboardShortcutsDialog = () => {
+    setKeyboardShortcutsDialogOpen(false);
+    helpMenuRef.current?.querySelector<HTMLButtonElement>('.overflow-menu-trigger')?.focus();
+  };
+
   const scenes = useMemo(
     () => (projection.valid ? deriveScenes(projection.screenplay.blocks) : []),
     [projection],
@@ -2325,12 +2370,13 @@ export function App({
           file's) that keeps Tiptap, y-prosemirror, the Hocuspocus provider and the pagination plugin
           out of the comparison's chunk.
 
-          File, Edit, View and Format are working menus this slice (`progress/menus-slice-1.md`);
-          Tools and Help are later slices, and `ApplicationMenubar` still renders those two as the
-          inert labels they remain. The dark-canvas toggle, previously a loose `<button>` sitting
-          in this row next to the menus, now lives inside `viewMenuItems` below -- it is a view
-          preference, like the other three, not a piece of chrome that belongs beside the menus
-          rather than inside one of them.
+          File, Edit, View and Format became working menus in slice 1 (`progress/menus-slice-1.md`);
+          Tools in slice 2 (`progress/menus-slice-2.md`, Word count); Help in this slice
+          (`progress/menus-slice-3.md`, Send feedback and Keyboard shortcuts) -- the last of the
+          five, so `applicationMenubar.tsx` no longer has any inert label left to render at all. The
+          dark-canvas toggle, previously a loose `<button>` sitting in this row next to the menus,
+          lives inside `viewMenuItems` below -- it is a view preference, like the other three, not a
+          piece of chrome that belongs beside the menus rather than inside one of them.
         */
         <ApplicationMenubar
           editMenuItems={[
@@ -2558,6 +2604,21 @@ export function App({
               })),
             },
           ]}
+          helpMenuItems={[
+            {
+              // Neither Help item touches the document, so -- matching Word count below -- neither
+              // carries an `editingAllowed` gate: a reviewer, or a writer reading a historical
+              // revision, may report a problem or look up a shortcut exactly as they may count
+              // words.
+              label: 'Send feedback…',
+              onSelect: () => setFeedbackDialogOpen(true),
+            },
+            {
+              label: 'Keyboard shortcuts…',
+              onSelect: () => setKeyboardShortcutsDialogOpen(true),
+            },
+          ]}
+          helpMenuRef={helpMenuRef}
           toolsMenuItems={[
             {
               // Word count never touches the document (`progress/menus-slice-2.md`), so unlike
@@ -2623,6 +2684,25 @@ export function App({
               pages={pageCount}
               words={{ documentTotal: wordCount, selection: wordCountSelection?.words }}
             />
+          )}
+          {feedbackDialogOpen && (
+            <FeedbackDialog
+              onClose={closeFeedbackDialog}
+              onSubmit={async (body) => {
+                await api.submitFeedback(body, {
+                  appVersion: APP_VERSION,
+                  route,
+                  // Always supplied: `App` is always an editor for a specific screenplay, live or
+                  // historical, so there is never a moment this dialog is open with no screenplay
+                  // in view -- unlike the diff route's own copy of this item, which shares the
+                  // identical `context.screenplayId` field for the identical reason.
+                  screenplayId: initial.id,
+                });
+              }}
+            />
+          )}
+          {keyboardShortcutsDialogOpen && (
+            <KeyboardShortcutsDialog onClose={closeKeyboardShortcutsDialog} />
           )}
           {toast !== undefined && (
             // A toast rather than a line in the status bar: an export failure names the block and
