@@ -125,9 +125,68 @@ jobs:
       # migrated before `collab` -- the other service reading the same database -- restarts against
       # it. Sequential, fail-fast: if `app` cannot deploy, `collab` must not be pointed at a schema
       # that may be half-migrated.
+      # Stamps the commit being deployed into the tracked file `resolveBuildVersion.ts` reads, so
+      # Help > Send feedback attaches a real commit to every report. This has to happen here, in
+      # the uploaded source, because Railway builds from a snapshot with no `.git` directory -- a
+      # `git rev-parse` inside that build silently yielded `"dev"` in every production bundle,
+      # confirmed by fetching the deployed chunk. See progress/deploy-visibility.md.
+      #
+      # Written before the first `railway up` and left in place for all three, so every service is
+      # built from an identically-stamped tree. Never committed: the tracked contents stay the
+      # sentinel, and this is a working-tree edit inside a throwaway CI checkout.
+      - name: Stamp the build version
+        run: |
+          printf '%s\n' "$GITHUB_SHA" > apps/web/build-version.txt
+          echo "Stamped apps/web/build-version.txt with $GITHUB_SHA"
       - name: Deploy app (migrates the database via preDeploy)
         run: npx --yes @railway/cli@5.63.1 up --ci --service app
       - name: Deploy collab
         run: npx --yes @railway/cli@5.63.1 up --ci --service collab
       - name: Deploy landing
         run: npx --yes @railway/cli@5.63.1 up --ci --service landing
+
+  # Turns "production did not ship" into a failed run, which is the only thing here that actually
+  # reaches a human.
+  #
+  # This exists because of a measured, repeated failure: between 2026-10-27 and 2026-11-09,
+  # production went **thirteen days** without a successful deploy across *five* separate incidents,
+  # and not one of them notified anybody. The modes, all real (progress/deploy-visibility.md):
+  #
+  #  - `deploy` **skipped**, because `checks` failed. The run does fail, so this case was already
+  #    visible -- but "the run is red" does not say "production is now behind main", and twice
+  #    nobody drew that conclusion for days.
+  #  - `deploy` **cancelled**, four times, by the `deploy-production` concurrency group superseding
+  #    a queued run. `cancel-in-progress: false` protects the *running* deploy; it does nothing for
+  #    a queued one. A cancelled run is not a failed run, so GitHub sends no notification at all --
+  #    and on at least one of those, `checks` had passed, meaning nothing whatsoever was wrong with
+  #    the code.
+  #  - `deploy` **failed** on a healthcheck, because the API crash-looped on a missing
+  #    `FEEDBACK_MAIL_TO`. Three days, discovered only by reading `gh run list` for an unrelated
+  #    reason.
+  #
+  # `if: always()` is load-bearing: without it this job inherits the skip and says nothing in
+  # exactly the cases worth hearing about. The concurrency group is scoped to the `deploy` job
+  # alone, so a superseded deploy cancels that job while this one still runs and reports.
+  #
+  # Deliberately not a notification *integration* (Slack webhook, email action, an issue filed by a
+  # bot). A failed run is already wired to GitHub's own notifications for the person who pushed,
+  # needs no new secret, and cannot itself fail silently -- which is the property this whole job is
+  # about. If this ever needs to reach somebody other than the pusher, that is the point to add a
+  # real channel.
+  deploy-outcome:
+    needs: [checks, deploy]
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Report whether production actually deployed
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+        run: |
+          echo "checks=$CHECKS_RESULT deploy=$DEPLOY_RESULT"
+          if [ "$DEPLOY_RESULT" = "success" ]; then
+            echo "Production deployed this commit."
+            exit 0
+          fi
+          echo "::error title=Production did NOT deploy::deploy=$DEPLOY_RESULT checks=$CHECKS_RESULT -- production is still serving an older commit than main. See progress/deploy-visibility.md."
+          exit 1
