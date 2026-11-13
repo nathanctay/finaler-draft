@@ -57,6 +57,7 @@ function fakeSharingStore(): SharingStore {
     revokeInvitation: notImplemented,
     listInvitationsForUser: notImplemented,
     respondToInvitation: notImplemented,
+    transferOwnership: notImplemented,
   };
 }
 

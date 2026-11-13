@@ -87,6 +87,12 @@ function ProjectRow({ onDeleted, project }: { onDeleted: () => void; project: Pr
             onClose={() => setSharingOpen(false)}
             scope={{ kind: 'project', projectId: project.id }}
             title={project.title}
+            // The project-ownership-transfer slice's one authorization-bearing prop: "Make
+            // owner" is offered in the dialog if and only if this viewer's own effective role
+            // on the project (from the same listing that already decided `canShare` above) is
+            // `'owner'` -- matching `transferOwnership`'s server-side bar exactly, so this is
+            // never a control that would answer 403.
+            viewerIsOwner={project.role === 'owner'}
           />
         </Suspense>
       )}

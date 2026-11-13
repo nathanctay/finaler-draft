@@ -516,6 +516,163 @@ describe('the sharing dialog', () => {
     expect(screen.getByText('Loading who has access…')).toBeInTheDocument();
   });
 
+  it('offers Make owner on a non-owner project row only when the viewer is the owner', () => {
+    setSharingData(sharingView);
+    const { unmount } = render(
+      <SharingDialog
+        onClose={vi.fn()}
+        scope={{ kind: 'project', projectId }}
+        title="Night Shoot"
+        viewerIsOwner={false}
+      />,
+    );
+    // The default -- and every call site except the project row's own owner is this. No control
+    // that would 403, rather than a disabled one.
+    expect(
+      screen.queryByRole('button', { name: 'Make editor@example.test the owner of this project' }),
+    ).not.toBeInTheDocument();
+    unmount();
+
+    render(
+      <SharingDialog
+        onClose={vi.fn()}
+        scope={{ kind: 'project', projectId }}
+        title="Night Shoot"
+        viewerIsOwner={true}
+      />,
+    );
+    expect(
+      screen.getByRole('button', { name: 'Make editor@example.test the owner of this project' }),
+    ).toBeInTheDocument();
+    // Never on the owner's own row -- there is nothing to transfer to themselves, and this row
+    // already has no controls at all (the existing "never manageable" rule).
+    expect(
+      screen.queryByRole('button', { name: /Make .*owner@example.test.* the owner/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('never offers Make owner at screenplay scope, even if a caller passed viewerIsOwner', () => {
+    // There is no screenplay-scoped owner to transfer (`shared_role` has no `'owner'` value), so
+    // this is checked again inside the component rather than trusted to every call site -- see
+    // `canMakeOwner`'s own comment in sharingDialog.tsx.
+    setSharingData(
+      {
+        members: [
+          {
+            userId: 'editor-1',
+            name: 'An Editor',
+            email: 'editor@example.test',
+            role: 'editor',
+            scope: 'screenplay',
+          },
+        ],
+        invitations: [],
+      },
+      'screenplay',
+    );
+    render(
+      <SharingDialog
+        onClose={vi.fn()}
+        scope={{ kind: 'screenplay', screenplayId }}
+        title="Act One"
+        viewerIsOwner={true}
+      />,
+    );
+    expect(
+      screen.queryByRole('button', { name: 'Make editor@example.test the owner of this project' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('transfers ownership through the project endpoint, reports the outcome, and refreshes', async () => {
+    const user = userEvent.setup();
+    setSharingData(sharingView);
+    respondWith({ outcome: 'transferred', newOwnerId: 'editor-1' });
+    render(
+      <SharingDialog
+        onClose={vi.fn()}
+        scope={{ kind: 'project', projectId }}
+        title="Night Shoot"
+        viewerIsOwner={true}
+      />,
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Make editor@example.test the owner of this project' }),
+    );
+    await vi.waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        `/api/projects/${projectId}/transfer-ownership`,
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ targetUserId: 'editor-1' }),
+        }),
+      ),
+    );
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Ownership transferred. You are now an editor on this project.',
+    );
+    await vi.waitFor(() => expect(invalidateQueries).toHaveBeenCalled());
+  });
+
+  it('explains the two non-transfer outcomes a transfer attempt can report without failing', async () => {
+    const user = userEvent.setup();
+    setSharingData(sharingView);
+    respondWith({ outcome: 'not-a-member' });
+    const { unmount } = render(
+      <SharingDialog
+        onClose={vi.fn()}
+        scope={{ kind: 'project', projectId }}
+        title="Night Shoot"
+        viewerIsOwner={true}
+      />,
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Make editor@example.test the owner of this project' }),
+    );
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'That person no longer has access here.',
+    );
+    unmount();
+
+    respondWith({ outcome: 'already-owner' });
+    render(
+      <SharingDialog
+        onClose={vi.fn()}
+        scope={{ kind: 'project', projectId }}
+        title="Night Shoot"
+        viewerIsOwner={true}
+      />,
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Make editor@example.test the owner of this project' }),
+    );
+    expect(await screen.findByRole('alert')).toHaveTextContent('They already own this project.');
+  });
+
+  it('shows the server’s own refusal message when a transfer is rejected outright', async () => {
+    const user = userEvent.setup();
+    setSharingData(sharingView);
+    fetchMock.mockImplementation(async () =>
+      fakeJsonResponse(
+        { error: 'Project owner access required to transfer ownership' },
+        { ok: false, status: 403 },
+      ),
+    );
+    render(
+      <SharingDialog
+        onClose={vi.fn()}
+        scope={{ kind: 'project', projectId }}
+        title="Night Shoot"
+        viewerIsOwner={true}
+      />,
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Make editor@example.test the owner of this project' }),
+    );
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Project owner access required to transfer ownership',
+    );
+  });
+
   it('closes on Done', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();

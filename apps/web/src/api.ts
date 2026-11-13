@@ -91,6 +91,16 @@ const memberChangeResultSchema = z.discriminatedUnion('outcome', [
   z.object({ outcome: z.literal('not-a-member') }),
   z.object({ outcome: z.literal('owner-immutable') }),
 ]);
+// The project-ownership-transfer slice. Mirrors `apps/api/src/app.ts`'s own
+// `transferOwnershipResponseSchema` field for field -- `'not-a-member'` and `'already-owner'` are
+// 200 bodies rather than 4xx codes for the same reason `memberChangeResultSchema`'s own
+// `'not-a-member'`/`'owner-immutable'` are: both are successful evaluations of a legitimate
+// request from the project's actual owner, not failures.
+const transferOwnershipResultSchema = z.discriminatedUnion('outcome', [
+  z.object({ outcome: z.literal('transferred'), newOwnerId: z.string() }),
+  z.object({ outcome: z.literal('not-a-member') }),
+  z.object({ outcome: z.literal('already-owner') }),
+]);
 const incomingInvitationSchema = z.object({
   id: z.string().uuid(),
   role: sharedRoleSchema,
@@ -720,6 +730,15 @@ export const api = {
     jsonWithServerMessage(memberPath(scope, userId), memberChangeResultSchema, {
       method: 'DELETE',
     }),
+  // Project scope only -- there is no screenplay-scoped owner to transfer (`shared_role` has no
+  // `'owner'` value), so unlike every call above there is no `SharingScope` parameter, just the
+  // project id `sharingDialog.tsx` already has when it is rendered at project scope.
+  transferOwnership: (projectId: string, targetUserId: string) =>
+    jsonWithServerMessage(
+      `/api/projects/${projectId}/transfer-ownership`,
+      transferOwnershipResultSchema,
+      { body: JSON.stringify({ targetUserId }), method: 'POST' },
+    ),
   revokeInvitation: (invitationId: string) =>
     jsonWithServerMessage(
       `/api/invitations/${invitationId}`,
@@ -823,5 +842,6 @@ export type SharingMember = z.infer<typeof sharingMemberSchema>;
 export type SharingInvitation = z.infer<typeof sharingInvitationSchema>;
 export type SharingView = z.infer<typeof sharingViewSchema>;
 export type InviteResult = z.infer<typeof inviteResultSchema>;
+export type TransferOwnershipResult = z.infer<typeof transferOwnershipResultSchema>;
 export type IncomingInvitation = z.infer<typeof incomingInvitationSchema>;
 export type SharedScreenplay = z.infer<typeof sharedScreenplaySchema>;

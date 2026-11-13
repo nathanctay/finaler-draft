@@ -48,6 +48,7 @@ import {
   inviteInput,
   NO_ACCOUNT_MESSAGE,
   respondToInvitationInput,
+  transferOwnershipInput,
   type SharingScope,
   type SharingStore,
 } from './sharing.js';
@@ -633,6 +634,16 @@ const memberChangeResponseSchema = z.discriminatedUnion('outcome', [
   z.object({ outcome: z.literal('removed') }),
   z.object({ outcome: z.literal('not-a-member') }),
   z.object({ outcome: z.literal('owner-immutable') }),
+]);
+// Mirrors `sharing.ts`'s own `TransferOwnershipOutcome` field for field, the same convention
+// every response schema in this file follows. `'not-a-member'` and `'already-owner'` are 200
+// bodies rather than 4xx codes, matching `memberChangeResponseSchema`'s identical treatment of
+// `'not-a-member'`/`'owner-immutable'` just above -- both are successful evaluations of a
+// legitimate request by the project's actual owner, not failures.
+const transferOwnershipResponseSchema = z.discriminatedUnion('outcome', [
+  z.object({ outcome: z.literal('transferred'), newOwnerId: z.string() }),
+  z.object({ outcome: z.literal('not-a-member') }),
+  z.object({ outcome: z.literal('already-owner') }),
 ]);
 const incomingInvitationSchema = z.object({
   id: z.string().uuid(),
@@ -1821,6 +1832,44 @@ export async function buildApp(options: BuildAppOptions = {}) {
         return result as Exclude<typeof result, 'missing' | 'forbidden'>;
       });
     }
+
+    // The project-ownership-transfer slice. Project scope only -- unlike every pair of routes
+    // above, there is no screenplay-scoped counterpart, because there is no screenplay-scoped
+    // owner to transfer (`shared_role` has no `'owner'` value; see `sharing.ts`'s own module
+    // comment). The target id travels in the body, not the URL, because this route doesn't act on
+    // the target the way `PATCH .../members/:userId` does -- it names a *second* account alongside
+    // the one the URL already identifies (the project), the same reason `inviteInput.email` is a
+    // body field rather than a path segment.
+    typedApp.post(
+      '/api/projects/:id/transfer-ownership',
+      {
+        schema: {
+          params: idParam,
+          body: transferOwnershipInput,
+          response: {
+            200: transferOwnershipResponseSchema,
+            403: errorResponseSchema,
+            404: errorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        const result = await sharing.transferOwnership(
+          request.actorId!,
+          request.params.id,
+          request.body.targetUserId,
+        );
+        if (result === 'missing') return reply.code(404).send({ error: 'Project not found' });
+        // 'owner access', not 'editor': unlike every other sharing route (owner-or-editor),
+        // transferring ownership away is reserved for the current owner alone -- see
+        // `transferOwnership`'s own doc comment in sharing.ts for why.
+        if (result === 'forbidden')
+          return reply
+            .code(403)
+            .send({ error: 'Project owner access required to transfer ownership' });
+        return result;
+      },
+    );
 
     // The invitee side. `GET` needs no scope at all -- it is "what has been offered to me" -- and
     // the two writes take the invitation's own id, which carries its scope with it.
