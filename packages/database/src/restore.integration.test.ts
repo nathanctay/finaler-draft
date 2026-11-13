@@ -89,6 +89,17 @@ async function liveRow(screenplayId: string) {
   return result.rows[0]!;
 }
 
+/** Polls `check` until it is true or the budget runs out, returning what it last saw. Used instead
+ * of a fixed sleep so a test asserts on an observed condition rather than on elapsed time. */
+async function waitFor(check: () => Promise<boolean>, timeoutMs = 10_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return false;
+}
+
 describe.skipIf(!databaseUrl)('restoreRevisionAsCurrent against a real database', () => {
   beforeAll(async () => {
     admin = createIntegrationPool({ connectionString: adminUrl });
@@ -325,4 +336,95 @@ describe.skipIf(!databaseUrl)('restoreRevisionAsCurrent against a real database'
 
     expect((await liveRow(screenplayId)).currentEpoch).toBe(0);
   });
+
+  /*
+   * The lock-ordering deadlock, driven against the real `restoreRevisionAsCurrent` rather than a
+   * hand-rolled imitation of it.
+   *
+   * `restoreRevisionAsCurrent` and `insertRevisionIfChanged` both write `document_revisions` and
+   * both take the same `REVISION_LOCK_NAMESPACE` advisory lock, so they are correctly serialized
+   * against each other. The defect was the *order* each acquired its two locks. Restore used to
+   * read the live `screenplays` row `for update` first and take the advisory lock second, while a
+   * revision writer takes the advisory lock first and then inserts -- and that insert is not
+   * lock-free, because `document_revisions.screenplay_id` references `screenplays.id`, so Postgres
+   * takes a `KEY SHARE` lock on the parent row for the foreign-key check. `for update` conflicts
+   * with `KEY SHARE`, so each path held one of the pair and waited for the other.
+   *
+   * The sequence below forces exactly that interleaving:
+   *
+   *   1. a revision writer takes the advisory lock and holds it
+   *   2. a restore starts, and is made to wait for that lock -- confirmed by polling `pg_locks`
+   *      for its ungranted request, not by sleeping and hoping
+   *   3. the revision writer inserts, which needs `KEY SHARE` on the live screenplay row
+   *
+   * With the old ordering step 2 left restore holding `for update` on that row, so step 3 closed a
+   * cycle and Postgres killed one side with SQLSTATE 40P01. With the advisory lock taken first,
+   * restore holds nothing while it waits, the insert proceeds, and the restore completes once the
+   * writer commits.
+   */
+  it('does not deadlock when a revision insert holds the revision lock a restore is waiting for', async () => {
+    const screenplayId = await seedScreenplay();
+    const source = await addRevision(screenplayId, 'A PRIOR DRAFT', 'named');
+
+    const writer = await pool!.connect();
+    try {
+      // 1. The revision writer takes the advisory lock and keeps it.
+      await writer.query('begin');
+      await writer.query('select pg_advisory_xact_lock(hashtext($1), $2)', [screenplayId, -1]);
+
+      // 2. The real restore starts and blocks on that lock. Not awaited yet: it cannot finish
+      //    until the writer commits.
+      const restoring = restoreRevisionAsCurrent(pool!, {
+        screenplayId,
+        sourceRevisionId: source.id,
+        actorId: null as unknown as string,
+        restoreRequestId: randomUUID(),
+        expectedEpoch: 0,
+        derive,
+      });
+
+      // Wait until restore is genuinely blocked on the advisory lock rather than merely started --
+      // an ungranted `advisory` entry in `pg_locks` is the observable fact, so this cannot pass by
+      // racing ahead of the restore.
+      const blocked = await waitFor(async () => {
+        const waiting = await pool!.query<{ count: number }>(
+          `select count(*)::int as count from pg_locks
+            where locktype = 'advisory' and not granted`,
+        );
+        return (waiting.rows[0]?.count ?? 0) > 0;
+      });
+      expect(blocked).toBe(true);
+
+      // 3. The insert that used to close the cycle. It must succeed: with the corrected ordering,
+      //    the waiting restore holds no lock on the screenplay row for this to collide with.
+      await writer.query(
+        `insert into document_revisions
+           (screenplay_id, source_epoch, kind, label, authored_by, canonical_screenplay,
+            canonical_hash, rendered_text, preview_metadata)
+         values ($1, 0, 'idle_session', null, null, $2::jsonb, $3, $4, null)`,
+        [
+          screenplayId,
+          JSON.stringify(screenplayAt('RACER')),
+          // A real 64-char sha256. `canonical_hash` is `varchar(64)`, so a hand-built string with
+          // a suffix overflows it and the insert fails on a type error *before* Postgres reaches
+          // the foreign-key check -- which silently made an earlier version of this test prove
+          // nothing at all.
+          createHash('sha256')
+            .update(JSON.stringify(screenplayAt('RACER')))
+            .digest('hex'),
+          'R',
+        ],
+      );
+      await writer.query('commit');
+
+      // ...and the restore then completes normally, rather than having been killed as a deadlock
+      // victim. `restoreRevisionAsCurrent` converts a failure into a throw, so awaiting it here is
+      // itself the assertion that no 40P01 occurred.
+      const result = await restoring;
+      expect(result.outcome).toBe('restored');
+    } finally {
+      await writer.query('rollback').catch(() => undefined);
+      writer.release();
+    }
+  }, 30_000);
 });
