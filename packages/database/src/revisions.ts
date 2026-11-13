@@ -49,10 +49,12 @@ export interface RevisionWithScreenplay extends RevisionRow {
 const REVISION_LOCK_NAMESPACE = -1;
 
 async function acquireRevisionLock(client: PoolClient, screenplayId: string): Promise<void> {
-  await client.query('select pg_advisory_xact_lock(hashtext($1), $2)', [
-    screenplayId,
-    REVISION_LOCK_NAMESPACE,
-  ]);
+  // Tagged so a deadlock report names this call site rather than just the lock -- see
+  // `restore.ts`'s own `acquireRevisionLock` for why all three sites carry a distinct marker.
+  await client.query(
+    'select pg_advisory_xact_lock(hashtext($1), $2) /* revisions.acquireRevisionLock */',
+    [screenplayId, REVISION_LOCK_NAMESPACE],
+  );
 }
 
 const REVISION_ROW_COLUMNS = `id, screenplay_id as "screenplayId", source_epoch as "sourceEpoch",
