@@ -116,7 +116,12 @@ database. A/B on this branch, 4 runs each, identical conditions:
 | Lock order                         | Runs failing with `deadlock detected` |
 | ---------------------------------- | ------------------------------------- |
 | Old (`FOR UPDATE` then advisory)   | **4 of 4**                            |
-| Fixed (advisory then `FOR UPDATE`) | **1 of 4**                            |
+| Fixed (advisory then `FOR UPDATE`) | **1 of 13**                           |
+
+The fixed figure started as 1 of 4 and was revised down after nine further runs, all clean.
+Recorded as a range rather than a point estimate: the residual is rare enough that four runs
+could not distinguish 25% from 8%, and quoting the first sample would have overstated it. The
+old-order figure needs no such caution -- it failed every single run.
 
 ## Open: at least one more cycle
 
@@ -139,6 +144,28 @@ advisory lock and waits on 409's transaction; 409 wants the advisory lock. What 
   `restore_request_id where not null`, and a structural-change insert leaves that column null.
 - **Not the test holding the row.** `collaboration.integration.test.ts` has no open transaction
   against `screenplays`; its one `update screenplays` is an autocommit `pool.query`.
+- **Not the update-log lock.** `updateLog.ts`'s three transactions touch only
+  `document_yjs_updates` and `document_yjs_checkpoints` and take the _epoch_-keyed advisory lock.
+  The report's waiter asks for key2 `4294967295` (`-1`), the revision namespace, so an epoch-lock
+  cycle would have shown a different key.
+- **Not a third lock-taker.** `pg_advisory_xact_lock` appears in exactly three files: `restore.ts`
+  and `revisions.ts` (both `-1`) and `updateLog.ts` (epoch). Only the first two can be the waiter,
+  and both now take that lock as their first statement after `begin`.
+
+### Why it resisted capture
+
+The obvious next step -- rerun with `log_statement=all` and correlate both backends' full
+transaction histories by pid -- was attempted and **did not reproduce**: nine consecutive full runs
+passed with that logging on, against one failure in four without it. The logging's own overhead moves
+the race window, which is the textbook heisenbug shape, and is why the empirical route was abandoned
+rather than retried indefinitely.
+
+What would settle it without depending on catching the race: a deterministic reproduction built the
+way this slice's own test was -- two clients, a forced interleaving, `pg_locks` polled for the
+ungranted request. That needs to know which statement the waiting transaction ran _before_ asking for
+the advisory lock, which the deadlock report does not include. The cheapest way to learn it is to
+make each call site's lock acquisition textually distinguishable (a comment literal in the SQL), so
+the report itself names which function is waiting.
 
 The failing test is `collaboration.integration.test.ts`'s "an offline writer who reconnects after a
 restore...", so a restore is involved. Identifying it needs each backend's **full transaction
@@ -149,6 +176,26 @@ Two things worth knowing about its blast radius: the invocation that reproduces 
 runs (CI runs `pnpm test:integration` with the variable and `pnpm test` without it, and both pass
 here), and a deadlock aborts one transaction rather than corrupting anything. But it is reachable in
 production under concurrent load, on a durability path, so it should not be left indefinitely.
+
+## A second, smaller change: the lock sites now identify themselves
+
+All three `pg_advisory_xact_lock` call sites in this repo issued **byte-identical SQL**, and
+Postgres's deadlock report prints each process's current statement. So a report could say "a process
+is waiting for the revision lock" without saying _which function_ was waiting -- which is precisely
+what blocked the residual cycle above from being pinned down.
+
+Each site now carries a marker in the statement text:
+
+```
+select pg_advisory_xact_lock(hashtext($1), $2) /* restore.acquireRevisionLock */
+select pg_advisory_xact_lock(hashtext($1), $2) /* revisions.acquireRevisionLock */
+select pg_advisory_xact_lock(hashtext($1), $2) /* updateLog.acquireDocumentEpochLock */
+```
+
+Verified against a real server's log rather than assumed: all three appear distinctly in
+`log_statement=all` output. No behavioural change -- a SQL comment is inert -- and the next deadlock
+report names its own call sites, which converts the open question above from "catch a rare race under
+instrumentation that suppresses it" into "read the report".
 
 ## Gate results
 

@@ -44,7 +44,12 @@ async function acquireDocumentEpochLock(
   screenplayId: string,
   epoch: number,
 ): Promise<void> {
-  await client.query('select pg_advisory_xact_lock(hashtext($1), $2)', [screenplayId, epoch]);
+  // Tagged so a deadlock report names this call site rather than just the lock -- see
+  // `packages/database/src/restore.ts`'s `acquireRevisionLock` for why.
+  await client.query(
+    'select pg_advisory_xact_lock(hashtext($1), $2) /* updateLog.acquireDocumentEpochLock */',
+    [screenplayId, epoch],
+  );
 }
 
 /**
