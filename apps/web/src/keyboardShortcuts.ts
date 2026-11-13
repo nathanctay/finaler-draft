@@ -3,10 +3,11 @@ import { isMacOS } from '@tiptap/core';
 /**
  * The content behind Help > Keyboard shortcuts, and -- deliberately -- the *only* content behind
  * it. The brief's own framing is blunt about why this list is short: the real key handling in this
- * app is sparse and scattered across three places (`packages/screenplay-editor/src/index.ts`'s
+ * app is sparse and scattered across four places (`packages/screenplay-editor/src/index.ts`'s
  * three `Mod-` bindings and its `Tab`/`Enter` element handling; `apps/web/src/smartTypeGhost.ts`'s
- * own `Tab`/`Escape`), and a hand-authored list like this one can drift from that the moment either
- * side changes without the other. `keyboardShortcuts.test.ts` is what keeps it honest: for every
+ * own `Tab`/`Escape`; `apps/web/src/findReplace.ts`'s `Mod-f`), and a hand-authored list like this
+ * one can drift from that the moment either side changes without the other. `keyboardShortcuts.test.ts`
+ * is what keeps it honest: for every
  * entry here, it resolves the *actual* registered binding strings from the extension named by
  * `source` (via `@tiptap/core`'s own `getExtensionField`, the identical mechanism
  * `ExtensionManager.plugins` uses internally to turn `addKeyboardShortcuts()` into a real ProseMirror
@@ -35,7 +36,7 @@ export interface KeyboardShortcutEntry {
   readonly bindings: readonly string[];
   /** Which extension's `addKeyboardShortcuts()` the test resolves `bindings` against -- not shown
    * to the writer, read only by `keyboardShortcuts.test.ts`. */
-  readonly source: 'screenplayYjs' | 'screenplayBlock' | 'smartTypeGhost';
+  readonly source: 'screenplayYjs' | 'screenplayBlock' | 'smartTypeGhost' | 'findReplace';
 }
 
 export const KEYBOARD_SHORTCUTS: readonly KeyboardShortcutEntry[] = [
@@ -68,6 +69,11 @@ export const KEYBOARD_SHORTCUTS: readonly KeyboardShortcutEntry[] = [
     description: 'Dismiss the inline suggestion',
     bindings: ['Escape'],
     source: 'smartTypeGhost',
+  },
+  {
+    description: 'Open Find and replace',
+    bindings: ['Mod-f'],
+    source: 'findReplace',
   },
 ];
 

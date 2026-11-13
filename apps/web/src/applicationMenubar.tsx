@@ -46,6 +46,13 @@ export interface ApplicationMenubarProps {
    * component at all.
    */
   readonly editMenuItems?: readonly OverflowMenuItem[] | undefined;
+  /**
+   * Attached to the `.menu-edit` wrapper, the identical purpose `fileMenuRef`/`toolsMenuRef`/
+   * `helpMenuRef` serve for their own menus: `App.tsx` uses it to return focus to the Edit menu's
+   * trigger after Find and replace's own bar closes (menus slice 4). A screen with no Edit menu at
+   * all (the read-only revision comparison) passes nothing.
+   */
+  readonly editMenuRef?: Ref<HTMLDivElement>;
   /** The File menu's items, in order. Each one's own `disabled`/`disabledReason` decides whether it
    * can be chosen on this screen. */
   readonly fileMenuItems: readonly OverflowMenuItem[];
@@ -103,6 +110,7 @@ function hasItems(
 
 export function ApplicationMenubar({
   editMenuItems,
+  editMenuRef,
   fileMenuItems,
   fileMenuRef,
   formatMenuItems,
@@ -118,7 +126,7 @@ export function ApplicationMenubar({
         <OverflowMenu items={[...fileMenuItems]} label="File menu" triggerContent="File" />
       </div>
       {hasItems(editMenuItems) && (
-        <div className="menubar-menu menu-edit">
+        <div className="menubar-menu menu-edit" ref={editMenuRef}>
           <OverflowMenu items={[...editMenuItems]} label="Edit menu" triggerContent="Edit" />
         </div>
       )}

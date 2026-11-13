@@ -13,6 +13,7 @@ export default defineConfig({
     '**/revision-history-persistence.spec.ts',
     '**/screenplay-diff-persistence.spec.ts',
     '**/invitations-persistence.spec.ts',
+    '**/find-replace-persistence.spec.ts',
   ],
   timeout: 30_000,
   reporter: 'list',

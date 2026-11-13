@@ -17,6 +17,7 @@ export default defineConfig({
     '**/revision-history-persistence.spec.ts',
     '**/screenplay-diff-persistence.spec.ts',
     '**/invitations-persistence.spec.ts',
+    '**/find-replace-persistence.spec.ts',
   ],
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),

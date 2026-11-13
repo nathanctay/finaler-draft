@@ -61,6 +61,20 @@
      convention is worst for -- and colour is never the only cue here regardless (strikethrough vs
      underline, the gutter glyph, and a visually-hidden word all say it too). */
   --fd-diff-removed-surface: #f3d2d4;
+  /* Find & replace's match highlights (apps/web/src/findReplace.ts), painted on `.page` the same
+     way the diff marks above are. `.page`'s own background is a literal `white`, never redefined
+     by `.dark` (`.dark .page` only ever restyles `color`, confirmed by reading that rule directly)
+     -- the manuscript sheet stays the same paper in both themes, so unlike `--fd-diff-added-surface`
+     these need no derive-from-`:root`-before-`.dark`-redefines-it dance, and a literal is correct
+     and sufficient, exactly as `--fd-diff-removed-surface` already established. Two values, not
+     one, so the current match reads as visually distinct from the rest rather than merely
+     differently classed: measured contrast against the manuscript's own ink (`#20252b`, identical
+     in both themes -- see `--text-19`/`--dark-text-09`, and `.page-seam-caret`'s own comment on why
+     those two are one colour, not two) is 13.56:1 for the plain highlight and 9.41:1 for the
+     current one, both comfortably clearing the 4.5:1 real-text floor `text-contrast.spec.ts` holds
+     every other manuscript-adjacent rule to -- verified there in both themes. */
+  --fd-find-match-surface: #fdf1b8;
+  --fd-find-match-current-surface: #f6c343;
   --surface-13: #75bc88;
   --surface-14: #276252;
   --surface-15: #34566d;
@@ -1538,6 +1552,127 @@ select:focus-visible,
   white-space: pre;
   pointer-events: none;
   user-select: none;
+}
+
+/*
+ * Find & replace's match highlights (apps/web/src/findReplace.ts's `buildFindDecorations`). Unlike
+ * `.smarttype-ghost` above, this is an *inline* decoration wrapping text that already exists in
+ * the document, not a widget inserting text that does not -- so there is no character-grid
+ * concern to engineer around at all: wrapping existing characters in a styled `<span>` adds no
+ * width and moves no line, the same reason `.diff-manuscript del`/`ins` (this file's own inline-
+ * mark precedent) stay safe to draw into a fixed grid. Only `background-color` is set, for the
+ * identical reason those two marks set only `background`/`text-decoration`: no padding, margin,
+ * border or font change, so nothing here can shift a glyph's position. No `color` either -- the
+ * manuscript's own ink shows through unchanged, which is what the contrast figures in this file's
+ * `--fd-find-match-surface`/`--fd-find-match-current-surface` comment were measured against.
+ *
+ * `.find-match-current` is additive (every current match carries *both* classes -- see
+ * `buildFindDecorations`), so its background simply wins by source order over the plain
+ * highlight's, with no need for a more specific combined selector.
+ */
+.find-match {
+  background-color: var(--fd-find-match-surface);
+}
+
+.find-match-current {
+  background-color: var(--fd-find-match-current-surface);
+}
+
+/*
+ * Edit > Find and replace… (`findReplaceBar.tsx`). `position: fixed`, rendered through `App.tsx`'s
+ * `outOfFlow` slot -- the same "chrome floats over the canvas, not inside it" placement as
+ * `.toast` and `.smarttype-list` -- which is what lets the manuscript underneath stay fully
+ * visible and fully scrollable while this is open; see that component's own header for why this
+ * is deliberately not `.dialog-overlay`'s modal shell.
+ *
+ * `top: 128px` is a fixed offset, not one computed from the shell's own row tracks
+ * (`--fd-shell-titlebar-row` + `--fd-shell-menubar-row` + `--fd-shell-toolbar-row`, which would
+ * sum to 116px with no banner showing): the banner row (`--fd-shell-banner-row`) is `auto`-height,
+ * and `calc()` has no way to add an `auto` track into a pixel sum. 128px clears every row with no
+ * banner present, which is the overwhelmingly common case; a banner that is also showing (a
+ * reviewer's or a lapsed-entitlement screen) can push the toolbar down far enough to sit close to
+ * this bar's own top edge. Known and stated rather than engineered around -- see
+ * `progress/find-and-replace.md`'s "known limitations".
+ *
+ * `z-index: 8` matches `.smarttype-list`/`.element-menu`: above the panels (2) and
+ * `.overflow-menu-list` (5), below `.dialog-overlay` (10) and `.toast` (20), which are modal or
+ * urgent and must never be covered by a non-modal search bar.
+ *
+ * Vocabulary is `.dialog`'s and `.toast`'s -- the same `--border-03` hairline, 4px radius,
+ * `--surface-01`, one restrained shadow -- because those are this product's other floating panels
+ * and this should read as the same system, not a fourth design. `--surface-01` is never redefined
+ * by `.dark` (confirmed by reading that rule), so this bar is one more "stays light in both
+ * themes" surface with no dark variant to write, exactly like the two it borrows from.
+ */
+.find-replace-bar {
+  position: fixed;
+  top: 128px;
+  right: 16px;
+  z-index: 8;
+  display: flex;
+  width: min(420px, calc(100vw - 32px));
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border-03);
+  border-radius: 4px;
+  background: var(--surface-01);
+  padding: 10px 12px;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 25%);
+}
+
+.find-replace-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.find-replace-row input[type='text'] {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid var(--border-04);
+  border-radius: 2px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.find-replace-count {
+  flex-shrink: 0;
+  min-width: 64px;
+  color: var(--text-09);
+  font-size: 12px;
+  text-align: center;
+}
+
+.find-replace-case {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-09);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* The same declarations as `.dialog-actions button` (border/radius/background/color/padding/font
+   size, and the identical hover/focus background), deliberately duplicated rather than shared --
+   `.dialog-actions` also carries `justify-content: flex-end`, which fits a dialog's own single
+   action row and not this bar's left-to-right toolbar rows. `.smarttype-list`/`.element-menu`'s own
+   comment states the same choice for the identical reason: the duplication is declarations that
+   must not drift, not a second design. */
+.find-replace-row button {
+  flex-shrink: 0;
+  border: 1px solid var(--border-04);
+  border-radius: 2px;
+  background: var(--surface-03);
+  padding: 6px 10px;
+  color: inherit;
+  font-size: 12px;
+}
+
+.find-replace-row button:hover,
+.find-replace-row button:focus-visible {
+  background: var(--surface-06);
 }
 
 /*
