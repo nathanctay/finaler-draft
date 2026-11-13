@@ -64,10 +64,19 @@ const UNIQUE_VIOLATION = '23505';
 const REVISION_LOCK_NAMESPACE = -1;
 
 async function acquireRevisionLock(client: PoolClient, screenplayId: string): Promise<void> {
-  await client.query('select pg_advisory_xact_lock(hashtext($1), $2)', [
-    screenplayId,
-    REVISION_LOCK_NAMESPACE,
-  ]);
+  /*
+   * The trailing comment is deliberate and is not decoration. Postgres's deadlock report prints
+   * each process's *current statement*, and all three advisory-lock call sites in this repo issue
+   * byte-identical SQL -- so a report could say "a process is waiting for the revision lock"
+   * without saying which function. That cost real time on the cycle this file's own comment
+   * documents: the waiter could not be identified from the report, and the race was too rare to
+   * catch under `log_statement=all`. Tagging the statement makes the next report name the call
+   * site itself.
+   */
+  await client.query(
+    'select pg_advisory_xact_lock(hashtext($1), $2) /* restore.acquireRevisionLock */',
+    [screenplayId, REVISION_LOCK_NAMESPACE],
+  );
 }
 
 /**
