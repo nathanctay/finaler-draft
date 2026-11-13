@@ -230,6 +230,38 @@ export async function restoreRevisionAsCurrent(
   try {
     await client.query('begin');
 
+    /*
+     * The advisory lock is taken **before** the `for update` read below, and the order is the
+     * whole point: it is what stops this transaction deadlocking against
+     * `revisions.ts`'s `insertRevisionIfChanged`.
+     *
+     * Both functions write `document_revisions` and both take this same
+     * `REVISION_LOCK_NAMESPACE` lock, so they are correctly serialized against each other. What
+     * was wrong was the *order* each acquired its two locks. This function used to read the live
+     * `screenplays` row `for update` first and take the advisory lock second, while
+     * `insertRevisionIfChanged` takes the advisory lock first and then inserts -- and that insert
+     * is not lock-free, because `document_revisions.screenplay_id` references `screenplays.id`,
+     * so Postgres takes a `KEY SHARE` lock on the parent row to check the foreign key.
+     * `for update` conflicts with `KEY SHARE`, so the two paths each held one of the pair and
+     * waited for the other:
+     *
+     *   1. restore takes `for update` on screenplays[X]
+     *   2. a revision writer takes the advisory lock for X
+     *   3. restore waits for that advisory lock
+     *   4. the revision writer inserts, needs `KEY SHARE` on screenplays[X], waits for restore
+     *
+     * Postgres broke the cycle by killing one side with SQLSTATE 40P01, which surfaced as an
+     * intermittent `deadlock detected` under parallel load -- see
+     * progress/revision-lock-deadlock.md for the production log that identified it and
+     * `restore.integration.test.ts`'s own deterministic reproduction of exactly that interleaving.
+     *
+     * Taking this lock first makes both paths acquire advisory-then-row, so no cycle exists. The
+     * cost is that a restore for a screenplay that does not exist now takes the lock briefly
+     * before discovering that -- released on the rollback immediately below, and not worth
+     * reordering the checks to avoid.
+     */
+    await acquireRevisionLock(client, params.screenplayId);
+
     const screenplayResult = await client.query<{
       currentEpoch: number;
       canonicalHash: string;
@@ -247,8 +279,6 @@ export async function restoreRevisionAsCurrent(
       await client.query('rollback');
       return { outcome: 'screenplay-missing' };
     }
-
-    await acquireRevisionLock(client, params.screenplayId);
 
     const alreadyRestored = await findRestoreByRequestId(client, params.restoreRequestId);
     if (alreadyRestored) {
