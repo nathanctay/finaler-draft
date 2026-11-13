@@ -126,6 +126,24 @@ describe('application menubar', () => {
     );
   });
 
+  /** `App.tsx` uses this one to return focus to the Edit menu's trigger once Find and replace's
+   * own bar closes (menus slice 4) -- the identical pattern `fileMenuRef` above already proves. */
+  it('attaches the caller’s ref to the Edit menu wrapper, so focus can be returned to its trigger', () => {
+    const ref = createRef<HTMLDivElement>();
+    render(
+      <ApplicationMenubar
+        editMenuItems={[{ label: 'Find and replace…', onSelect: vi.fn() }]}
+        editMenuRef={ref}
+        fileMenuItems={ONLY_FILE_ITEM}
+      />,
+    );
+
+    expect(ref.current).toHaveClass('menu-edit');
+    expect(ref.current?.querySelector('.overflow-menu-trigger')).toBe(
+      screen.getByRole('button', { name: 'Edit menu' }),
+    );
+  });
+
   describe('Edit, View, Format, Tools and Help: a menu with no items does not render at all', () => {
     it('renders Edit when given items, and fires the chosen one', async () => {
       const user = userEvent.setup();
