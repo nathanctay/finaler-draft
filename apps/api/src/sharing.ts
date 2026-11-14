@@ -31,6 +31,20 @@ import { z } from 'zod';
  * membership row on an invitee's behalf. A pending invitation is refused by every REST path and by
  * the collaboration socket for exactly the reason a stranger is -- there is no membership row --
  * which is a property of the schema rather than of a check that could be forgotten.
+ *
+ * **The project-ownership-transfer slice: `transferOwnership`, the one deliberate second path to
+ * ownership.** Every operation above this comment is bounded by "no invitation or membership row
+ * this module writes can grant more than the inviter already holds" -- `sharedRole` has no
+ * `'owner'` value, and `changeMemberRole`/`removeMember` both refuse outright the moment the
+ * target's role is `'owner'` (`MemberChangeOutcome`'s own `'owner-immutable'`). `transferOwnership`
+ * is the one function in this file that is allowed to write an `'owner'` role, because moving
+ * ownership -- as opposed to sharing access -- is the feature it exists to implement. It does not
+ * weaken `owner-immutable`: that guard is unconditional in `changeMemberRole`/`removeMember`, which
+ * still cannot touch an owner row by any role or target; `transferOwnership` is a third, narrower
+ * function with its own stricter bar (the *current* owner only, never an editor), not a backdoor
+ * through the existing ones. See its own doc comment for the authorization rule, the write order
+ * `project_single_owner_unique` requires, and the advisory lock that makes two concurrent transfers
+ * of the same project serialize rather than interleave.
  */
 
 export type SharedRole = 'editor' | 'reviewer';
@@ -62,6 +76,15 @@ export const inviteInput = z
 export type InviteInput = z.infer<typeof inviteInput>;
 
 export const changeRoleInput = z.object({ role: sharedRoleSchema }).strict();
+// Matches `memberParams`'s own `userId` bound in `apps/api/src/app.ts` exactly (Better Auth
+// `user.id` is an opaque `text` column, not a UUID, so this is deliberately not `.uuid()`): the
+// target travels in the body here rather than the URL, because unlike `changeRoleInput`/
+// `respondToInvitationInput` this input names a *second* account rather than acting on the one
+// the URL already identifies.
+export const transferOwnershipInput = z
+  .object({ targetUserId: z.string().min(1).max(255) })
+  .strict();
+export type TransferOwnershipInput = z.infer<typeof transferOwnershipInput>;
 export const respondToInvitationInput = z
   .object({ response: z.enum(['accept', 'decline']) })
   .strict();
@@ -137,6 +160,21 @@ export type MemberChangeOutcome =
 
 export type RevokeInvitationOutcome = { outcome: 'revoked' } | 'missing' | 'forbidden';
 
+export type TransferOwnershipOutcome =
+  | { outcome: 'transferred'; newOwnerId: string }
+  /** The target holds no `project_members` row at all. Not "invite them first" -- the brief's
+   * explicit decision is that ownership can only move to someone who has already chosen to
+   * collaborate on this project, which an invitation-and-acceptance flow for an arbitrary address
+   * would not guarantee. Not distinguished from "no such account" for the same information-hiding
+   * reason `MemberChangeOutcome`'s `'not-a-member'` already isn't. */
+  | { outcome: 'not-a-member' }
+  /** The target *is* the actor, i.e. the current owner asked to transfer to themselves. Checked
+   * after confirming the actor is the owner, so this can only ever be reported to someone who
+   * actually held ownership to begin with -- never used to probe who owns a project. */
+  | { outcome: 'already-owner' }
+  | 'missing'
+  | 'forbidden';
+
 export interface IncomingInvitation {
   id: string;
   role: SharedRole;
@@ -200,6 +238,19 @@ export interface SharingStore {
   /** Withdraws an invitation that has not been answered. Scope comes from the invitation row
    * itself, so there is one route rather than one per scope. */
   revokeInvitation(actorId: string, invitationId: string): Promise<RevokeInvitationOutcome>;
+  /**
+   * Moves ownership of a project from `actorId` (who must be its current owner) to
+   * `targetUserId` (who must already be a member of it). The previous owner is demoted to
+   * `editor`, never removed -- see this file's module comment for the full argument and
+   * `transferOwnership`'s own implementation comment for the write order and the lock. Project
+   * scope only: there is no screenplay-scoped owner to transfer (`shared_role` has no `'owner'`
+   * value), so this takes a bare `projectId` rather than a `SharingScope`.
+   */
+  transferOwnership(
+    actorId: string,
+    projectId: string,
+    targetUserId: string,
+  ): Promise<TransferOwnershipOutcome>;
   /** The invitee-side list the dashboard renders Accept/Decline against. */
   listInvitationsForUser(actorId: string): Promise<IncomingInvitation[]>;
   respondToInvitation(
@@ -303,6 +354,37 @@ const ROLE_RANK: Record<EffectiveRole, number> = { owner: 0, editor: 1, reviewer
  * wins" there can never disagree. */
 function alreadyCovers(held: EffectiveRole, wanted: SharedRole): boolean {
   return ROLE_RANK[held] <= ROLE_RANK[wanted];
+}
+
+/**
+ * The advisory-lock namespace `transferOwnership` takes, keyed by `hashtext(projectId)`.
+ *
+ * Deliberately a namespace of its own, not a reuse of `packages/database`'s
+ * `REVISION_LOCK_NAMESPACE` (`-1`): that lock is keyed by *screenplay* id and serializes
+ * `document_revisions` writers against each other, a completely different id space and a
+ * completely different invariant. A shared namespace would be harmless on paper (`hashtext`
+ * folding a project id and a screenplay id to the same 32-bit value is already an accepted,
+ * merely-unlucky-performance cost elsewhere in this codebase -- see `updateLog.ts`'s own comment
+ * on exactly that) but gives no benefit either, so this gets its own constant rather than
+ * borrowing one that means something unrelated. `-2` is simply the next negative integer after
+ * `-1`; any value works as long as it does not collide with `updateLog.ts`'s epoch-keyed second
+ * argument, which is always a non-negative epoch number, so every negative constant is already
+ * disjoint from it.
+ */
+const PROJECT_OWNERSHIP_LOCK_NAMESPACE = -2;
+
+async function acquireOwnershipLock(client: Queryable, projectId: string): Promise<void> {
+  // Tagged with a call-site comment for the identical reason every other `pg_advisory_xact_lock`
+  // site in this codebase is (see `restore.ts`'s `acquireRevisionLock` and
+  // `progress/revision-lock-deadlock.md`, the production incident that is why this convention
+  // exists at all): Postgres's own deadlock report prints each blocked process's *current
+  // statement*, and an untagged lock statement would say only "something is waiting for an
+  // advisory lock," not which function. The next deadlock report involving this lock names this
+  // function by itself.
+  await client.query(
+    'select pg_advisory_xact_lock(hashtext($1), $2) /* sharing.acquireOwnershipLock */',
+    [projectId, PROJECT_OWNERSHIP_LOCK_NAMESPACE],
+  );
 }
 
 /**
@@ -754,6 +836,120 @@ export function createPostgresSharingStore(
         await client.query('delete from membership_invitations where id = $1', [invitationId]);
         await client.query('commit');
         return { outcome: 'revoked' };
+      } catch (error) {
+        await client.query('rollback');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+
+    /**
+     * The transfer itself. In order:
+     *
+     *  1. The advisory lock (`acquireOwnershipLock`), taken as the very first statement after
+     *     `begin` -- before any row lock, following `restore.ts`'s `acquireRevisionLock` ordering
+     *     for the identical reason: `progress/revision-lock-deadlock.md` documents a real
+     *     deadlock that came from two paths taking an advisory lock and a row lock in opposite
+     *     orders, and the only way to be safe against that class of bug by construction is for
+     *     every advisory-lock site to agree on "advisory first." Nothing else in this codebase
+     *     currently takes `PROJECT_OWNERSHIP_LOCK_NAMESPACE`, so there is no other call site that
+     *     could disagree -- but this still follows the convention rather than being a one-off
+     *     exception to it, since the next thing that needs a project-scoped advisory lock should
+     *     find one example to copy, not two.
+     *
+     *     This is also the serialization point for the operation's own correctness, independent
+     *     of deadlock avoidance. Two concurrent transfers of the *same* project (actor transfers
+     *     to B, and -- before that commits -- someone races a second transfer to C) would, without
+     *     this lock, both be able to read `actorId` as the current owner, both demote it, and
+     *     both attempt to promote their own target. `project_single_owner_unique` is a plain
+     *     (non-deferred) unique index, so the second promote would fail outright rather than
+     *     silently double-own the project -- but it would do so *after* having already demoted the
+     *     real owner to `editor`, leaving a transaction to roll back out of a half-finished write
+     *     rather than a clean refusal. Taking the lock first means the second transfer's `begin`
+     *     returns immediately but this statement blocks until the first transfer's commit or
+     *     rollback, so the second transfer always re-reads a project whose owner is already
+     *     whichever account the first transfer actually landed on, and reports `'forbidden'`
+     *     (actor is no longer the owner) through the ordinary authorization check below --
+     *     never a unique-violation exception, and never a moment with zero or two owners.
+     *
+     *  2. `lockScope`/`fetchProjectRole`, the identical row-lock helpers every other operation in
+     *     this file uses, in the identical order (project row, then the actor's `project_members`
+     *     row) -- so this function's row-lock ordering agrees with `invite`/`changeMemberRole`/
+     *     `removeMember`/`listSharing`, and a future deadlock between this and any of them (there
+     *     is currently no cycle: none of those four take any advisory lock at all, so they cannot
+     *     be the other half of an advisory/row ordering cycle with this function) would still have
+     *     to come from a genuinely new interleaving, not from this function inventing its own
+     *     order for the same two tables.
+     *
+     *  3. Authorization: `actorRole !== 'owner'` is `'forbidden'`, stricter than every other
+     *     operation's `canManageSharing` (owner-or-editor) -- the brief's explicit decision that
+     *     only the current owner, never an editor, may give the project away.
+     *
+     *  4. The self-transfer check, before the target lookup: if the actor is confirmed as the
+     *     owner and the target id equals the actor id, the target is trivially already a member
+     *     (they hold the very `project_members` row just locked), so there is nothing to gain by
+     *     querying it again.
+     *
+     *  5. The target's own membership, `'not-a-member'` if absent.
+     *
+     *  6. The two writes, *demote-then-promote*. `project_single_owner_unique` is checked after
+     *     each statement, not deferred to commit, so promoting the target first (while the
+     *     actor's row still says `'owner'`) would violate the index on this transaction's own
+     *     second statement -- a self-inflicted unique violation, not a race with anyone else.
+     *     Demoting first means there is never an instant, even inside this one transaction, where
+     *     the index would see two owner rows for this project.
+     */
+    async transferOwnership(actorId, projectId, targetUserId) {
+      const client = await pool.connect();
+      try {
+        await client.query('begin');
+        await acquireOwnershipLock(client, projectId);
+
+        const resolved = await lockScope(client, { kind: 'project', projectId });
+        if (resolved === 'missing') {
+          await client.query('rollback');
+          return 'missing';
+        }
+        const actorRole = await fetchProjectRole(client, resolved.projectId, actorId);
+        if (actorRole === undefined) {
+          await client.query('rollback');
+          return 'missing';
+        }
+        if (actorRole !== 'owner') {
+          await client.query('rollback');
+          return 'forbidden';
+        }
+        if (targetUserId === actorId) {
+          await client.query('rollback');
+          return { outcome: 'already-owner' };
+        }
+        const targetRole = await fetchProjectRole(client, resolved.projectId, targetUserId);
+        if (targetRole === undefined) {
+          await client.query('rollback');
+          return { outcome: 'not-a-member' };
+        }
+
+        await client.query(
+          "update project_members set role = 'editor' where project_id = $1 and user_id = $2",
+          [resolved.projectId, actorId],
+        );
+        await client.query(
+          "update project_members set role = 'owner' where project_id = $1 and user_id = $2",
+          [resolved.projectId, targetUserId],
+        );
+
+        // Both accounts' effective roles just changed, so both get the identical live-socket
+        // reconciliation `changeMemberRole` gives *any* role change -- see
+        // `notifyMembershipChanged`'s own comment for why a reconnect is always safe to trigger
+        // even when, as here, neither holder actually lost write access (owner and editor can
+        // both write): the cost of over-inclusion is a brief, correct reconnect, and there is no
+        // under-inclusion risk to weigh it against.
+        await notifyMembershipChanged(client, actorId);
+        await notifyMembershipChanged(client, targetUserId);
+
+        await client.query('commit');
+        return { outcome: 'transferred', newOwnerId: targetUserId };
       } catch (error) {
         await client.query('rollback');
         throw error;

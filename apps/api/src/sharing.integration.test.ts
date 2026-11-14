@@ -652,6 +652,211 @@ describe.skipIf(!databaseUrl)('Screenplay invitations and membership (PostgreSQL
       expect.arrayContaining([screenplayId, siblingScreenplayId]),
     );
   });
+
+  describe('transferOwnership', () => {
+    it('moves ownership to an existing member, demoting the previous owner to editor rather than removing them', async () => {
+      const owner = await createUser();
+      const { projectId } = await createProjectWithScreenplays(owner, ['One']);
+      const newOwner = await createUser();
+      await acceptProjectInvite(owner, projectId, newOwner, 'editor');
+
+      const notifications = await captureNotifications(async () => {
+        expect(await sharing!.transferOwnership(owner, projectId, newOwner)).toEqual({
+          outcome: 'transferred',
+          newOwnerId: newOwner,
+        });
+      });
+      // Both accounts' roles changed, so both are announced -- the same live-socket
+      // reconciliation `changeMemberRole`/`removeMember` already prove in the test above.
+      expect(notifications.sort()).toEqual(
+        [JSON.stringify({ userId: owner }), JSON.stringify({ userId: newOwner })].sort(),
+      );
+
+      expect(await projectMemberRole(projectId, newOwner)).toBe('owner');
+      // Demoted, not removed: the previous owner keeps editor access to their own project.
+      expect(await projectMemberRole(projectId, owner)).toBe('editor');
+
+      // The new owner can now do what only an owner can -- rename, delete, restore -- and the
+      // previous owner, now an editor, cannot.
+      expect(await projects!.renameProject(newOwner, projectId, 'Renamed')).toMatchObject({
+        title: 'Renamed',
+      });
+      expect(await projects!.renameProject(owner, projectId, 'Nope')).toBe('forbidden');
+      expect(await projects!.deleteProject(owner, projectId)).toBe('forbidden');
+
+      // And it is reversible: the new owner can transfer back, exactly as the brief requires.
+      expect(await sharing!.transferOwnership(newOwner, projectId, owner)).toEqual({
+        outcome: 'transferred',
+        newOwnerId: owner,
+      });
+      expect(await projectMemberRole(projectId, owner)).toBe('owner');
+      expect(await projectMemberRole(projectId, newOwner)).toBe('editor');
+    });
+
+    it('refuses an editor -- only the current owner may transfer', async () => {
+      const owner = await createUser();
+      const { projectId } = await createProjectWithScreenplays(owner, ['One']);
+      const editor = await createUser();
+      const other = await createUser();
+      await acceptProjectInvite(owner, projectId, editor, 'editor');
+      await acceptProjectInvite(owner, projectId, other, 'reviewer');
+
+      expect(await sharing!.transferOwnership(editor, projectId, other)).toBe('forbidden');
+      // Untouched: the attempt changed nothing.
+      expect(await projectMemberRole(projectId, owner)).toBe('owner');
+      expect(await projectMemberRole(projectId, editor)).toBe('editor');
+      expect(await projectMemberRole(projectId, other)).toBe('reviewer');
+    });
+
+    it('refuses a reviewer the same way', async () => {
+      const owner = await createUser();
+      const { projectId } = await createProjectWithScreenplays(owner, ['One']);
+      const reviewer = await createUser();
+      await acceptProjectInvite(owner, projectId, reviewer, 'reviewer');
+
+      expect(await sharing!.transferOwnership(reviewer, projectId, owner)).toBe('forbidden');
+    });
+
+    it('reports a stranger to the project as missing -- never that it exists', async () => {
+      const owner = await createUser();
+      const { projectId } = await createProjectWithScreenplays(owner, ['One']);
+      const stranger = await createUser();
+
+      expect(await sharing!.transferOwnership(stranger, projectId, owner)).toBe('missing');
+    });
+
+    it('reports a nonexistent or soft-deleted project as missing', async () => {
+      const owner = await createUser();
+      const { projectId } = await createProjectWithScreenplays(owner, ['One']);
+      const member = await createUser();
+      await acceptProjectInvite(owner, projectId, member, 'editor');
+
+      expect(await sharing!.transferOwnership(owner, randomUUID(), member)).toBe('missing');
+
+      expect(await projects!.deleteProject(owner, projectId)).toMatchObject({ id: projectId });
+      expect(await sharing!.transferOwnership(owner, projectId, member)).toBe('missing');
+    });
+
+    it('reports a target who is not a member of this project as not-a-member, without touching anything', async () => {
+      const owner = await createUser();
+      const { projectId } = await createProjectWithScreenplays(owner, ['One']);
+      const stranger = await createUser();
+
+      expect(await sharing!.transferOwnership(owner, projectId, stranger)).toEqual({
+        outcome: 'not-a-member',
+      });
+      expect(await projectMemberRole(projectId, owner)).toBe('owner');
+    });
+
+    it('reports already-owner for a self-transfer, and changes nothing', async () => {
+      const owner = await createUser();
+      const { projectId } = await createProjectWithScreenplays(owner, ['One']);
+
+      expect(await sharing!.transferOwnership(owner, projectId, owner)).toEqual({
+        outcome: 'already-owner',
+      });
+      expect(await projectMemberRole(projectId, owner)).toBe('owner');
+    });
+
+    it('a member of one project is not a member of another, so transferring across projects is refused', async () => {
+      const ownerA = await createUser();
+      const { projectId: projectA } = await createProjectWithScreenplays(ownerA, ['One']);
+      const ownerB = await createUser();
+      const { projectId: projectB } = await createProjectWithScreenplays(ownerB, ['Two']);
+      const memberOfB = await createUser();
+      await acceptProjectInvite(ownerB, projectB, memberOfB, 'editor');
+
+      // `memberOfB` has never joined `projectA`, so transferring it to them is refused exactly
+      // like transferring to any other stranger -- membership does not transfer across projects.
+      expect(await sharing!.transferOwnership(ownerA, projectA, memberOfB)).toEqual({
+        outcome: 'not-a-member',
+      });
+      expect(await projectMemberRole(projectA, ownerA)).toBe('owner');
+    });
+
+    /*
+     * The concurrency claim this slice makes: two concurrent transfers of the same project cannot
+     * leave it with zero owners or two. Driven against the real `transferOwnership`, with a real
+     * second client forcing the exact interleaving the advisory lock exists to prevent -- not two
+     * `Promise.all`-raced calls hoping to happen to collide, and not a sleep-based guess at timing.
+     *
+     * The sequence:
+     *
+     *  1. A second client takes the *real* ownership advisory lock by hand (`hashtext(projectId)`,
+     *     the same `-2` second key `sharing.ts`'s private `PROJECT_OWNERSHIP_LOCK_NAMESPACE`
+     *     constant uses -- hardcoded here the same way `restore.integration.test.ts` hardcodes
+     *     `REVISION_LOCK_NAMESPACE`'s `-1`, since the constant itself is not exported).
+     *  2. The real `transferOwnership(owner, projectId, raceB)` starts and is made to block on
+     *     that lock -- confirmed by polling `pg_locks` for an *ungranted* advisory entry, so this
+     *     cannot pass by racing ahead of it.
+     *  3. While it waits, the second client performs the exact pair of writes a *different*
+     *     transfer (`owner` -> `raceC`) would have made -- demote the owner, promote `raceC` --
+     *     and commits. This is "another transfer landed first," reproduced by hand rather than by
+     *     actually calling the store a second time, so the interleaving is deterministic.
+     *  4. The blocked call is released. Without the lock, it would have read `owner` as the
+     *     current owner (a snapshot taken before step 3) and gone on to corrupt the now-current
+     *     state; with it, it re-reads reality *after* step 3 committed, finds `owner` is no longer
+     *     the project's owner, and reports `'forbidden'` -- not a unique-violation exception, and
+     *     not a second owner.
+     *  5. The final state has exactly one owner (`raceC`) and `raceB` was never touched at all.
+     */
+    it('does not let two concurrent transfers of the same project produce zero or two owners', async () => {
+      const owner = await createUser();
+      const { projectId } = await createProjectWithScreenplays(owner, ['One']);
+      const raceB = await createUser();
+      const raceC = await createUser();
+      await acceptProjectInvite(owner, projectId, raceB, 'editor');
+      await acceptProjectInvite(owner, projectId, raceC, 'reviewer');
+
+      const blocker = await pool!.connect();
+      try {
+        // 1. Take the real lock by hand.
+        await blocker.query('begin');
+        await blocker.query('select pg_advisory_xact_lock(hashtext($1), $2)', [projectId, -2]);
+
+        // 2. The real call starts and blocks on that lock.
+        const blockedTransfer = sharing!.transferOwnership(owner, projectId, raceB);
+
+        const blocked = await waitForSharing(async () => {
+          const waiting = await pool!.query<{ count: number }>(
+            `select count(*)::int as count from pg_locks
+              where locktype = 'advisory' and not granted`,
+          );
+          return (waiting.rows[0]?.count ?? 0) > 0;
+        });
+        expect(blocked).toBe(true);
+
+        // 3. The interleaving the lock exists to prevent: a different transfer (owner -> raceC)
+        //    completing while the first is still waiting.
+        await blocker.query(
+          "update project_members set role = 'editor' where project_id = $1 and user_id = $2",
+          [projectId, owner],
+        );
+        await blocker.query(
+          "update project_members set role = 'owner' where project_id = $1 and user_id = $2",
+          [projectId, raceC],
+        );
+        await blocker.query('commit');
+
+        // 4. The blocked call resumes once the lock is released, re-reads the now-current state,
+        //    and refuses rather than corrupting it: `owner` is no longer the owner.
+        expect(await blockedTransfer).toBe('forbidden');
+      } finally {
+        blocker.release();
+      }
+
+      // 5. Exactly one owner, never zero, never two. `raceB`'s role is exactly what it was before
+      //    the blocked call ever touched anything -- the refusal happened before any write.
+      expect(await projectMemberRole(projectId, raceC)).toBe('owner');
+      expect(await projectMemberRole(projectId, owner)).toBe('editor');
+      expect(await projectMemberRole(projectId, raceB)).toBe('editor');
+      const ownerCount = await pool!.query<{ count: number }>(
+        "select count(*)::int as count from project_members where project_id = $1 and role = 'owner'",
+        [projectId],
+      );
+      expect(ownerCount.rows[0]?.count).toBe(1);
+    });
+  });
 });
 
 /**
@@ -852,4 +1057,29 @@ async function slotUpdatedAt(userId: string): Promise<string | undefined> {
   );
   const row = result.rows[0];
   return row ? new Date(row.updatedAt).toISOString() : undefined;
+}
+
+/** The transferOwnership suite's one assertion primitive: this account's current role on this
+ * project, read directly rather than through any store, so a `transferOwnership` bug that wrote
+ * the right outcome but the wrong row cannot hide behind a store method that re-derives the same
+ * mistake. `undefined` for no membership row at all. */
+async function projectMemberRole(projectId: string, userId: string): Promise<string | undefined> {
+  const result = await pool!.query<{ role: string }>(
+    'select role from project_members where project_id = $1 and user_id = $2',
+    [projectId, userId],
+  );
+  return result.rows[0]?.role;
+}
+
+/** Polls until `check` reports true or `timeoutMs` elapses. Used by the `transferOwnership`
+ * concurrency test to confirm the blocked call is genuinely waiting on `pg_locks` before
+ * proceeding, the identical technique `restore.integration.test.ts` uses for the same reason: a
+ * fixed sleep would be both slower and could still race ahead of the lock being requested. */
+async function waitForSharing(check: () => Promise<boolean>, timeoutMs = 10_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return false;
 }

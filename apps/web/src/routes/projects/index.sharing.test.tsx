@@ -300,4 +300,55 @@ describe('the project row’s Share entry point', () => {
     expect(dialog).toHaveAccessibleName('Share “Night Shoot”');
     expect(dialog).toHaveTextContent(/every screenplay in this project/i);
   });
+
+  it('passes viewerIsOwner through to the dialog, so only an actual owner sees Make owner', async () => {
+    // The project-ownership-transfer slice's one wiring point: `project.role` is the same field
+    // `canShare` above already reads, so there is no second source of truth for whether this
+    // viewer owns the project.
+    const user = userEvent.setup();
+    const member = {
+      userId: 'editor-1',
+      name: 'An Editor',
+      email: 'editor@example.test',
+      role: 'editor' as const,
+      scope: 'project' as const,
+    };
+    setQueries({ projects: [ownedProject] });
+    routeState.queries[JSON.stringify(['sharing', 'project', projectId])] = {
+      data: { members: [member], invitations: [] },
+      isError: false,
+      isLoading: false,
+    };
+    render(<ProjectsPage />);
+    await user.click(screen.getByRole('button', { name: 'Project actions for Night Shoot' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Share…' }));
+    await screen.findByRole('dialog');
+    expect(
+      screen.getByRole('button', { name: 'Make editor@example.test the owner of this project' }),
+    ).toBeInTheDocument();
+  });
+
+  it('does not offer Make owner to an editor, who is not the project owner', async () => {
+    const user = userEvent.setup();
+    const member = {
+      userId: 'other-1',
+      name: 'Another Editor',
+      email: 'other@example.test',
+      role: 'editor' as const,
+      scope: 'project' as const,
+    };
+    setQueries({ projects: [{ ...ownedProject, role: 'editor' as const }] });
+    routeState.queries[JSON.stringify(['sharing', 'project', projectId])] = {
+      data: { members: [member], invitations: [] },
+      isError: false,
+      isLoading: false,
+    };
+    render(<ProjectsPage />);
+    await user.click(screen.getByRole('button', { name: 'Project actions for Night Shoot' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Share…' }));
+    await screen.findByRole('dialog');
+    expect(
+      screen.queryByRole('button', { name: 'Make other@example.test the owner of this project' }),
+    ).not.toBeInTheDocument();
+  });
 });

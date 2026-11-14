@@ -23,15 +23,26 @@ import {
  * Tab/Shift+Tab focus trap, Escape to close) rather than introducing a third dialog pattern, and
  * like that dialog it has real pending/error state per action: every row here performs a network
  * request that can legitimately fail, and the writer needs to see which one did.
+ *
+ * The project-ownership-transfer slice adds "Make owner" to this same surface, which is where
+ * project membership is already managed, rather than inventing a fourth entry point. `viewerIsOwner`
+ * is how the caller tells this component whether that control may be offered at all: it is only
+ * ever `true` when both (a) this dialog is at project scope -- there is no screenplay-scoped owner
+ * to transfer, `shared_role` has no `'owner'` value -- and (b) the viewer's own effective role on
+ * the project is `'owner'`, the one actor `apps/api`'s `transferOwnership` accepts. Defaulting it to
+ * `false` means the two screenplay-scoped call sites (the screenplay row's menu, the editor's File
+ * menu) need no change at all to keep "Make owner" out of a dialog that could never offer it.
  */
 export function SharingDialog({
   onClose,
   scope,
   title,
+  viewerIsOwner = false,
 }: {
   onClose: () => void;
   scope: SharingScope;
   title: string;
+  viewerIsOwner?: boolean | undefined;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const headingId = useId();
@@ -174,8 +185,45 @@ export function SharingDialog({
     onError: (error: unknown) => setActionError(describeFailure(error)),
   });
 
+  // Only ever invoked when `scope.kind === 'project'` -- `MemberRow` below is handed
+  // `onMakeOwner` at all solely under that same condition (see `canTransfer`), so `scope.projectId`
+  // is always defined by the time this mutation function runs. Asserted rather than silently
+  // narrowed, so a future call site that got this wrong fails loudly instead of posting to
+  // `/api/projects/undefined/transfer-ownership`.
+  const transferOwnership = useMutation({
+    mutationFn: (userId: string) => {
+      if (scope.kind !== 'project') {
+        throw new Error('transferOwnership is only reachable at project scope.');
+      }
+      return api.transferOwnership(scope.projectId, userId);
+    },
+    onSuccess: async (result) => {
+      setNotice(undefined);
+      setActionError(
+        result.outcome === 'not-a-member'
+          ? 'That person no longer has access here.'
+          : result.outcome === 'already-owner'
+            ? 'They already own this project.'
+            : undefined,
+      );
+      if (result.outcome === 'transferred') {
+        // No acceptance step: the transfer already took effect, and the previous owner (this
+        // viewer) is now an editor. Said plainly here rather than left for the member list's own
+        // role column to explain, since that redraws a moment later and an unannounced permission
+        // change reads as the dialog having silently done something else.
+        setNotice('Ownership transferred. You are now an editor on this project.');
+      }
+      await refresh();
+    },
+    onError: (error: unknown) => setActionError(describeFailure(error)),
+  });
+
   const busy =
-    invite.isPending || changeRole.isPending || removeMember.isPending || revoke.isPending;
+    invite.isPending ||
+    changeRole.isPending ||
+    removeMember.isPending ||
+    revoke.isPending ||
+    transferOwnership.isPending;
 
   return (
     <div className="dialog-overlay">
@@ -257,6 +305,16 @@ export function SharingDialog({
                 <li key={`${member.scope}-${member.userId}`}>
                   <MemberRow
                     busy={busy}
+                    // "Make owner" piggybacks on exactly the same `manageable` rows -- it is
+                    // offered precisely where `manageable` is already true (every non-owner row,
+                    // never the inherited-access row a screenplay's dialog shows read-only) and
+                    // additionally requires `scope.kind === 'project'` and `viewerIsOwner`, the
+                    // server's own bar. Checked again here rather than trusting `viewerIsOwner`
+                    // alone, even though every call site today only ever passes it `true` at
+                    // project scope: a future screenplay-scope caller that got that wrong would
+                    // otherwise render a button whose own mutation throws when clicked instead of
+                    // simply never appearing.
+                    canMakeOwner={scope.kind === 'project' && viewerIsOwner}
                     member={member}
                     // An inherited project-scoped grant is shown but not editable from a
                     // screenplay's dialog: changing project-wide membership belongs to the
@@ -270,6 +328,7 @@ export function SharingDialog({
                     onChangeRole={(nextRole) =>
                       changeRole.mutate({ nextRole, userId: member.userId })
                     }
+                    onMakeOwner={() => transferOwnership.mutate(member.userId)}
                     onRemove={() => removeMember.mutate(member.userId)}
                   />
                 </li>
@@ -323,15 +382,19 @@ export function SharingDialog({
  */
 function MemberRow({
   busy,
+  canMakeOwner,
   manageable,
   member,
   onChangeRole,
+  onMakeOwner,
   onRemove,
 }: {
   busy: boolean;
+  canMakeOwner: boolean;
   manageable: boolean;
   member: SharingMember;
   onChangeRole: (role: SharedRole) => void;
+  onMakeOwner: () => void;
   onRemove: () => void;
 }) {
   return (
@@ -351,6 +414,22 @@ function MemberRow({
             <option value="editor">Editor</option>
             <option value="reviewer">Reviewer</option>
           </select>
+          {canMakeOwner && (
+            // Immediate, no confirmation dialog -- matching Remove and Delete elsewhere on this
+            // same surface, which also act the instant they are clicked. The brief's own
+            // reasoning for skipping an acceptance step applies here too: this is reversible (the
+            // new owner can transfer back) and only ever reachable by the project's current
+            // owner, so there is nothing a confirmation step would catch that a second click
+            // would not.
+            <button
+              aria-label={`Make ${member.email} the owner of this project`}
+              disabled={busy}
+              onClick={onMakeOwner}
+              type="button"
+            >
+              Make owner
+            </button>
+          )}
           <button
             aria-label={`Remove ${member.email}`}
             disabled={busy}

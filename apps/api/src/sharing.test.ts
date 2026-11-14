@@ -29,6 +29,13 @@ const inviteeId = 'actor-2';
 const projectScope: SharingScope = { kind: 'project', projectId };
 const screenplayScope: SharingScope = { kind: 'screenplay', screenplayId };
 const now = new Date('2026-08-06T00:00:00Z');
+// The exact statement text `transferOwnership` issues for its two writes, named once here so the
+// ordering assertions below read as "demote, then promote" rather than two inlined SQL literals
+// that could silently drift from the implementation.
+const UPDATE_TO_EDITOR =
+  "update project_members set role = 'editor' where project_id = $1 and user_id = $2";
+const UPDATE_TO_OWNER =
+  "update project_members set role = 'owner' where project_id = $1 and user_id = $2";
 
 function rows(values: Record<string, unknown>[]) {
   return { rowCount: values.length, rows: values };
@@ -497,6 +504,138 @@ describe('removeMember', () => {
   });
 });
 
+/** The queued results a successful lock-plus-scope-plus-authorization prologue needs for
+ * `transferOwnership` specifically: `begin`, the ownership advisory lock, the project lock, then
+ * the actor's project role. One extra entry versus `authorized()` above -- the advisory lock
+ * `acquireOwnershipLock` takes as its first statement after `begin`, which no other operation in
+ * this file takes at all. */
+function authorizedForTransfer(role: 'owner' | 'editor' | 'reviewer') {
+  return [
+    empty(), // begin
+    empty(), // acquireOwnershipLock's pg_advisory_xact_lock
+    rows([{ projectId, projectTitle: 'Shared project', screenplayTitle: null }]), // lockScope
+    rows([{ role }]), // fetchProjectRole(actor)
+  ];
+}
+
+describe('transferOwnership', () => {
+  it('takes the advisory lock before any row lock', async () => {
+    // The precise ordering progress/revision-lock-deadlock.md exists to warn about: an advisory
+    // lock taken after a row lock is how `restore.ts` and `revisions.ts` used to deadlock. This
+    // asserts the statement order directly rather than trusting the implementation's own comment.
+    const client = fakeClient([...authorizedForTransfer('owner'), rows([{ role: 'editor' }])]);
+    await store(client).transferOwnership(actorId, projectId, inviteeId);
+    const statements = client.query.mock.calls.map((call) => call[0]);
+    const lockIndex = statements.findIndex(
+      (sql) => typeof sql === 'string' && sql.includes('pg_advisory_xact_lock'),
+    );
+    const rowLockIndex = statements.findIndex(
+      (sql) => typeof sql === 'string' && sql.includes('from projects'),
+    );
+    expect(lockIndex).toBeGreaterThan(-1);
+    expect(rowLockIndex).toBeGreaterThan(-1);
+    expect(lockIndex).toBeLessThan(rowLockIndex);
+    // Tagged, like every other advisory-lock call site in this codebase, so a deadlock report
+    // names this function specifically.
+    expect(statements[lockIndex]).toContain('/* sharing.acquireOwnershipLock */');
+  });
+
+  it('reports a missing or soft-deleted project as missing, without reaching any role lookup', async () => {
+    const client = fakeClient([empty(), empty(), empty()]);
+    await expect(store(client).transferOwnership(actorId, projectId, inviteeId)).resolves.toBe(
+      'missing',
+    );
+    expect(client.query).toHaveBeenCalledWith('rollback');
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
+  it('reports a non-member actor as missing -- never that the project exists', async () => {
+    const client = fakeClient([
+      empty(),
+      empty(),
+      rows([{ projectId, projectTitle: 'P', screenplayTitle: null }]),
+      empty(),
+    ]);
+    await expect(store(client).transferOwnership(actorId, projectId, inviteeId)).resolves.toBe(
+      'missing',
+    );
+  });
+
+  it('refuses an editor with forbidden, which does admit the project exists', async () => {
+    // The distinguishing bar this function sets on top of every other sharing operation: owner
+    // only, never owner-or-editor. An editor can already invite, change roles, and remove members
+    // (`canManageSharing`), but may not give the project itself away.
+    const client = fakeClient(authorizedForTransfer('editor'));
+    await expect(store(client).transferOwnership(actorId, projectId, inviteeId)).resolves.toBe(
+      'forbidden',
+    );
+    const statements = client.query.mock.calls.map((call) => call[0]).join('\n');
+    expect(statements).not.toContain('update project_members');
+  });
+
+  it('refuses a reviewer with forbidden too', async () => {
+    const client = fakeClient(authorizedForTransfer('reviewer'));
+    await expect(store(client).transferOwnership(actorId, projectId, inviteeId)).resolves.toBe(
+      'forbidden',
+    );
+  });
+
+  it('answers already-owner for a self-transfer, without ever looking up the target', async () => {
+    const client = fakeClient(authorizedForTransfer('owner'));
+    await expect(store(client).transferOwnership(actorId, projectId, actorId)).resolves.toEqual({
+      outcome: 'already-owner',
+    });
+    // Exactly the prologue's four queries plus the rollback -- no fifth query asking about a
+    // target, because the target *is* the already-confirmed owner.
+    expect(client.query).toHaveBeenCalledTimes(5);
+    const statements = client.query.mock.calls.map((call) => call[0]).join('\n');
+    expect(statements).not.toContain('update project_members');
+  });
+
+  it('reports a target with no membership row as not-a-member', async () => {
+    const client = fakeClient([...authorizedForTransfer('owner'), empty()]);
+    await expect(store(client).transferOwnership(actorId, projectId, inviteeId)).resolves.toEqual({
+      outcome: 'not-a-member',
+    });
+    const statements = client.query.mock.calls.map((call) => call[0]).join('\n');
+    expect(statements).not.toContain('update project_members');
+  });
+
+  it('demotes the actor to editor before promoting the target to owner, notifies both, and commits', async () => {
+    const client = fakeClient([...authorizedForTransfer('owner'), rows([{ role: 'editor' }])]);
+    await expect(store(client).transferOwnership(actorId, projectId, inviteeId)).resolves.toEqual({
+      outcome: 'transferred',
+      newOwnerId: inviteeId,
+    });
+
+    const calls = client.query.mock.calls;
+    const statements = calls.map((call) => call[0]);
+    const demoteIndex = statements.findIndex((sql) => sql === UPDATE_TO_EDITOR);
+    const promoteIndex = statements.findIndex((sql) => sql === UPDATE_TO_OWNER);
+    const commitIndex = statements.indexOf('commit');
+    // Order matters: `project_single_owner_unique` is checked after each statement, not deferred
+    // to commit, so promoting before demoting would violate it on this transaction's own second
+    // write -- see `transferOwnership`'s own comment in sharing.ts.
+    expect(demoteIndex).toBeGreaterThan(-1);
+    expect(promoteIndex).toBeGreaterThan(-1);
+    expect(demoteIndex).toBeLessThan(promoteIndex);
+    expect(promoteIndex).toBeLessThan(commitIndex);
+
+    expect(calls[demoteIndex]?.[1]).toEqual([projectId, actorId]);
+    expect(calls[promoteIndex]?.[1]).toEqual([projectId, inviteeId]);
+
+    // Both accounts' roles changed, so both get the live-socket reconciliation.
+    expect(client.query).toHaveBeenCalledWith('select pg_notify($1, $2)', [
+      MEMBERSHIP_CHANGED_NOTIFY_CHANNEL,
+      JSON.stringify({ userId: actorId }),
+    ]);
+    expect(client.query).toHaveBeenCalledWith('select pg_notify($1, $2)', [
+      MEMBERSHIP_CHANGED_NOTIFY_CHANNEL,
+      JSON.stringify({ userId: inviteeId }),
+    ]);
+  });
+});
+
 describe('listSharing', () => {
   it('returns project members at project scope, and never another scope’s invitations', async () => {
     const client = fakeClient([
@@ -717,6 +856,7 @@ describe('transaction discipline', () => {
       (s) => s.removeMember(actorId, projectScope, inviteeId),
       (s) => s.revokeInvitation(actorId, 'invitation-1'),
       (s) => s.respondToInvitation(actorId, 'invitation-1', { response: 'accept' }),
+      (s) => s.transferOwnership(actorId, projectId, inviteeId),
     ];
     for (const operation of operations) {
       const client = {

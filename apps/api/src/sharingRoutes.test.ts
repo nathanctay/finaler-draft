@@ -44,6 +44,7 @@ const sharing: SharingStore = {
   revokeInvitation: record('revokeInvitation'),
   listInvitationsForUser: record('listInvitationsForUser'),
   respondToInvitation: record('respondToInvitation'),
+  transferOwnership: record('transferOwnership'),
 };
 
 const sharingView = {
@@ -152,6 +153,18 @@ const routes = [
     storeMethod: 'removeMember' as const,
     result: { outcome: 'removed' },
     expectedScope: { kind: 'screenplay', screenplayId } satisfies SharingScope,
+  },
+  {
+    // No `expectedScope`: `transferOwnership` takes a bare `projectId`, not a `SharingScope` --
+    // there is no screenplay-scoped owner to transfer (see `sharing.ts`'s own interface comment),
+    // so there is exactly one route rather than the project/screenplay pair every other row here
+    // has. The route's own describe block below asserts the exact arguments it forwards.
+    name: 'ownership transfer',
+    method: 'POST' as const,
+    url: `/api/projects/${projectId}/transfer-ownership`,
+    payload: { targetUserId: 'member-1' },
+    storeMethod: 'transferOwnership' as const,
+    result: { outcome: 'transferred', newOwnerId: 'member-1' },
   },
   {
     name: 'invitation list',
@@ -505,6 +518,90 @@ describe('the member routes', () => {
         url: `/api/projects/${projectId}/members/member-1`,
       });
       expect(response.statusCode).toBe(400);
+      expect(calls).toEqual([]);
+    });
+  });
+});
+
+describe('the ownership-transfer route', () => {
+  it('forwards the project id from the URL and the target id from the body', async () => {
+    results.transferOwnership = { outcome: 'transferred', newOwnerId: 'member-1' };
+    await withApp(async (app) => {
+      const response = await app.inject({
+        headers,
+        method: 'POST',
+        payload: { targetUserId: 'member-1' },
+        url: `/api/projects/${projectId}/transfer-ownership`,
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ outcome: 'transferred', newOwnerId: 'member-1' });
+      expect(calls[0]!.args).toEqual([actorId, projectId, 'member-1']);
+    });
+  });
+
+  it('reports not-a-member and already-owner as 200 outcomes, not failures', async () => {
+    // Both are the server answering a legitimate request from the project's actual owner --
+    // "that person is not here" and "you already own this" -- so the dialog can say which one
+    // happened rather than parsing prose out of a shared 4xx, the same convention
+    // `memberChangeResultSchema`'s `not-a-member`/`owner-immutable` already established.
+    await withApp(async (app) => {
+      for (const outcome of ['not-a-member', 'already-owner'] as const) {
+        results.transferOwnership = { outcome };
+        const response = await app.inject({
+          headers,
+          method: 'POST',
+          payload: { targetUserId: 'member-1' },
+          url: `/api/projects/${projectId}/transfer-ownership`,
+        });
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toEqual({ outcome });
+      }
+    });
+  });
+
+  it('maps missing to 404 and forbidden to 403', async () => {
+    await withApp(async (app) => {
+      results.transferOwnership = 'missing';
+      expect(
+        (
+          await app.inject({
+            headers,
+            method: 'POST',
+            payload: { targetUserId: 'member-1' },
+            url: `/api/projects/${projectId}/transfer-ownership`,
+          })
+        ).statusCode,
+      ).toBe(404);
+      results.transferOwnership = 'forbidden';
+      const forbidden = await app.inject({
+        headers,
+        method: 'POST',
+        payload: { targetUserId: 'member-1' },
+        url: `/api/projects/${projectId}/transfer-ownership`,
+      });
+      expect(forbidden.statusCode).toBe(403);
+      expect(forbidden.json()).toEqual({
+        error: 'Project owner access required to transfer ownership',
+      });
+    });
+  });
+
+  it('rejects an empty or oversized target id, and an unknown field, without reaching the store', async () => {
+    await withApp(async (app) => {
+      for (const payload of [
+        { targetUserId: '' },
+        { targetUserId: 'x'.repeat(256) },
+        { targetUserId: 'member-1', role: 'owner' },
+        {},
+      ]) {
+        const response = await app.inject({
+          headers,
+          method: 'POST',
+          payload,
+          url: `/api/projects/${projectId}/transfer-ownership`,
+        });
+        expect(response.statusCode, JSON.stringify(payload)).toBe(400);
+      }
       expect(calls).toEqual([]);
     });
   });
