@@ -930,6 +930,44 @@ export function createPostgresSharingStore(
           return { outcome: 'not-a-member' };
         }
 
+        /*
+         * Supersede any project-scope invitation still pending for the new owner -- and note that
+         * this runs **before** the two `project_members` writes below, deliberately.
+         *
+         * Why it is here at all: once the target holds `owner`, a pending `editor` invitation is
+         * dishonest state. Accepting it would appear to succeed while changing nothing (the
+         * `role <> 'owner'` guard on `respondToInvitation`'s upsert refuses to lower them), and
+         * declining it would read as refusing access they already have. Superseded is what it is.
+         *
+         * Why the order matters, which is the subtle part. `respondToInvitation` takes
+         * `for update of i` on the invitation row and *then* writes `project_members`. If this
+         * function wrote `project_members` first and the invitation second, the two would acquire
+         * the same pair of row locks in opposite orders and could deadlock -- the identical shape
+         * as `progress/revision-lock-deadlock.md`'s incident, just with two row locks instead of a
+         * row lock and an advisory lock. Updating the invitation first makes both paths acquire
+         * invitation-then-membership, so no cycle exists.
+         *
+         * For the same reason this function does **not** take the ownership advisory lock on the
+         * accept path, which an earlier plan for this fix called for: the accept path cannot take
+         * that lock until after its own `for update of i`, which would reintroduce exactly the
+         * inversion this ordering removes. The `role <> 'owner'` guard already makes the race
+         * harmless without it -- whichever transaction commits second sees the other's committed
+         * row, and the guard is evaluated against that current row.
+         *
+         * Scoped to project-level rows (`screenplay_id is null`) for this project only: a
+         * screenplay-scoped invitation grants one screenplay and is not superseded by project
+         * ownership in any way a reader would expect.
+         */
+        await client.query(
+          `update membership_invitations
+              set status = 'declined', updated_at = now()
+            where project_id = $1
+              and screenplay_id is null
+              and invited_user_id = $2
+              and status = 'pending'`,
+          [resolved.projectId, targetUserId],
+        );
+
         await client.query(
           "update project_members set role = 'editor' where project_id = $1 and user_id = $2",
           [resolved.projectId, actorId],
@@ -1043,10 +1081,32 @@ export function createPostgresSharingStore(
         // (two clicks, or a retried request) lands on the same single row instead of a unique
         // violation.
         if (row.screenplayId === null) {
+          /*
+           * `where project_members.role <> 'owner'` is the guard, and it is load-bearing: without
+           * it, accepting a *stale* invitation silently demotes the project's only owner and leaves
+           * the project with **none**.
+           *
+           * The sequence, reproduced (SEC-11 in the audit, and predicted by SEC-9's own note before
+           * `transferOwnership` existed): B is a reviewer; B is invited as an `editor`, which
+           * `invite` allows because `reviewer` does not cover `editor`; ownership is then
+           * transferred to B, demoting the previous owner to `editor`; B accepts the invitation
+           * still sitting in their inbox. The unguarded upsert wrote `role = 'editor'` over B's
+           * freshly granted `owner`, so both members ended as `editor`.
+           *
+           * That state is not recoverable through the product. Transfer, rename, delete and restore
+           * all require an owner, and `project_single_owner_unique` does not catch it -- a partial
+           * unique index enforces *at most* one owner, never *at least* one. Only a manual `update`
+           * repairs it.
+           *
+           * An invitation can only ever grant `editor` or `reviewer` (`sharedRole` has no `'owner'`
+           * value, deliberately -- see this module's header), so an accept never has cause to
+           * overwrite an owner. Refusing to lower one costs nothing a legitimate accept wanted.
+           */
           await client.query(
             `insert into project_members (project_id, user_id, role)
               values ($1, $2, $3)
-              on conflict (project_id, user_id) do update set role = excluded.role`,
+              on conflict (project_id, user_id) do update set role = excluded.role
+                where project_members.role <> 'owner'`,
             [row.projectId, actorId, row.role],
           );
         } else {
