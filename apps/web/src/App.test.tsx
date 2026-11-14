@@ -3015,7 +3015,7 @@ describe('Edit, View and Format menus', () => {
     return screen.getByRole('menu');
   }
 
-  it('lists Undo, Redo, Cut, Copy and Select all, with no Paste', async () => {
+  it('lists Undo, Redo, Cut, Copy, Select all and Find and replace…, with no Paste', async () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
@@ -3025,7 +3025,7 @@ describe('Edit, View and Format menus', () => {
       within(menu)
         .getAllByRole('menuitem')
         .map((item) => item.textContent),
-    ).toEqual(['Undo', 'Redo', 'Cut', 'Copy', 'Select all']);
+    ).toEqual(['Undo', 'Redo', 'Cut', 'Copy', 'Select all', 'Find and replace…']);
   });
 
   it('mirrors the toolbar’s own undo/redo availability and action', async () => {
@@ -3335,6 +3335,192 @@ describe('Edit, View and Format menus', () => {
 
     menu = await openMenu(user, 'View menu');
     expect(within(menu).getByRole('menuitem', { name: 'Show Navigator' })).toBeInTheDocument();
+  });
+});
+
+/**
+ * Edit > Find and replace… (menus slice 4, `findReplace.ts`/`findReplaceBar.tsx`). What matters
+ * here, beyond `findReplace.test.ts`'s own direct coverage of the plugin, is that `App.tsx` wires
+ * the real thing together correctly: the menu item and `Mod-f` both reach the real bar, the real
+ * highlights appear in the real rendered document, a replace reaches the real editor (and so the
+ * real block ids survive it), and the `editingAllowed` split between Find and Replace is the one
+ * this component actually enforces, not only the one `findReplaceBar.tsx`'s own disabled
+ * attributes suggest.
+ */
+describe('Find and replace', () => {
+  // A local copy of the "Edit, View and Format menus" describe block's own helper above: that one
+  // is scoped to its own `describe`, not reachable from a sibling one.
+  async function openMenu(
+    user: ReturnType<typeof userEvent.setup>,
+    triggerName: string,
+  ): Promise<HTMLElement> {
+    await user.click(screen.getByRole('button', { name: triggerName }));
+    return screen.getByRole('menu');
+  }
+
+  function findField(): HTMLInputElement {
+    return screen.getByRole('textbox', { name: 'Find' }) as HTMLInputElement;
+  }
+
+  it('opens from the Edit menu, focused on the query field', async () => {
+    const user = userEvent.setup();
+    render(<App initial={twoCharacterPersisted} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const menu = await openMenu(user, 'Edit menu');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Find and replace…' }));
+
+    expect(screen.getByRole('search', { name: 'Find and replace' })).toBeInTheDocument();
+    expect(findField()).toHaveFocus();
+  });
+
+  it('opens on Mod-f from inside the editor, without the menu', async () => {
+    const user = userEvent.setup();
+    render(<App initial={twoCharacterPersisted} />);
+    const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    // `canvas.focus()`, not a click: jsdom has no `elementFromPoint`, which ProseMirror's own
+    // mousedown handler needs for caret placement (see `'toggling scene numbers...'` above, this
+    // file's existing comment on the identical limitation) -- a plain DOM focus is enough to make
+    // this editable region the real keydown target `userEvent.keyboard` dispatches to.
+    canvas.focus();
+    await user.keyboard('{Control>}f{/Control}');
+
+    expect(screen.getByRole('search', { name: 'Find and replace' })).toBeInTheDocument();
+  });
+
+  it('highlights every match in the real document and reports "N of M", cycling with Next/Previous', async () => {
+    const user = userEvent.setup();
+    render(<App initial={twoCharacterPersisted} />);
+    const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const menu = await openMenu(user, 'Edit menu');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Find and replace…' }));
+    // "did" appears in "She never did." and "Neither did I." -- two matches, neither inside the
+    // same block as the other, so this also proves highlighting is not confined to one block.
+    await user.type(findField(), 'did');
+
+    expect(canvas.querySelectorAll('.find-match')).toHaveLength(2);
+    expect(canvas.querySelectorAll('.find-match-current')).toHaveLength(1);
+    expect(screen.getByText('1 of 2')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Next match' }));
+    expect(screen.getByText('2 of 2')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Next match' }));
+    expect(screen.getByText('1 of 2')).toBeInTheDocument(); // wraps
+  });
+
+  it('is case-sensitive only once the checkbox is checked', async () => {
+    const user = userEvent.setup();
+    const script = persistedScreenplay(
+      '44443333-0000-4000-8000-00000000000a',
+      'Case Draft',
+      'Cat cat CAT',
+    );
+    render(<App initial={script} />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const menu = await openMenu(user, 'Edit menu');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Find and replace…' }));
+    await user.type(findField(), 'cat');
+    expect(screen.getByText('1 of 3')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('checkbox', { name: 'Case-sensitive' }));
+    expect(screen.getByText('1 of 1')).toBeInTheDocument();
+  });
+
+  it('replaces the current match through the real editor, leaving the block id exactly as it was', async () => {
+    const user = userEvent.setup();
+    const script = persistedScreenplay(
+      '44443333-0000-4000-8000-00000000000b',
+      'Replace Draft',
+      'A cat sat on the mat.',
+    );
+    const blockId = '44443333-8d05-4e6e-bac7-e471e8df33a1';
+    render(<App initial={script} />);
+    const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+    expect(getBlock(canvas, blockId)).toBeInTheDocument();
+
+    const menu = await openMenu(user, 'Edit menu');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Find and replace…' }));
+    await user.type(findField(), 'cat');
+    await user.type(screen.getByRole('textbox', { name: 'Replace with' }), 'dog');
+    await user.click(screen.getByRole('button', { name: 'Replace' }));
+
+    expect(getBlock(canvas, blockId).textContent).toBe('A dog sat on the mat.');
+  });
+
+  it('Replace all replaces every match in one editor transaction, undoable as a single step', async () => {
+    const user = userEvent.setup();
+    const script = persistedScreenplay(
+      '44443333-0000-4000-8000-00000000000c',
+      'Replace All Draft',
+      'cat cat cat',
+    );
+    const blockId = '44443333-8d05-4e6e-bac7-e471e8df33a1';
+    render(<App initial={script} />);
+    const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const menu = await openMenu(user, 'Edit menu');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Find and replace…' }));
+    await user.type(findField(), 'cat');
+    await user.type(screen.getByRole('textbox', { name: 'Replace with' }), 'dog');
+    await user.click(screen.getByRole('button', { name: 'Replace all' }));
+
+    expect(getBlock(canvas, blockId).textContent).toBe('dog dog dog');
+
+    // One undo reverses the whole batch -- the Edit menu's own Undo item, exactly as a writer
+    // would actually trigger it, not a direct `editor.commands.undo()` call.
+    const reopened = await openMenu(user, 'Edit menu');
+    await user.click(within(reopened).getByRole('menuitem', { name: 'Undo' }));
+    expect(getBlock(canvas, blockId).textContent).toBe('cat cat cat');
+  });
+
+  it('closing the bar removes every highlight from the document', async () => {
+    const user = userEvent.setup();
+    render(<App initial={twoCharacterPersisted} />);
+    const canvas = await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const menu = await openMenu(user, 'Edit menu');
+    await user.click(within(menu).getByRole('menuitem', { name: 'Find and replace…' }));
+    await user.type(findField(), 'did');
+    expect(canvas.querySelectorAll('.find-match').length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole('button', { name: 'Close find and replace' }));
+    expect(screen.queryByRole('search', { name: 'Find and replace' })).not.toBeInTheDocument();
+    expect(canvas.querySelectorAll('.find-match')).toHaveLength(0);
+  });
+
+  /**
+   * The owner's own split: a reviewer, or a lapsed entitlement, may still search -- Find needs no
+   * gate anywhere -- but Replace and Replace all must be disabled, naming why, exactly like the
+   * File menu's export items. `findReplaceBar.test.tsx` already proves the bar's own disabled
+   * rendering in isolation; this proves `App.tsx` actually supplies `editingAllowed` to it, and
+   * that the gate holds even if something bypassed the disabled attribute (`findReplaceOne`'s own
+   * guard, the same discipline `changeElement`'s does for a reviewer's element conversions).
+   */
+  it('lets a reviewer search, but disables Replace and Replace all, naming why', async () => {
+    const user = userEvent.setup();
+    const script = persistedScreenplay(
+      '44443333-0000-4000-8000-00000000000d',
+      'Reviewer Draft',
+      'A cat sat on the mat.',
+    );
+    render(<App initial={script} viewerRole="reviewer" />);
+    await screen.findByRole('textbox', { name: 'Screenplay editing canvas' });
+
+    const menu = await openMenu(user, 'Edit menu');
+    const findItem = within(menu).getByRole('menuitem', { name: 'Find and replace…' });
+    expect(findItem).toBeEnabled();
+    await user.click(findItem);
+    await user.type(findField(), 'cat');
+    expect(screen.getByText('1 of 1')).toBeInTheDocument();
+
+    const replace = screen.getByRole('button', { name: 'Replace' });
+    const replaceAll = screen.getByRole('button', { name: 'Replace all' });
+    expect(replace).toBeDisabled();
+    expect(replaceAll).toBeDisabled();
+    expect(replace).toHaveAttribute('title', expect.stringMatching(/Read-only/u));
   });
 });
 

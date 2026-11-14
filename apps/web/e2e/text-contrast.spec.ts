@@ -270,6 +270,35 @@ const CASES: readonly ContrastCase[] = [
     shell: true,
     themes: BOTH,
   },
+  {
+    /**
+     * Find & replace's match highlight (`findReplace.ts`'s `buildFindDecorations`,
+     * `progress/find-and-replace.md`). `.find-match` sets only its own literal `background-color`
+     * (`--fd-find-match-surface`) and no `color` of its own, so what is actually measured here is
+     * the manuscript's own ink (`.page`'s inherited colour) against that literal background --
+     * exactly the `.diff-manuscript ins`/`del` precedent this rule follows. `.page`'s own
+     * background is a literal `white`, never redefined by `.dark` (`.dark .page` restyles only
+     * `color` -- confirmed by reading that rule directly), so there is no ancestor surface this
+     * highlight could be measured against instead; this is the one case in this file where the
+     * *target* itself, not an ancestor, is the correct background to resolve.
+     */
+    name: '.find-match (painted on the sheet, which stays white in both themes)',
+    markup:
+      '<div class="page"><div class="script-body"><div data-screenplay-block data-screenplay-element="action"><span class="find-match">cat</span></div></div></div>',
+    target: '.find-match',
+    minimum: REAL_TEXT,
+    shell: true,
+    themes: BOTH,
+  },
+  {
+    name: ".find-match-current (the current match's own, more saturated background)",
+    markup:
+      '<div class="page"><div class="script-body"><div data-screenplay-block data-screenplay-element="action"><span class="find-match find-match-current">cat</span></div></div></div>',
+    target: '.find-match-current',
+    minimum: REAL_TEXT,
+    shell: true,
+    themes: BOTH,
+  },
 ];
 
 /** An `rgb()`/`rgba()` computed value, returned to the hex form `contrastRatio` reads. A

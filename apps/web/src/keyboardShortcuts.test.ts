@@ -3,6 +3,7 @@ import { getExtensionField, type AnyExtension } from '@tiptap/core';
 import { createLocalScreenplayEditorInit } from '@finaler-draft/screenplay-editor';
 import { KEYBOARD_SHORTCUTS, platformModLabel, renderBinding } from './keyboardShortcuts.js';
 import { SmartTypeGhostExtension } from './smartTypeGhost.js';
+import { FindReplaceExtension } from './findReplace.js';
 
 /**
  * The brief's own instruction: "write a test asserting every shortcut the dialog claims actually
@@ -31,9 +32,14 @@ function bindingsOf(extension: AnyExtension): readonly string[] {
   return Object.keys(addKeyboardShortcuts() as Record<string, unknown>);
 }
 
-function registeredBindings(source: 'screenplayYjs' | 'screenplayBlock' | 'smartTypeGhost') {
+function registeredBindings(
+  source: 'screenplayYjs' | 'screenplayBlock' | 'smartTypeGhost' | 'findReplace',
+) {
   if (source === 'smartTypeGhost') {
     return bindingsOf(SmartTypeGhostExtension);
+  }
+  if (source === 'findReplace') {
+    return bindingsOf(FindReplaceExtension);
   }
   const extension = screenplayExtensions().find((candidate) => candidate.name === source);
   if (!extension) {
@@ -53,6 +59,7 @@ describe('KEYBOARD_SHORTCUTS: every claimed binding is real', () => {
     expect(registeredBindings('screenplayYjs').length).toBeGreaterThan(0);
     expect(registeredBindings('screenplayBlock').length).toBeGreaterThan(0);
     expect(registeredBindings('smartTypeGhost').length).toBeGreaterThan(0);
+    expect(registeredBindings('findReplace').length).toBeGreaterThan(0);
   });
 
   it.each(

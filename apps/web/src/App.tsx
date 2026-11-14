@@ -61,6 +61,18 @@ import { SeamCaretExtension } from './seamCaret.js';
 import { SmartTypeGhostExtension } from './smartTypeGhost.js';
 import { SmartTypeList, SmartTypeListExtension } from './smartTypeList.js';
 import { ElementMenu, ElementMenuExtension } from './elementMenu.js';
+import {
+  FindReplaceExtension,
+  clearFindReplace,
+  findReplaceNext,
+  findReplacePluginKey,
+  findReplacePrevious,
+  findReplaceQuerySeed,
+  replaceAllMatches,
+  replaceCurrentMatch,
+  setFindReplaceQuery,
+} from './findReplace.js';
+import { FindReplaceBar } from './findReplaceBar.js';
 import { ApplicationMenubar } from './applicationMenubar.js';
 import {
   ApplicationShell,
@@ -779,7 +791,23 @@ export function App({
   // problem or look up a shortcut exactly as they may count words.
   const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false);
   const [keyboardShortcutsDialogOpen, setKeyboardShortcutsDialogOpen] = useState(false);
+  // Edit > Find and replace… (menus slice 4, findReplace.ts). `findReplaceOpen` is this bar's own
+  // mount/unmount flag, the identical convention every other dialog's `xDialogOpen` already uses.
+  // `findQuery`/`findCaseSensitive` are kept here, not read back from the plugin, because this
+  // component is what the bar's controlled `<input>`/`<input type="checkbox">` need a value from
+  // on every render; `findMatchCount`/`findCurrentMatchNumber` are the opposite direction --
+  // read *from* the plugin after every transaction (`syncFindReplaceState` below), since the
+  // plugin, not this component, is what actually knows what matched. Unlike every other dialog's
+  // open flag, closing this one also clears the plugin's own query (`closeFindReplaceBar` below):
+  // "Find and replace…" always opens blank, matching a browser's own in-page find rather than
+  // remembering the writer's last query across a close.
+  const [findReplaceOpen, setFindReplaceOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findCaseSensitive, setFindCaseSensitive] = useState(false);
+  const [findMatchCount, setFindMatchCount] = useState(0);
+  const [findCurrentMatchNumber, setFindCurrentMatchNumber] = useState(0);
   const fileMenuRef = useRef<HTMLDivElement>(null);
+  const editMenuRef = useRef<HTMLDivElement>(null);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
   const helpMenuRef = useRef<HTMLDivElement>(null);
   const latestProjection = useRef<LocalScreenplayProjection | undefined>(undefined);
@@ -843,6 +871,37 @@ export function App({
     const state = paginationPluginKey.getState(editorInstance.state);
     if (state) {
       setPageCount(state.pageCount);
+    }
+  };
+
+  // Find & replace's own count, read back from the plugin for the identical reason `syncPageCount`
+  // above reads pagination's: `onTransaction` is the one hook that fires for *every* dispatched
+  // transaction, including find/replace's own navigate-only ones (no document change at all, so
+  // `onUpdate` would miss them) and an edit made elsewhere in the document while the bar is open
+  // (which can move the current match without this component having done anything itself). This
+  // is the one place `findMatchCount`/`findCurrentMatchNumber` are ever written -- the plugin is
+  // the authority on what matched, this component only mirrors it for the bar to render.
+  const syncFindReplaceState = (editorInstance: Editor) => {
+    const found = findReplacePluginKey.getState(editorInstance.state);
+    setFindMatchCount(found?.matches.length ?? 0);
+    setFindCurrentMatchNumber(found && found.currentIndex >= 0 ? found.currentIndex + 1 : 0);
+  };
+
+  // Scrolls the current match into view -- read back through the real rendered DOM
+  // (`.find-match-current`, `styles.css`) rather than computed from the plugin's own positions,
+  // because `Element.scrollIntoView` is what actually knows how to bring an arbitrary element into
+  // view inside `.editor-region`'s own scroller, the same convention `elementMenu.tsx`'s and
+  // `smartTypeList.tsx`'s own "keep the highlighted row visible" scroll already use. Safe to call
+  // synchronously right after a find/replace command: ProseMirror's own decorations are part of
+  // `view.dispatch`'s synchronous DOM update, not deferred to a later React render, so the element
+  // this queries for already reflects whatever the command just did.
+  const scrollCurrentMatchIntoView = () => {
+    const current = editorRegionRef.current?.querySelector<HTMLElement>('.find-match-current');
+    // jsdom (this app's unit-test environment) has no `Element.prototype.scrollIntoView` at all --
+    // the same guard `elementMenu.tsx`'s and `smartTypeList.tsx`'s own "keep the highlighted row
+    // visible" calls already carry, for the identical reason.
+    if (current && typeof current.scrollIntoView === 'function') {
+      current.scrollIntoView({ block: 'nearest' });
     }
   };
 
@@ -1209,6 +1268,15 @@ export function App({
       // self-contained, so stage 3's optional accept-by-list layer attaches here beside it rather
       // than inside it, and either can be removed without touching the other.
       SmartTypeGhostExtension,
+      // Find & replace (menus slice 4, findReplace.ts): another layer over the screenplay editor,
+      // not part of what a block is, for the identical reason pagination and the ghost above are.
+      // `onOpen` is `setFindReplaceOpen`, React's own setter -- referentially stable across
+      // renders, so closing over it here does not need to be listed in this `useMemo`'s own deps
+      // (see the `eslint-disable` below, already covering the identical situation for `collab`).
+      // An arrow, not `onOpen: openFindReplaceBar` -- this line runs during the component body,
+      // before `openFindReplaceBar`'s `const` is initialised, so passing the reference directly
+      // is a temporal-dead-zone `ReferenceError`. The arrow defers the lookup to call time.
+      FindReplaceExtension.configure({ onOpen: (seed) => openFindReplaceBar(seed) }),
       // SmartType's optional candidate list (smartTypeList.tsx), the layer the writer is still
       // deciding whether to keep. It is deliberately removable: this line, the `<SmartTypeList>`
       // below, the import above, its own file and its own block in styles.css are the whole of it,
@@ -1235,7 +1303,10 @@ export function App({
     },
     onSelectionUpdate: ({ editor: editorInstance }) => syncEditorState(editorInstance),
     onUpdate: ({ editor: editorInstance }) => syncEditorState(editorInstance),
-    onTransaction: ({ editor: editorInstance }) => syncPageCount(editorInstance),
+    onTransaction: ({ editor: editorInstance }) => {
+      syncPageCount(editorInstance);
+      syncFindReplaceState(editorInstance);
+    },
   });
   // Kept current every render, read by the title-page/document-settings observer effect above --
   // see that ref's own declaration for why a ref rather than a dependency.
@@ -1720,6 +1791,90 @@ export function App({
   const closeKeyboardShortcutsDialog = () => {
     setKeyboardShortcutsDialogOpen(false);
     helpMenuRef.current?.querySelector<HTMLButtonElement>('.overflow-menu-trigger')?.focus();
+  };
+
+  /**
+   * Find and replace's own equivalent of `closeFeedbackDialog` above (returning focus to Edit's
+   * trigger rather than Help's), plus the one thing no other dialog's close needs to do: clear the
+   * plugin's own query and highlights. Closing is not an edit -- `clearFindReplace` dispatches a
+   * transaction with no steps -- but it is the one moment this bar's whole premise ("every match
+   * visibly highlighted in the document") should stop being true, so the highlights have to be
+   * told to go, not merely hidden behind an unmounted React component while the plugin keeps
+   * believing a search is still active.
+   */
+  const closeFindReplaceBar = () => {
+    setFindReplaceOpen(false);
+    setFindQuery('');
+    setFindCaseSensitive(false);
+    if (editor) {
+      clearFindReplace(editor.view);
+    }
+    editMenuRef.current?.querySelector<HTMLButtonElement>('.overflow-menu-trigger')?.focus();
+  };
+
+  /** Pushes a query/case-sensitivity change into the plugin and scrolls whatever it lands on into
+   * view -- the identical "nearest match from here, wrapping" resolution `findReplace.ts`'s own
+   * `nearestMatchIndex` performs for a fresh search, reused via `setFindReplaceQuery`. Both of the
+   * bar's own controls (the query field, the case-sensitive checkbox) call this, rather than each
+   * separately re-deriving "the other half hasn't changed" -- there is exactly one place this
+   * editor's query/case-sensitivity are pushed to ProseMirror, matching how `changeElement`/
+   * `cutSelection` are each the one place their own mutation is dispatched. */
+  const updateFindReplaceQuery = (query: string, caseSensitive: boolean) => {
+    setFindQuery(query);
+    setFindCaseSensitive(caseSensitive);
+    if (!editor) return;
+    setFindReplaceQuery(editor.view, query, caseSensitive);
+    scrollCurrentMatchIntoView();
+  };
+
+  /**
+   * Opens the bar, seeding the query from the current selection when there is one to seed from
+   * (`findReplaceQuerySeed` decides; a collapsed or cross-block selection seeds nothing).
+   *
+   * Both entry points go through here -- `Mod-f` and the Edit menu item -- so highlighting a word
+   * and reaching for either gets the same result. The menu route reads the selection from the
+   * editor's own state rather than the DOM, which is what makes it work at all: opening a menu
+   * moves focus to its trigger, and the browser selection goes with it, while ProseMirror's own
+   * selection state persists.
+   */
+  const openFindReplaceBar = (seed: string | undefined) => {
+    setFindReplaceOpen(true);
+    if (seed === undefined) return;
+    updateFindReplaceQuery(seed, findCaseSensitive);
+  };
+
+  const findNext = () => {
+    if (!editor) return;
+    findReplaceNext(editor.view);
+    scrollCurrentMatchIntoView();
+  };
+
+  const findPrevious = () => {
+    if (!editor) return;
+    findReplacePrevious(editor.view);
+    scrollCurrentMatchIntoView();
+  };
+
+  /**
+   * Replace and Replace all both reach the real editor's own transaction (`findReplace.ts`'s
+   * `replaceCurrentMatch`/`replaceAllMatches`, which dispatch through `editor.view` exactly as
+   * `changeElement`/`cutSelection` already do) -- never a second, Yjs-bypassing write path. Both
+   * are gated on `editingAllowed` here, the one place that actually stops a read-only screenplay's
+   * content from changing this way (`changeElement`'s own comment on why this guard, not merely
+   * `findReplaceBar.tsx`'s disabled buttons, is what matters): a reviewer, or a lapsed
+   * entitlement, may search -- Find needs no gate anywhere -- but may not rewrite.
+   */
+  const findReplaceOne = (replacement: string) => {
+    if (!editor || !editingAllowed) return;
+    replaceCurrentMatch(editor, replacement);
+    syncEditorState(editor);
+    scrollCurrentMatchIntoView();
+  };
+
+  const findReplaceAll = (replacement: string) => {
+    if (!editor || !editingAllowed) return;
+    replaceAllMatches(editor, replacement);
+    syncEditorState(editor);
   };
 
   const scenes = useMemo(
@@ -2473,7 +2628,18 @@ export function App({
                 if (region && scrollTop !== undefined) region.scrollTop = scrollTop;
               },
             },
+            {
+              // Menus slice 4. No `editingAllowed` gate, and no `disabled` at all: opening the
+              // bar never touches the document, and Find itself must work for a reviewer or a
+              // lapsed entitlement exactly as Select all and Copy already do above -- only the
+              // bar's own Replace/Replace all controls are gated, in `findReplaceBar.tsx`'s own
+              // props (`findReplaceOne`/`findReplaceAll` below carry the actual enforcement).
+              label: 'Find and replace…',
+              onSelect: () =>
+                openFindReplaceBar(editor ? findReplaceQuerySeed(editor.state) : undefined),
+            },
           ]}
+          editMenuRef={editMenuRef}
           fileMenuItems={[
             {
               disabled: !editingAllowed,
@@ -2703,6 +2869,25 @@ export function App({
           )}
           {keyboardShortcutsDialogOpen && (
             <KeyboardShortcutsDialog onClose={closeKeyboardShortcutsDialog} />
+          )}
+          {findReplaceOpen && editor && (
+            <FindReplaceBar
+              caseSensitive={findCaseSensitive}
+              currentMatchNumber={findCurrentMatchNumber}
+              editingAllowed={editingAllowed}
+              matchCount={findMatchCount}
+              onCaseSensitiveChange={(caseSensitive) =>
+                updateFindReplaceQuery(findQuery, caseSensitive)
+              }
+              onClose={closeFindReplaceBar}
+              onNext={findNext}
+              onPrevious={findPrevious}
+              onQueryChange={(query) => updateFindReplaceQuery(query, findCaseSensitive)}
+              onReplace={findReplaceOne}
+              onReplaceAll={findReplaceAll}
+              query={findQuery}
+              replaceDisabledReason={readOnlyMenuReason}
+            />
           )}
           {toast !== undefined && (
             // A toast rather than a line in the status bar: an export failure names the block and
