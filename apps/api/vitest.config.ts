@@ -23,6 +23,13 @@ export default defineConfig({
         // ordering, and the one deletion transaction. `accountDeletion.test.ts` covers it against
         // a fake pool and a fake Stripe client, the same convention every store above it follows.
         'src/accountDeletion.ts',
+        // The grace-period purge cron (progress/account-purge-cron.md). `accountPurge.test.ts`
+        // covers the orchestration against a fake pool; `accountPurgeCli.test.ts` covers the CLI
+        // wrapper's own control flow (argument parsing, closing the pool). The cascades, lock
+        // ordering, and every "must not purge" rule only a real database can prove live in
+        // `accountPurge.integration.test.ts`, outside this (non-`TEST_DATABASE_URL`) coverage run.
+        'src/accountPurge.ts',
+        'src/accountPurgeCli.ts',
       ],
       thresholds: { lines: 80, functions: 80, branches: 80, statements: 80 },
     },
