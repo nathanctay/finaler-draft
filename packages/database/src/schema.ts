@@ -35,8 +35,33 @@ export const user = pgTable(
     image: text('image'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
+    // Account deletion (progress/account-deletion-backend.md): the `deleted_at` idiom `projects`
+    // and `screenplays` already use, applied to the account itself. Deletion marks this
+    // immediately -- sign-in refused (`packages/auth-server/src/index.ts`'s
+    // `databaseHooks.session.create.before`), existing sessions deleted outright, Stripe
+    // cancelled -- and the row is physically purged later, by a fixed-window cron this slice does
+    // not build (slice C). Nullable, like its two siblings: almost every row never has this set.
+    //
+    // **`user_email_unique` is deliberately left as a plain, non-partial index.** A soft-deleted
+    // account's email stays reserved for the rest of the 30-day grace window (and until the purge
+    // actually removes the row), so the same address cannot sign up again until then. Narrowing
+    // the index to `where deleted_at is null` would not actually fix that: Better Auth's own
+    // sign-up duplicate-email check (`internalAdapter.findUserByEmail`, confirmed by reading the
+    // installed 1.6.25 `api/routes/sign-up.mjs`) has no `deleted_at` awareness at all and would
+    // still find the soft-deleted row by a bare `email = ?` lookup and refuse the signup as
+    // "already exists" -- so relaxing this index alone would just trade one error for a more
+    // confusing one, without the adapter-level change this slice does not make. Recorded as a
+    // known limitation for whichever slice wants to let a grace-period account be reclaimed or
+    // recreated before the purge runs.
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
   },
-  (table) => [uniqueIndex('user_email_unique').on(table.email)],
+  (table) => [
+    uniqueIndex('user_email_unique').on(table.email),
+    // The purge cron (slice C) needs "every account whose grace period has elapsed" -- `where
+    // deleted_at <= now() - interval '30 days'` -- which this index drives directly, the same
+    // role `screenplays_project_id_index` and friends play for their own tables' most common scan.
+    index('user_deleted_at_index').on(table.deletedAt),
+  ],
 );
 
 export const session = pgTable(

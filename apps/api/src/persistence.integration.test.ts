@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import { Pool } from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createAuth } from '@finaler-draft/auth-server';
 import { mintConnectionToken } from '@finaler-draft/collab-token';
+import { createPostgresAccountDeletionStore } from './accountDeletion.js';
 import { buildApp } from './app.js';
 import {
   createIntegrationDatabase,
@@ -77,8 +78,29 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
         // The CSRF tests below exercise a distinct Origin ('https://app.example.test') from
         // BETTER_AUTH_URL's own origin, standing in for a configured CLIENT_ORIGIN.
         trustedOrigins: [...authentication.trustedOrigins, 'https://app.example.test'],
+        // Account deletion's defense-in-depth recheck, wired the identical way server.ts wires
+        // it in production -- this suite's "soft-deleted account" tests below exercise it
+        // against this same real database, not a fake.
+        isAccountDeleted: async (actorId) => {
+          const result = await pool!.query(
+            'select 1 from "user" where id = $1 and deleted_at is not null',
+            [actorId],
+          );
+          return result.rowCount !== null && result.rowCount > 0;
+        },
       },
       projects: store,
+      // Account deletion (progress/account-deletion-backend.md), wired the identical way
+      // server.ts wires it in production -- against this same real database, with Stripe faked
+      // (never called: no test in this file's "account deletion" group seeds a `subscriptions`
+      // row, so `cancelStripeSubscription` never runs). `accountDeletion.integration.test.ts`
+      // covers the Stripe-cancellation paths directly against the store; this is the one place
+      // the real HTTP route, the real store, and a real migrated database all meet at once.
+      accountDeletion: createPostgresAccountDeletionStore(
+        pool,
+        { client: { subscriptions: { retrieve: vi.fn(), cancel: vi.fn() } } as never },
+        { getSubscriptionForUser: async () => undefined },
+      ),
       // This single app instance is reused by every test in this file (over a hundred
       // `.inject()` calls total), a far higher request volume in one window than any real
       // client would ever produce -- not the traffic pattern the global cap defends against.
@@ -1315,6 +1337,118 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     });
     expect(verifiedSignIn.statusCode).toBe(200);
     expect(verifiedSignIn.headers['set-cookie']).toBeDefined();
+  });
+
+  it('refuses to sign in an account once its user row is soft-deleted, through the real databaseHooks.session.create.before gate', async () => {
+    // Proves `packages/auth-server/src/index.ts`'s `refusePendingSessionForDeletedAccount` is
+    // actually wired into this real `betterAuth` instance and actually fires on a real
+    // `/sign-in/email` request -- `index.test.ts` proves the function's own logic against a
+    // mocked `betterAuth`, which cannot prove Better Auth invokes it at the right moment at all.
+    const email = 'deleted-before-signin@example.test';
+    const password = 'correct-horse-battery-staple';
+    await signUp(email); // real sign-up, real email verification, matching every other fixture here
+
+    const activeSignIn = await app!.inject({
+      method: 'POST',
+      url: '/api/auth/sign-in/email',
+      payload: { email, password },
+    });
+    expect(activeSignIn.statusCode).toBe(200);
+
+    // The account's own future deletion flow (`accountDeletion.ts`) sets exactly this column --
+    // set directly here so this test is independent of that module's own correctness, which has
+    // its own dedicated coverage.
+    await pool!.query('update "user" set deleted_at = now() where email = $1', [email]);
+
+    const deletedSignIn = await app!.inject({
+      method: 'POST',
+      url: '/api/auth/sign-in/email',
+      payload: { email, password },
+    });
+    expect(deletedSignIn.statusCode).toBe(403);
+    expect(deletedSignIn.json()).toMatchObject({ code: 'ACCOUNT_DELETED' });
+    expect(deletedSignIn.headers['set-cookie']).toBeUndefined();
+  });
+
+  it('refuses an authenticated request at the choke point once the account is soft-deleted, even while its session row still exists', async () => {
+    // The defense-in-depth half (app.ts's `AuthPort.isAccountDeleted`): a session that already
+    // exists, created before the account was deleted, must stop working on the very next request
+    // -- proven here by deleting the `user` row's own flag but deliberately *not* deleting the
+    // `session` row, isolating this check from the session-deletion mechanism that ordinarily
+    // makes it redundant.
+    const email = 'deleted-after-signin@example.test';
+    const { cookie } = await signUp(email);
+
+    const beforeDeletion = await app!.inject({
+      method: 'GET',
+      url: '/api/projects',
+      headers: { cookie },
+    });
+    expect(beforeDeletion.statusCode).toBe(200);
+
+    await pool!.query('update "user" set deleted_at = now() where email = $1', [email]);
+
+    const afterDeletion = await app!.inject({
+      method: 'GET',
+      url: '/api/projects',
+      headers: { cookie },
+    });
+    expect(afterDeletion.statusCode).toBe(401);
+    expect(afterDeletion.json()).toEqual({ error: 'Authentication required' });
+  });
+
+  it('deletes a solo-owned account end to end through the real route, the real store, and this real database -- and the account cannot sign in again afterward', async () => {
+    // The one place the real HTTP route, `accountDeletion.ts`'s real store, and a real migrated
+    // database all meet at once. `accountDeletion.integration.test.ts` covers the store's own SQL
+    // more exhaustively (collaborator projects, Stripe outcomes, idempotency); this proves the
+    // wiring on top of it is real, start to finish, through a signed-in session.
+    const email = 'delete-end-to-end@example.test';
+    const password = 'correct-horse-battery-staple';
+    const { cookie } = await signUp(email);
+    const created = await app!.inject({
+      method: 'POST',
+      url: '/api/projects',
+      headers: { cookie, origin: 'https://app.example.test' },
+      payload: { title: 'Solo screenplay' },
+    });
+    expect(created.statusCode).toBe(201);
+    const projectId = created.json().id as string;
+
+    const precheck = await app!.inject({
+      method: 'GET',
+      url: '/api/account/owned-projects-with-collaborators',
+      headers: { cookie },
+    });
+    expect(precheck.statusCode).toBe(200);
+    expect(precheck.json()).toEqual({ projects: [] });
+
+    const deletion = await app!.inject({
+      method: 'POST',
+      url: '/api/account/delete',
+      headers: { cookie, origin: 'https://app.example.test' },
+      payload: { deleteOwnedProjectsWithCollaborators: false },
+    });
+    expect(deletion.statusCode).toBe(200);
+    expect(deletion.json()).toEqual({ outcome: 'deleted' });
+
+    const userRow = await pool!.query<{ deletedAt: Date | null }>(
+      'select deleted_at as "deletedAt" from "user" where email = $1',
+      [email],
+    );
+    expect(userRow.rows[0]?.deletedAt).not.toBeNull();
+    const projectRow = await pool!.query<{ deletedAt: Date | null }>(
+      'select deleted_at as "deletedAt" from projects where id = $1',
+      [projectId],
+    );
+    expect(projectRow.rows[0]?.deletedAt).not.toBeNull();
+
+    const signInAgain = await app!.inject({
+      method: 'POST',
+      url: '/api/auth/sign-in/email',
+      payload: { email, password },
+    });
+    expect(signInAgain.statusCode).toBe(403);
+    expect(signInAgain.json()).toMatchObject({ code: 'ACCOUNT_DELETED' });
   });
 });
 

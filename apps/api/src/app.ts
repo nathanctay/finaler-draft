@@ -43,6 +43,7 @@ import {
 } from './projects.js';
 import { createRevisionInput, type RevisionStore } from './revisions.js';
 import { restoreRevisionInput, type RestoreStore } from './restore.js';
+import { type AccountDeletionStore } from './accountDeletion.js';
 import {
   changeRoleInput,
   inviteInput,
@@ -74,6 +75,29 @@ export interface AuthPort {
    * for why the `Host`-based check this replaced was actually broken.
    */
   trustedOrigins: readonly string[];
+  /**
+   * Account deletion's defense-in-depth recheck (progress/account-deletion-backend.md), called
+   * immediately after `getActorId` resolves a non-null id, below. Deleting an account already
+   * deletes every `session` row for it outright, inside the same transaction that sets
+   * `user.deleted_at` -- ordinarily sufficient on its own, since `getActorId` resolves through
+   * that same `session` table and a deleted row simply fails to resolve on the very next request.
+   *
+   * This exists for the one case that leaves: a session created by a sign-in racing the deletion
+   * transaction's own session-delete step (after it runs, before `deleted_at` is set) is not
+   * caught by either half of that transaction, and the sign-in-time refusal
+   * (`packages/auth-server/src/index.ts`'s `databaseHooks.session.create.before`) checks the
+   * identical column at a moment that can itself be mid-race. Both gaps close the instant this
+   * check runs on the very next request through this hook, which is why "defense in depth" here
+   * means a second, independent check of the same fact, not a second *mechanism* -- there being
+   * no cache or session state anywhere in this stack that would otherwise need its own invalidation.
+   *
+   * Optional, matching every other capability on this interface and in `BuildAppOptions`: absent
+   * means this recheck is not performed, not performed-and-denying. `server.ts` always supplies a
+   * real implementation; tests that build a fake `AuthPort` and have no reason to exercise this
+   * path are not forced to add a no-op for it, the same reasoning `StripeWebhookPort.ipAllowlist`
+   * already applies to its own optional check.
+   */
+  isAccountDeleted?(actorId: string): Promise<boolean>;
 }
 
 /**
@@ -226,6 +250,22 @@ export interface BuildAppOptions {
    * whether, the best-effort notification email goes.
    */
   feedback?: FeedbackStore;
+  /**
+   * Account deletion (progress/account-deletion-backend.md). Backs
+   * `GET /api/account/owned-projects-with-collaborators` (the read-only precheck) and
+   * `POST /api/account/delete` (the one entry point, gated by the body's own
+   * `deleteOwnedProjectsWithCollaborators` flag -- see `accountDeletion.ts`'s module comment for
+   * why that flag lives on the request rather than being inferred). Both routes act on
+   * `request.actorId!` alone: there is no second account a caller can name, the identical
+   * `.strict()`-input discipline `checkoutSessionInput`'s own comment explains for the same
+   * reason.
+   *
+   * Absent means neither route is registered, matching every other optional store here. There is
+   * deliberately no UI calling either route yet (slice D, out of this slice's scope) -- the same
+   * shape `feedback.ts`'s own "no caller in the product yet" gap took before its Help-menu entry
+   * point was built.
+   */
+  accountDeletion?: AccountDeletionStore;
 }
 
 const idParam = z.object({ id: z.string().uuid() });
@@ -673,6 +713,24 @@ const revokeInvitationResponseSchema = z.object({ outcome: z.literal('revoked') 
 // both, and the response's only job is confirming the row now exists and saying when.
 const feedbackResponseSchema = z.object({ id: z.string().uuid(), createdAt: z.string() });
 
+// Account deletion. Mirrors `accountDeletion.ts`'s own `OwnedProjectWithCollaborators` and
+// `DeleteAccountOutcome` field for field, the same convention every response schema in this file
+// follows. `'stripe-cancellation-failed'` has no entry here at all -- see the route itself for why
+// that outcome maps to a 502 (`errorResponseSchema`), the identical status every other
+// Stripe-request failure in this file already uses, rather than a third branch of this union.
+const ownedProjectWithCollaboratorsSchema = z.object({ id: z.string().uuid(), title: z.string() });
+const ownedProjectsWithCollaboratorsResponseSchema = z.object({
+  projects: z.array(ownedProjectWithCollaboratorsSchema),
+});
+const deleteAccountInput = z.object({ deleteOwnedProjectsWithCollaborators: z.boolean() }).strict();
+const deleteAccountResponseSchema = z.discriminatedUnion('outcome', [
+  z.object({ outcome: z.literal('deleted') }),
+  z.object({
+    outcome: z.literal('owned-projects-have-collaborators'),
+    projects: z.array(ownedProjectWithCollaboratorsSchema),
+  }),
+]);
+
 /**
  * Pure projection from an `EntitlementSnapshot` to the wire shape `GET /api/entitlement` returns.
  * `cooldownEndsAt` is derived here, not left for a client to compute from `slotUpdatedAt` plus a
@@ -1098,7 +1156,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
       options.revisions ||
       options.restore ||
       options.sharing ||
-      options.feedback)
+      options.feedback ||
+      options.accountDeletion)
   ) {
     // Runs as `preValidation`, not `preHandler`. Fastify's request lifecycle runs
     // preValidation -> schema validation -> preHandler -> the route handler, and before this
@@ -1138,7 +1197,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
         // brief is explicit: the one entry point is the signed-in Help menu), and the row this
         // route writes is attributed to `request.actorId`, never to anything a caller could name
         // in the body.
-        !request.url.startsWith('/api/feedback')
+        !request.url.startsWith('/api/feedback') &&
+        // Account deletion. Carries the same authenticated-actor and same-origin requirements as
+        // every other route here, and both routes act on `request.actorId!` alone -- there is no
+        // second account either one could be asked to name.
+        !request.url.startsWith('/api/account')
       )
         return;
       // Checked ahead of the session lookup: a forged cross-origin request is rejected outright
@@ -1147,6 +1210,16 @@ export async function buildApp(options: BuildAppOptions = {}) {
         return reply.code(403).send({ error: 'Cross-origin request rejected' });
       const actorId = await options.auth!.getActorId(fromNodeHeaders(request.headers));
       if (!actorId) return reply.code(401).send({ error: 'Authentication required' });
+      // Account deletion's defense-in-depth recheck -- see `AuthPort.isAccountDeleted`'s own
+      // comment for why this exists alongside, rather than instead of, the session-delete and
+      // sign-in-refusal mechanisms that make it unreachable in the overwhelmingly common case.
+      // Answered the identical way an absent session already is (a bare 401), never a reason
+      // distinguishable from "not authenticated at all" -- a caller holding a session cookie for
+      // a deleted account learns nothing from this response that a caller with no cookie at all
+      // would not also see.
+      if (options.auth!.isAccountDeleted && (await options.auth!.isAccountDeleted(actorId))) {
+        return reply.code(401).send({ error: 'Authentication required' });
+      }
       request.actorId = actorId;
     });
   }
@@ -1964,6 +2037,51 @@ export async function buildApp(options: BuildAppOptions = {}) {
       },
       async (request, reply) =>
         reply.code(201).send(await feedback.submitFeedback(request.actorId!, request.body)),
+    );
+  }
+  if (options.auth && options.accountDeletion) {
+    const accountDeletion = options.accountDeletion;
+    // The confirmation-screen precheck (slice D's eventual caller): read-only, and takes no
+    // flag, matching `accountDeletion.ts`'s own `findOwnedProjectsWithCollaborators` exactly --
+    // see that function's comment for why a second call from `POST /api/account/delete` below
+    // re-runs this same check rather than trusting whatever this route most recently returned.
+    typedApp.get(
+      '/api/account/owned-projects-with-collaborators',
+      { schema: { response: { 200: ownedProjectsWithCollaboratorsResponseSchema } } },
+      async (request) => ({
+        projects: await accountDeletion.findOwnedProjectsWithCollaborators(request.actorId!),
+      }),
+    );
+    typedApp.post(
+      '/api/account/delete',
+      {
+        schema: {
+          body: deleteAccountInput,
+          response: { 200: deleteAccountResponseSchema, 502: errorResponseSchema },
+        },
+      },
+      async (request, reply) => {
+        const result = await accountDeletion.deleteAccount(request.actorId!, {
+          deleteOwnedProjectsWithCollaborators: request.body.deleteOwnedProjectsWithCollaborators,
+        });
+        // `'stripe-cancellation-failed'` is the one outcome mapped to an HTTP status rather than
+        // a 200 body -- the identical 502 every other Stripe-request failure in this file already
+        // uses (`logStripeRequestFailure`'s own call sites), not a fourth case the response schema
+        // needs to carry. `'deleted'`/`'owned-projects-have-collaborators'` are both 200 bodies:
+        // neither is a failure of the request, the same "successful evaluation of a legitimate
+        // request" framing `transferOwnershipResponseSchema`'s own comment gives `'not-a-member'`/
+        // `'already-owner'`.
+        if (result.outcome === 'stripe-cancellation-failed') {
+          request.log.error(
+            { event: 'account_deletion_stripe_cancellation_failed' },
+            'Could not cancel the Stripe subscription for this account; the account was not deleted',
+          );
+          return reply
+            .code(502)
+            .send({ error: 'Could not cancel the subscription. Try again shortly.' });
+        }
+        return result;
+      },
     );
   }
   if (options.serveClient) {

@@ -1,5 +1,6 @@
 import { findPersistenceEnvironment, parseServerEnvironment } from '@finaler-draft/server-config';
 import { createAuth } from '@finaler-draft/auth-server';
+import { createPostgresAccountDeletionStore } from './accountDeletion.js';
 import { buildApp } from './app.js';
 import { cachedProbe } from './cachedProbe.js';
 import { createEntitlementEnforcedProjectStore } from './entitlementProjectStore.js';
@@ -194,6 +195,18 @@ async function buildPersistentApp(
       handler: auth.handler,
       getActorId: async (headers) => (await auth.api.getSession({ headers }))?.user.id ?? null,
       trustedOrigins,
+      // Account deletion's defense-in-depth recheck (app.ts's `AuthPort.isAccountDeleted`'s own
+      // comment has the full reasoning). A plain existence query against the same `pool`
+      // `createAuth` already returned -- there is no store object for this one-column check to
+      // warrant constructing, the same reasoning `databaseReady`'s inline `pool.query('select 1')`
+      // a few lines below already applies to its own single-purpose probe.
+      isAccountDeleted: async (actorId) => {
+        const result = await pool.query(
+          'select 1 from "user" where id = $1 and deleted_at is not null',
+          [actorId],
+        );
+        return result.rowCount !== null && result.rowCount > 0;
+      },
     },
     // Wrapped, not the bare Postgres store: plan.md requires entitlement to be enforced in the
     // same layer as project/screenplay authorization, on every write, regardless of which routes
@@ -237,6 +250,18 @@ async function buildPersistentApp(
       persistence.FEEDBACK_MAIL_TO
         ? createFeedbackMailNotifier(mail, persistence.FEEDBACK_MAIL_TO)
         : undefined,
+    ),
+    // Account deletion (progress/account-deletion-backend.md). Always wired when persistence
+    // exists -- deleting an account must be possible regardless of whether Stripe happens to be
+    // configured in this environment (a free-tier account has nothing to cancel either way). The
+    // Stripe port itself is `undefined` exactly when `billing`/`stripe` above are, mirroring
+    // their own gate: see `accountDeletion.ts`'s own comment on its `stripe` parameter for the
+    // one case this distinction actually matters (a `subscriptions` row somehow existing despite
+    // no Stripe client being configured now).
+    accountDeletion: createPostgresAccountDeletionStore(
+      pool,
+      stripeConfigured ? { client: stripeClient! } : undefined,
+      subscriptions,
     ),
     collab: collabTokenConfigured ? { secret: persistence.COLLAB_TOKEN_SECRET! } : undefined,
     stripe: stripeConfigured
