@@ -800,6 +800,87 @@ describe.skipIf(!databaseUrl)('Screenplay invitations and membership (PostgreSQL
      *     not a second owner.
      *  5. The final state has exactly one owner (`raceC`) and `raceB` was never touched at all.
      */
+    /*
+     * SEC-11 from the audit, which reproduced this against the real store the day after transfer
+     * merged. SEC-9 had already predicted it as a note: accepting a stale invitation would demote
+     * an owner once transfer existed. Transfer shipped without the guard.
+     *
+     * The end state is not recoverable through the product -- transfer, rename, delete and restore
+     * all require an owner, and `project_single_owner_unique` does not catch it, because a partial
+     * unique index enforces *at most* one owner and never *at least* one.
+     */
+    it('a stale invitation accepted after a transfer does not remove the only owner', async () => {
+      const owner = await createUser();
+      const target = await createUser();
+      const { projectId } = await createProjectWithScreenplays(owner, ['One']);
+      await acceptProjectInvite(owner, projectId, target, 'reviewer');
+
+      // The stale invitation: allowed, because `reviewer` does not cover `editor`.
+      await sharing!.invite(
+        owner,
+        { kind: 'project', projectId },
+        { email: emailOf(target), role: 'editor' },
+      );
+      await sharing!.transferOwnership(owner, projectId, target);
+
+      // Accepting it must not lower the new owner. The invitation is also superseded by the
+      // transfer, so there may be nothing left to accept -- both outcomes are correct, and the
+      // assertion that matters is the role afterwards.
+      /*
+       * The invitation is forced back to `pending` here rather than being read from the inbox.
+       *
+       * This is deliberate and the test is worthless without it. `transferOwnership` now supersedes
+       * the new owner's pending project invitations, so by this point there is normally nothing
+       * left to accept -- the earlier version of this test found no invitation, skipped the accept
+       * entirely, and passed. Confirmed by mutation: it passed with the `role <> 'owner'` guard
+       * removed, which is precisely the defect it exists to catch. The supersede made its sibling
+       * guard untestable through the public API.
+       *
+       * Reinstating the row isolates guard 1. It also matches a state the product can genuinely
+       * reach: an invitation that was already in flight when the transfer committed, or a race
+       * between the two, neither of which the supersede can retroactively cancel.
+       */
+      await pool!.query(
+        `update membership_invitations
+            set status = 'pending'
+          where project_id = $1 and screenplay_id is null and invited_user_id = $2`,
+        [projectId, target],
+      );
+      const incoming = await sharing!.listInvitationsForUser(target);
+      const invitation = incoming.find((row) => row.projectId === projectId);
+      // Non-vacuity: there must really be something to accept, or the assertion below proves
+      // nothing about the guard.
+      expect(invitation).toBeDefined();
+      await sharing!.respondToInvitation(target, invitation!.id, { response: 'accept' });
+
+      expect(await projectMemberRole(projectId, target)).toBe('owner');
+      // ...and the project still has exactly one owner, which is the invariant the index cannot
+      // express. Asserted separately: the role check above would also pass if the previous owner
+      // had somehow kept `owner` too.
+      expect(await projectMemberRole(projectId, owner)).toBe('editor');
+    });
+
+    it('supersedes the new owner’s pending project invitation rather than leaving it actionable', async () => {
+      const owner = await createUser();
+      const target = await createUser();
+      const { projectId } = await createProjectWithScreenplays(owner, ['One']);
+      await acceptProjectInvite(owner, projectId, target, 'reviewer');
+      await sharing!.invite(
+        owner,
+        { kind: 'project', projectId },
+        { email: emailOf(target), role: 'editor' },
+      );
+
+      // Guard against a vacuous assertion below: the invitation really is pending beforehand.
+      const before = await sharing!.listInvitationsForUser(target);
+      expect(before.some((row) => row.projectId === projectId)).toBe(true);
+
+      await sharing!.transferOwnership(owner, projectId, target);
+
+      const after = await sharing!.listInvitationsForUser(target);
+      expect(after.some((row) => row.projectId === projectId)).toBe(false);
+    });
+
     it('does not let two concurrent transfers of the same project produce zero or two owners', async () => {
       const owner = await createUser();
       const { projectId } = await createProjectWithScreenplays(owner, ['One']);

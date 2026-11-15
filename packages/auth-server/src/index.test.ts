@@ -4,10 +4,22 @@ import type { MailPort } from './mail.js';
 const createDatabase = vi.fn();
 const drizzleAdapter = vi.fn();
 const betterAuth = vi.fn();
+// A minimal stand-in for Better Auth's real `APIError`, matching only what
+// `refusePendingSessionForDeletedAccount` calls (`APIError.from(status, { message, code })`) --
+// the production code imports the real class from `better-auth`, which this file mocks wholesale,
+// so the mock has to provide something under the same name or the import resolves to `undefined`
+// and the hook under test would throw `TypeError: Cannot read properties of undefined` instead of
+// the error it is actually supposed to throw. Constructing a real `Error` (not a bare object) is
+// what lets `.rejects.toThrow(...)` assertions below work the normal way.
+const APIError = {
+  from: vi.fn((status: string, error: { message: string; code?: string }) =>
+    Object.assign(new Error(error.message), { status, code: error.code }),
+  ),
+};
 
 vi.mock('@finaler-draft/database', () => ({ createDatabase, schema: { marker: 'schema' } }));
 vi.mock('@better-auth/drizzle-adapter', () => ({ drizzleAdapter }));
-vi.mock('better-auth', () => ({ betterAuth }));
+vi.mock('better-auth', () => ({ betterAuth, APIError }));
 
 const { createAuth } = await import('./index.js');
 
@@ -128,6 +140,57 @@ describe('createAuth', () => {
     createAuth(environment, { mail });
     const options = betterAuth.mock.calls[0]![0];
     expect(options.emailVerification).toMatchObject({ sendOnSignUp: true, sendOnSignIn: false });
+  });
+
+  describe('databaseHooks.session.create.before (account-deletion sign-in gate)', () => {
+    // Overrides the top-level `beforeEach`'s `pool: { marker: 'pool' }` with something that
+    // actually answers `.query` -- the top-level fixture is intentionally opaque (it only needs
+    // to be *passed through* for the other tests in this file), but this hook calls `pool.query`
+    // directly, so these tests need a pool that can be told what to return.
+    function capturedHook(queryResult: { rows: Array<{ deletedAt: string | null }> }) {
+      const query = vi.fn().mockResolvedValue(queryResult);
+      createDatabase.mockReturnValue({ database: { marker: 'database' }, pool: { query } });
+      createAuth(environment, { mail });
+      const options = betterAuth.mock.calls[0]![0];
+      const before = options.databaseHooks.session.create.before as (session: {
+        userId: string;
+      }) => Promise<void>;
+      return { before, query };
+    }
+
+    it('refuses to create a session for a soft-deleted account', async () => {
+      const { before, query } = capturedHook({ rows: [{ deletedAt: '2026-01-01T00:00:00.000Z' }] });
+
+      await expect(before({ userId: 'user-deleted' })).rejects.toThrow(
+        'This account has been deleted.',
+      );
+      expect(APIError.from).toHaveBeenCalledWith('FORBIDDEN', {
+        message: 'This account has been deleted.',
+        code: 'ACCOUNT_DELETED',
+      });
+      expect(query).toHaveBeenCalledWith(
+        'select deleted_at as "deletedAt" from "user" where id = $1',
+        ['user-deleted'],
+      );
+    });
+
+    it('allows a session to be created for an account that has not been deleted', async () => {
+      const { before } = capturedHook({ rows: [{ deletedAt: null }] });
+
+      await expect(before({ userId: 'user-active' })).resolves.toBeUndefined();
+      expect(APIError.from).not.toHaveBeenCalled();
+    });
+
+    it('allows session creation when no matching user row is found', async () => {
+      // Defensive only -- `session.user_id` is a foreign key into `user`, so a session row with
+      // no corresponding user should not exist in practice. Refusing here on a genuinely
+      // unmatched id would be the wrong failure mode (nothing to protect; `user_id`'s own foreign
+      // key is what guards that), so an empty result is treated the same as "not deleted."
+      const { before } = capturedHook({ rows: [] });
+
+      await expect(before({ userId: 'user-unknown' })).resolves.toBeUndefined();
+      expect(APIError.from).not.toHaveBeenCalled();
+    });
   });
 
   describe('sendResetPassword', () => {

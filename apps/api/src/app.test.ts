@@ -376,6 +376,73 @@ describe('persisted project API', () => {
       await app.close();
     }
   });
+  describe('AuthPort.isAccountDeleted (account deletion defense in depth)', () => {
+    // A separate `auth` object, not the shared one above: the shared fixture's `getActorId`
+    // always resolves `actor-1` for one fixed cookie, and these tests need to vary
+    // `isAccountDeleted`'s own answer independently of that, while keeping `getActorId` itself
+    // unchanged -- proving this is specifically the second check's own behaviour, not a quirk of
+    // actor resolution.
+    function appWith(isAccountDeleted: (actorId: string) => Promise<boolean>) {
+      return buildApp({
+        auth: {
+          baseUrl: 'https://app.example.test',
+          handler: async () => new Response('auth'),
+          getActorId: async (headers: Headers) =>
+            headers.get('cookie') === 'session=test' ? 'actor-1' : null,
+          trustedOrigins: ['https://app.example.test'],
+          isAccountDeleted,
+        },
+        projects: store,
+      });
+    }
+
+    it('refuses an authenticated request, with the same 401 an absent session gets, once the account is reported deleted', async () => {
+      const deletedApp = await appWith(async () => true);
+      try {
+        const response = await deletedApp.inject({
+          method: 'GET',
+          url: '/api/projects',
+          headers: { cookie: 'session=test' },
+        });
+        expect(response.statusCode).toBe(401);
+        expect(response.json()).toEqual({ error: 'Authentication required' });
+      } finally {
+        await deletedApp.close();
+      }
+    });
+
+    it('still allows the same request through when the account is reported not deleted', async () => {
+      // Proves the "allowed" case independently of the refusal above -- without this, a guard
+      // that always returned 401 regardless of `isAccountDeleted`'s answer would make the test
+      // above pass for the wrong reason.
+      const activeApp = await appWith(async () => false);
+      try {
+        const response = await activeApp.inject({
+          method: 'GET',
+          url: '/api/projects',
+          headers: { cookie: 'session=test' },
+        });
+        expect(response.statusCode).toBe(200);
+      } finally {
+        await activeApp.close();
+      }
+    });
+
+    it('allows the request through when the capability is absent, matching the "absent means not performed" contract', async () => {
+      const appWithoutCheck = await buildApp({ auth, projects: store });
+      try {
+        const response = await appWithoutCheck.inject({
+          method: 'GET',
+          url: '/api/projects',
+          headers: { cookie: 'session=test' },
+        });
+        expect(response.statusCode).toBe(200);
+      } finally {
+        await appWithoutCheck.close();
+      }
+    });
+  });
+
   it('rejects an unauthenticated request for authentication, not schema validation, even when its id is malformed', async () => {
     // Fastify's lifecycle runs preValidation -> schema validation -> preHandler -> the route
     // handler. Before this refactor, every id/body check was a manual `.parse()` call inside the

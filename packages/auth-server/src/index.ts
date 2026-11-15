@@ -1,5 +1,5 @@
 import { drizzleAdapter } from '@better-auth/drizzle-adapter';
-import { betterAuth } from 'better-auth';
+import { APIError, betterAuth } from 'better-auth';
 import { PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH } from '@finaler-draft/config';
 import { createDatabase, schema } from '@finaler-draft/database';
 import type { MailMessage, MailPort } from './mail.js';
@@ -67,6 +67,81 @@ function sendOrLogFailure(mail: MailPort, event: string, message: MailMessage): 
     );
     throw error;
   });
+}
+
+/**
+ * The account-deletion sign-in gate (progress/account-deletion-backend.md). Soft-deleting an
+ * account (`user.deleted_at`, `apps/api/src/accountDeletion.ts`) deletes every `session` row for
+ * it outright -- immediate and sufficient for every session that already exists -- but sign-in
+ * is a *new* session, which that deletion cannot have touched. Something has to refuse it, and
+ * this is the mechanism: `databaseHooks.session.create.before` runs for every session this
+ * process ever creates, by any method (password, social, magic link, impersonation -- confirmed
+ * by reading the installed 1.6.25 `db/with-hooks.mjs`, which calls it from
+ * `internalAdapter.createSession`, the one chokepoint every one of those routes shares), and
+ * throwing from it refuses the session before it is written.
+ *
+ * **Why this hook and not a check bolted onto `/sign-in/email` the way `requireEmailVerification`
+ * reads.** `requireEmailVerification` above is itself *built into* Better Auth's own
+ * `signInEmail` route (confirmed in the installed `api/routes/sign-in.mjs`) -- there is no
+ * equivalent built-in option for "this account was deleted," so this needed a seam of its own,
+ * not a second flag next to that one. A check written into this file's own override of just the
+ * email/password route would leave every other route that can mint a session (social sign-in
+ * today; anything a later plugin adds) unguarded, each needing the identical check copied in
+ * again. `databaseHooks.session.create.before` is Better Auth's own answer to exactly this
+ * problem -- it is the identical mechanism the shipped `admin` plugin uses for its own "banned
+ * account" rule (`plugins/admin/admin.mjs`: `databaseHooks.session.create.before` checks
+ * `user.banned` and throws `APIError.from('FORBIDDEN', ...)`), which is the "precedent" this
+ * function follows in spirit rather than literally duplicating `requireEmailVerification`'s
+ * route-specific shape.
+ *
+ * **What this does and does not reveal.** This throws only *after* Better Auth's own password
+ * verification has already succeeded (`databaseHooks` run from inside `createSession`, which
+ * `signInEmail` only reaches once the submitted password matched) -- so a `FORBIDDEN` response
+ * here, like `EMAIL_NOT_VERIFIED` immediately above, confirms the credential pair was correct and
+ * is distinguishable from `INVALID_EMAIL_OR_PASSWORD`. That is not a new information leak this
+ * function introduces: it is the identical disclosure `requireEmailVerification` already makes
+ * for an unverified account, on the same reasoning plan.md already accepted for that case --
+ * stated here plainly rather than left for a reader to notice on their own.
+ *
+ * **Why a raw query against `pool` rather than `database`'s Drizzle adapter.** Better Auth's own
+ * `internalAdapter.findUserById` resolves fields through the adapter's configured schema
+ * (`drizzleAdapter(database, { provider: 'pg', schema })` above), which only knows about the
+ * fields Better Auth itself was told to manage -- `deletedAt` is not one of them, and declaring it
+ * as a Better Auth `additionalFields` entry just to make one internal lookup see it would expose
+ * it on every user-shaped API response this library serializes, which is not wanted. A plain
+ * parameterized query against the same `pool` `createAuth` already holds is the one place in this
+ * file that already reaches around the adapter for exactly this reason (see `sendOrLogFailure`'s
+ * neighbors needing nothing from the adapter either), and it is the identical query shape
+ * `apps/api/src/accountDeletion.ts` and `app.ts`'s own defense-in-depth check use against this
+ * same column.
+ */
+// A structural stand-in for the one `pg.Pool` method this function calls, not an import of `pg`
+// itself: `pg`'s types are only reachable here transitively, through `@finaler-draft/database`'s
+// own resolution of its direct dependency, and `@finaler-draft/auth-server`'s `package.json` does
+// not list `pg` as one of its own. Naming the real type directly (`import('pg').Pool`) fails to
+// resolve from this package's own `node_modules` for exactly that reason; this narrow structural
+// type needs nothing from the real package and sidesteps the question entirely.
+interface QueryablePool {
+  query<Row extends Record<string, unknown>>(
+    text: string,
+    values: unknown[],
+  ): Promise<{ rows: Row[] }>;
+}
+
+async function refusePendingSessionForDeletedAccount(
+  pool: QueryablePool,
+  userId: string,
+): Promise<void> {
+  const result = await pool.query<{ deletedAt: Date | null }>(
+    'select deleted_at as "deletedAt" from "user" where id = $1',
+    [userId],
+  );
+  if (result.rows[0]?.deletedAt) {
+    throw APIError.from('FORBIDDEN', {
+      message: 'This account has been deleted.',
+      code: 'ACCOUNT_DELETED',
+    });
+  }
 }
 
 export function createAuth(environment: AuthEnvironment, dependencies: CreateAuthOptions) {
@@ -187,6 +262,17 @@ export function createAuth(environment: AuthEnvironment, dependencies: CreateAut
       // comparison -- so it was never a way to post mail to an address you did not control.
       // Turning it off is about not surprising the account's real owner, not about abuse.
       sendOnSignIn: false,
+    },
+    // Account deletion's sign-in refusal -- see `refusePendingSessionForDeletedAccount`'s own
+    // comment for the full reasoning (the mechanism, why it is here rather than on one route, and
+    // what it does and does not reveal). `pool` is the same connection pool `createAuth` already
+    // holds, destructured above.
+    databaseHooks: {
+      session: {
+        create: {
+          before: async (session) => refusePendingSessionForDeletedAccount(pool, session.userId),
+        },
+      },
     },
   });
 
