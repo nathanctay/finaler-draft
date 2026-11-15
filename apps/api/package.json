@@ -6,11 +6,13 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
+    "purge:accounts": "node dist/accountPurgeCli.js",
+    "purge:accounts:dry-run": "node dist/accountPurgeCli.js --dry-run",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:integration": "node scripts/require-test-database.mjs && vitest run src/persistence.integration.test.ts src/stripeSubscriptions.integration.test.ts src/entitlements.integration.test.ts src/revisions.integration.test.ts src/restore.integration.test.ts src/sharing.integration.test.ts src/projectsAuthorization.integration.test.ts src/feedback.integration.test.ts src/accountDeletion.integration.test.ts",
+    "test:integration": "node scripts/require-test-database.mjs && vitest run src/persistence.integration.test.ts src/stripeSubscriptions.integration.test.ts src/entitlements.integration.test.ts src/revisions.integration.test.ts src/restore.integration.test.ts src/sharing.integration.test.ts src/projectsAuthorization.integration.test.ts src/feedback.integration.test.ts src/accountDeletion.integration.test.ts src/accountPurge.integration.test.ts src/accountPurgeCli.integration.test.ts",
     "db:migrate": "pnpm --filter @finaler-draft/database db:migrate"
   },
   "dependencies": {
