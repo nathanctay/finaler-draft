@@ -368,6 +368,15 @@ const authErrorMessages = {
   // (also auth.ts) means this same rejected attempt already triggered a fresh verification email,
   // so the message can honestly tell the visitor to look for one.
   EMAIL_NOT_VERIFIED: 'Verify your email before signing in.',
+  // Reachable from `signIn` once an account has requested deletion:
+  // `packages/auth-server/src/index.ts` refuses session creation while `user.deleted_at` is set,
+  // and answers with this code. Without an entry here the attempt fell through to
+  // `GENERIC_AUTH_ERROR_MESSAGE` -- "check your details and try again" -- which is actively
+  // misleading, because the details are correct and retrying cannot work. During the 30-day grace
+  // window this is the single most likely reason a real person is refused sign-in, and saying so
+  // is what lets them realise either that they deleted the account, or that somebody holding their
+  // password did. The wording matches the server's own message for the same code.
+  ACCOUNT_DELETED: 'This account has been deleted.',
 } as const;
 
 export type AuthValidationErrorCode = keyof typeof authErrorMessages;
@@ -520,6 +529,25 @@ export interface FeedbackContext {
 // that silently stopped matching the server's own shape would fail loudly rather than being
 // handed to a caller as untyped `unknown`.
 const feedbackResponseSchema = z.object({ id: z.string().uuid(), createdAt: z.string() });
+
+// Account deletion (slice D), routes/account.delete.tsx's one surface. Mirrors
+// `apps/api/src/app.ts`'s own `ownedProjectWithCollaboratorsSchema`/`deleteAccountResponseSchema`
+// field for field -- `'stripe-cancellation-failed'` has no entry in `deleteAccountResultSchema`
+// below, for the identical reason the server-side comment gives: it is a 502 `{error}` body, not a
+// third branch of this union, and `api.deleteAccount` reads it through `jsonWithServerMessage`
+// below exactly like every other mutation here that needs the server's own sentence rather than a
+// bare status code.
+const ownedProjectWithCollaboratorsSchema = z.object({ id: z.string().uuid(), title: z.string() });
+const ownedProjectsWithCollaboratorsResponseSchema = z.object({
+  projects: z.array(ownedProjectWithCollaboratorsSchema),
+});
+const deleteAccountResultSchema = z.discriminatedUnion('outcome', [
+  z.object({ outcome: z.literal('deleted') }),
+  z.object({
+    outcome: z.literal('owned-projects-have-collaborators'),
+    projects: z.array(ownedProjectWithCollaboratorsSchema),
+  }),
+]);
 
 export const api = {
   session,
@@ -768,6 +796,29 @@ export const api = {
       body: JSON.stringify({ body, context }),
       method: 'POST',
     }),
+  // routes/account.delete.tsx's precheck -- read-only, called unconditionally on that page's own
+  // mount so a writer who owns a shared project sees it before deciding anything, matching
+  // `accountDeletion.ts`'s own "a confirmation screen calls this before the caller has decided
+  // anything" comment. `deleteAccount` below re-runs the identical check server-side regardless of
+  // what this call most recently returned (the backend's own documented membership race), so this
+  // is a UX convenience that primes the page, never the source of truth for whether a deletion
+  // attempt will actually be refused.
+  ownedProjectsWithCollaborators: () =>
+    json(
+      '/api/account/owned-projects-with-collaborators',
+      ownedProjectsWithCollaboratorsResponseSchema,
+    ),
+  // `jsonWithServerMessage`, not the plain `json` helper: the one failure mode here (502, the
+  // subscription could not be cancelled at Stripe) carries the server's own exact sentence --
+  // "Could not cancel the subscription. Try again shortly." -- which routes/account.delete.tsx
+  // shows verbatim rather than a bare "Request failed (502)", and which is safe to retry on:
+  // `accountDeletion.ts`'s own comment on the Stripe-first ordering is explicit that nothing is
+  // written to this account when this happens.
+  deleteAccount: (deleteOwnedProjectsWithCollaborators: boolean) =>
+    jsonWithServerMessage('/api/account/delete', deleteAccountResultSchema, {
+      body: JSON.stringify({ deleteOwnedProjectsWithCollaborators }),
+      method: 'POST',
+    }),
 };
 
 /**
@@ -845,3 +896,5 @@ export type InviteResult = z.infer<typeof inviteResultSchema>;
 export type TransferOwnershipResult = z.infer<typeof transferOwnershipResultSchema>;
 export type IncomingInvitation = z.infer<typeof incomingInvitationSchema>;
 export type SharedScreenplay = z.infer<typeof sharedScreenplaySchema>;
+export type OwnedProjectWithCollaborators = z.infer<typeof ownedProjectWithCollaboratorsSchema>;
+export type DeleteAccountResult = z.infer<typeof deleteAccountResultSchema>;

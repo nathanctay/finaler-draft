@@ -91,4 +91,12 @@ describe('account menu', () => {
     await user.click(screen.getByRole('menuitem', { name: 'Manage Subscription' }));
     expect(routeState.navigate).toHaveBeenCalledWith({ to: '/billing/subscription' });
   });
+
+  it('reaches the account-deletion page from the account menu', async () => {
+    const user = userEvent.setup();
+    render(<AccountMenu />);
+    await user.click(screen.getByRole('button', { name: 'Account menu' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Delete account' }));
+    expect(routeState.navigate).toHaveBeenCalledWith({ to: '/account/delete' });
+  });
 });

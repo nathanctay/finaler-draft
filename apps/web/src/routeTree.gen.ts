@@ -20,6 +20,7 @@ import { Route as ProjectsProjectIdRouteImport } from './routes/projects/$projec
 import { Route as BillingSuccessRouteImport } from './routes/billing.success'
 import { Route as BillingSubscriptionRouteImport } from './routes/billing.subscription'
 import { Route as BillingCanceledRouteImport } from './routes/billing.canceled'
+import { Route as AccountDeleteRouteImport } from './routes/account.delete'
 import { Route as ProjectsProjectIdIndexRouteImport } from './routes/projects/$projectId/index'
 import { Route as ProjectsProjectIdScreenplaysScreenplayIdIndexRouteImport } from './routes/projects/$projectId.screenplays.$screenplayId/index'
 import { Route as ProjectsProjectIdScreenplaysScreenplayIdRevisionsIndexRouteImport } from './routes/projects/$projectId.screenplays.$screenplayId.revisions/index'
@@ -81,6 +82,11 @@ const BillingCanceledRoute = BillingCanceledRouteImport.update({
   path: '/billing/canceled',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AccountDeleteRoute = AccountDeleteRouteImport.update({
+  id: '/account/delete',
+  path: '/account/delete',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ProjectsProjectIdIndexRoute = ProjectsProjectIdIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -122,6 +128,7 @@ export interface FileRoutesByFullPath {
   '/reset-password': typeof ResetPasswordRoute
   '/sign-in': typeof SignInRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/account/delete': typeof AccountDeleteRoute
   '/billing/canceled': typeof BillingCanceledRoute
   '/billing/subscription': typeof BillingSubscriptionRoute
   '/billing/success': typeof BillingSuccessRoute
@@ -140,6 +147,7 @@ export interface FileRoutesByTo {
   '/reset-password': typeof ResetPasswordRoute
   '/sign-in': typeof SignInRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/account/delete': typeof AccountDeleteRoute
   '/billing/canceled': typeof BillingCanceledRoute
   '/billing/subscription': typeof BillingSubscriptionRoute
   '/billing/success': typeof BillingSuccessRoute
@@ -158,6 +166,7 @@ export interface FileRoutesById {
   '/reset-password': typeof ResetPasswordRoute
   '/sign-in': typeof SignInRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/account/delete': typeof AccountDeleteRoute
   '/billing/canceled': typeof BillingCanceledRoute
   '/billing/subscription': typeof BillingSubscriptionRoute
   '/billing/success': typeof BillingSuccessRoute
@@ -178,6 +187,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/sign-in'
     | '/verify-email'
+    | '/account/delete'
     | '/billing/canceled'
     | '/billing/subscription'
     | '/billing/success'
@@ -196,6 +206,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/sign-in'
     | '/verify-email'
+    | '/account/delete'
     | '/billing/canceled'
     | '/billing/subscription'
     | '/billing/success'
@@ -213,6 +224,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/sign-in'
     | '/verify-email'
+    | '/account/delete'
     | '/billing/canceled'
     | '/billing/subscription'
     | '/billing/success'
@@ -232,6 +244,7 @@ export interface RootRouteChildren {
   ResetPasswordRoute: typeof ResetPasswordRoute
   SignInRoute: typeof SignInRoute
   VerifyEmailRoute: typeof VerifyEmailRoute
+  AccountDeleteRoute: typeof AccountDeleteRoute
   BillingCanceledRoute: typeof BillingCanceledRoute
   BillingSubscriptionRoute: typeof BillingSubscriptionRoute
   BillingSuccessRoute: typeof BillingSuccessRoute
@@ -318,6 +331,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof BillingCanceledRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/account/delete': {
+      id: '/account/delete'
+      path: '/account/delete'
+      fullPath: '/account/delete'
+      preLoaderRoute: typeof AccountDeleteRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/projects/$projectId/': {
       id: '/projects/$projectId/'
       path: '/'
@@ -386,6 +406,7 @@ const rootRouteChildren: RootRouteChildren = {
   ResetPasswordRoute: ResetPasswordRoute,
   SignInRoute: SignInRoute,
   VerifyEmailRoute: VerifyEmailRoute,
+  AccountDeleteRoute: AccountDeleteRoute,
   BillingCanceledRoute: BillingCanceledRoute,
   BillingSubscriptionRoute: BillingSubscriptionRoute,
   BillingSuccessRoute: BillingSuccessRoute,

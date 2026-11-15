@@ -5,9 +5,10 @@ import { api } from './api.js';
 import { OverflowMenu } from './components/OverflowMenu.js';
 
 /**
- * The account menu: `Manage Subscription`, `Deleted items`, `Sign out` -- one definition, rendered
- * identically on every screen that wears the shared app bar (`applicationShell.tsx`'s
- * `ApplicationTitlebar`). It used to be three hand-written copies (the writing desk's own menu, and
+ * The account menu: `Manage Subscription`, `Deleted items`, `Delete account`, `Sign out` -- one
+ * definition, rendered identically on every screen that wears the shared app bar
+ * (`applicationShell.tsx`'s `ApplicationTitlebar`). It used to be three hand-written copies (the
+ * writing desk's own menu, and
  * the dead `<span className="account-button">` the project screen, the Deleted screen, the editor
  * and the revision-diff view each carried instead of a working one) -- see
  * `progress/app-bar-navigation.md`'s "the account-menu seam" for why a fourth or fifth copy was
@@ -18,7 +19,7 @@ import { OverflowMenu } from './components/OverflowMenu.js';
  * editor (`App.tsx`) and by the read-only revision-diff route, and `App.tsx`'s own standalone test
  * suite (1057 tests, 67 render sites) provides neither router nor query-client context -- the exact
  * reason the brand there is a plain `<a href>` rather than a router `Link` (see that module's own
- * comment). This component needs both: `useNavigate` for three destinations and `useMutation` for
+ * comment). This component needs both: `useNavigate` for four destinations and `useMutation` for
  * the sign-out request, which is a write with a pending state and a failure to report, not
  * something a plain callback prop can carry on its own. Giving the bar that dependency, even only
  * to satisfy this one control, would mean mocking both providers at every one of those 67 render
@@ -66,6 +67,11 @@ export function AccountMenu() {
             onSelect: () => void navigate({ to: '/billing/subscription' }),
           },
           { label: 'Deleted items', onSelect: () => void navigate({ to: '/deleted' }) },
+          // routes/account.delete.tsx. Plain navigation, like the two items above, rather than a
+          // dialog opened straight from this menu: the page itself runs a precheck and owns two
+          // separate confirmations (plain and collaborator-aware), which is more than an
+          // `onSelect` handler here should try to hold.
+          { label: 'Delete account', onSelect: () => void navigate({ to: '/account/delete' }) },
           {
             label: 'Sign out',
             onSelect: () => {
