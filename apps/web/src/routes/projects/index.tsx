@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from 'react';
+import { lazy, Suspense, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createFileRoute, Link, redirect } from '@tanstack/react-router';
 import { AccountMenu } from '../../accountMenu.js';
@@ -7,6 +7,8 @@ import { ApplicationTitlebar } from '../../applicationShell.js';
 import { guardSessionUser } from '../../session.js';
 import { DeletedRow } from '../../components/DeletedRow.js';
 import { OverflowMenu } from '../../components/OverflowMenu.js';
+import { titleFieldSchema } from '../../formFieldSchemas.js';
+import { useFormValidation } from '../../useFormValidation.js';
 
 // Lazy for the same reason the upgrade dialog is on the project page: the sharing dialog is only
 // needed once a writer actually opens it, not on every visit to the dashboard, so it stays out of
@@ -220,6 +222,15 @@ function SharedScreenplayRow({ screenplay }: { screenplay: SharedScreenplay }) {
 function ProjectsPage() {
   const queryClient = useQueryClient();
   const [title, setTitle] = useState('');
+  // The owner's own reported defect: typing nothing and submitting used to surface only the
+  // browser's own default validation bubble ("please fill out this field"). `titleFieldSchema`
+  // is the identical rule `createProjectInput`'s server-side `projectTitle` enforces
+  // (`apps/api/src/projects.ts`), read from the shared `@finaler-draft/config` constant that
+  // schema uses -- see `formFieldSchemas.ts`'s own top comment.
+  const { fields: createFields, validateOnSubmit: validateCreate } = useFormValidation(
+    { title: titleFieldSchema },
+    { title },
+  );
   // id -> title captured at the moment of deletion. Deliberately not cleared by invalidating
   // the `['projects']` query on delete -- see the module comment on DeletedRow and the scope's
   // "what happens when the affordance goes away" requirement. It persists until Undo succeeds
@@ -344,8 +355,10 @@ function ProjectsPage() {
         )}
         <form
           className="create-row"
-          onSubmit={(event) => {
+          noValidate
+          onSubmit={(event: FormEvent<HTMLFormElement>) => {
             event.preventDefault();
+            if (!validateCreate()) return;
             create.mutate();
           }}
         >
@@ -355,10 +368,14 @@ function ProjectsPage() {
             required
             value={title}
             onChange={(event) => setTitle(event.target.value)}
+            {...createFields.title.inputProps}
           />
           <button className="primary-button" disabled={create.isPending} type="submit">
             New project
           </button>
+          {createFields.title.showError && (
+            <p {...createFields.title.errorProps}>{createFields.title.error}</p>
+          )}
         </form>
         {projects.isLoading ? (
           <p>Loading projects…</p>

@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { RESOURCE_TITLE_MAX_LENGTH } from '@finaler-draft/config';
 import type { SessionUser } from '../../api.js';
 import {
   entitlementSnapshot,
@@ -131,6 +132,60 @@ describe('projects page', () => {
     // control for an action the viewer cannot perform is withheld.
     expect(screen.getByText('Edited elsewhere')).toBeVisible();
     expect(screen.getByText('Reviewed elsewhere')).toBeVisible();
+  });
+
+  describe('the New project title field', () => {
+    beforeEach(() => {
+      routeState.query = {
+        data: [{ id: projectId, role: 'owner', title: 'Feature' }],
+        isError: false,
+        isLoading: false,
+      };
+    });
+
+    it('carries noValidate, so the browser never renders its own "please fill out this field" bubble', () => {
+      render(<ProjectsPage />);
+      expect(screen.getByLabelText('New project title').closest('form')).toHaveAttribute(
+        'novalidate',
+      );
+    });
+
+    /**
+     * The owner's own report: submitting a blank title used to produce only the browser's default
+     * validation bubble. This proves the real refusal path -- a submit dispatched directly on the
+     * form, bypassing any click on the New project button, is what `fireEvent.submit` lets through
+     * that a click would not need to -- names the problem, in red, beneath the field, and never
+     * reaches the server at all.
+     */
+    it('refuses a blank title and shows "Enter a title." instead of creating anything', () => {
+      render(<ProjectsPage />);
+      fireEvent.submit(screen.getByLabelText('New project title').closest('form')!);
+
+      expect(screen.getByRole('alert')).toHaveTextContent('Enter a title.');
+      expect(fetchMock).not.toHaveBeenCalledWith(
+        '/api/projects',
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+
+    it('clears the message and focuses the field on a blank submit, since it is the only field', async () => {
+      render(<ProjectsPage />);
+      const input = screen.getByLabelText('New project title');
+      fireEvent.submit(input.closest('form')!);
+      expect(input).toHaveFocus();
+      expect(input).toHaveAttribute('aria-invalid', 'true');
+    });
+
+    it('rejects a title whose trimmed length exceeds RESOURCE_TITLE_MAX_LENGTH', () => {
+      render(<ProjectsPage />);
+      const input = screen.getByLabelText('New project title');
+      fireEvent.change(input, { target: { value: 'x'.repeat(RESOURCE_TITLE_MAX_LENGTH + 1) } });
+      fireEvent.submit(input.closest('form')!);
+
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        `Titles can be at most ${RESOURCE_TITLE_MAX_LENGTH} characters.`,
+      );
+    });
   });
 
   describe('the lapse-chooser banner', () => {

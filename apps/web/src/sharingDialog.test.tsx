@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -482,6 +482,70 @@ describe('the sharing dialog', () => {
     expect(screen.getByRole('button', { name: 'Invite' })).toBeDisabled();
     await user.type(screen.getByLabelText('Invite by email address'), '   ');
     expect(screen.getByRole('button', { name: 'Invite' })).toBeDisabled();
+  });
+
+  it('carries noValidate on the invite row, so the browser never renders its own validation bubble', () => {
+    setSharingData({ members: [], invitations: [] });
+    render(
+      <SharingDialog
+        onClose={vi.fn()}
+        scope={{ kind: 'project', projectId }}
+        title="Night Shoot"
+      />,
+    );
+    expect(screen.getByLabelText('Invite by email address').closest('form')).toHaveAttribute(
+      'novalidate',
+    );
+  });
+
+  it('refuses a malformed email, disabling Invite and showing the message once edited and blurred', async () => {
+    const user = userEvent.setup();
+    setSharingData({ members: [], invitations: [] });
+    render(
+      <SharingDialog
+        onClose={vi.fn()}
+        scope={{ kind: 'project', projectId }}
+        title="Night Shoot"
+      />,
+    );
+    const input = screen.getByLabelText('Invite by email address');
+    await user.type(input, 'not-an-email');
+    expect(screen.getByRole('button', { name: 'Invite' })).toBeDisabled();
+
+    await user.tab();
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a valid email address.');
+  });
+
+  it('refuses a submit dispatched directly on the invite form, bypassing the disabled Invite button, while the address is blank', () => {
+    // See the identical test in renameDialog.test.tsx for why this specific bypass matters here:
+    // the disabled Invite button already keeps a click from reaching the handler while the
+    // address is invalid, so only a submit dispatched directly on the form proves
+    // `validateOnSubmit()` itself -- not merely the disabled attribute -- is what keeps
+    // `invite.mutate()` from being called.
+    setSharingData({ members: [], invitations: [] });
+    render(
+      <SharingDialog
+        onClose={vi.fn()}
+        scope={{ kind: 'project', projectId }}
+        title="Night Shoot"
+      />,
+    );
+    fireEvent.submit(screen.getByLabelText('Invite by email address').closest('form')!);
+
+    // Not "never called at all" -- mounting this dialog always issues the GET that loads the
+    // member list (`api.sharing`), so `fetchMock` legitimately has at least one call before this
+    // assertion runs. What must never happen is the invite's own POST, which is the one call this
+    // guard exists to prevent. `stringContaining('/invite')` was tried first and is wrong: the
+    // real endpoint is `/invitations` (`api.ts`'s `invitationsPath`), and "/invite" is not a
+    // substring of "/invitations" (they diverge at "invit-e" vs "invit-a"-tions) -- so that
+    // assertion passed regardless of whether the POST happened, which a mutation that deleted
+    // this guard's `validateOnSubmit()` call proved by not failing it. Matching on `method:
+    // 'POST'` instead is what actually distinguishes the invite write from the list's own GET.
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter an email address.');
   });
 
   it('reports a failed sharing fetch rather than rendering an empty member list', () => {

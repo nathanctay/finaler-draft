@@ -145,11 +145,51 @@ describe('FeedbackDialog', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('never submits a blank message even via a direct form submit', () => {
+  it('never submits a blank message even via a direct form submit, and shows why', () => {
+    // `fireEvent.submit` bypasses the disabled Send button entirely, so this is the proof that
+    // `handleSubmit`'s own `validateOnSubmit()` guard -- not merely the disabled attribute -- is
+    // what stops `onSubmit`. Without it, nothing in this file would catch a mutation that deleted
+    // that guard: every other test reaches `handleSubmit` only through a click or Enter the
+    // disabled button already blocks.
     const onSubmit = vi.fn();
     render(<FeedbackDialog onClose={vi.fn()} onSubmit={onSubmit} />);
     fireEvent.submit(screen.getByRole('dialog').querySelector('form')!);
     expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a message.');
+  });
+
+  it('carries noValidate, so the browser never renders its own validation bubble', () => {
+    render(<FeedbackDialog onClose={vi.fn()} onSubmit={vi.fn()} />);
+    expect(screen.getByRole('dialog').querySelector('form')).toHaveAttribute('novalidate');
+  });
+
+  it('wires aria-invalid/aria-describedby to the message once a typed message is cleared and blurred', async () => {
+    const user = userEvent.setup();
+    render(<FeedbackDialog onClose={vi.fn()} onSubmit={vi.fn()} />);
+    const textarea = screen.getByRole('textbox', { name: 'Feedback message' });
+    expect(textarea).toHaveAttribute('aria-invalid', 'false');
+
+    // An edit must precede blur for the message to reveal -- see useFormValidation.ts's "Blur
+    // alone is not enough." A bare focus-and-tab-away never changes the value.
+    await user.type(textarea, 'A problem.');
+    await user.clear(textarea);
+    await user.tab();
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('Enter a message.');
+    expect(textarea).toHaveAttribute('aria-invalid', 'true');
+    expect(textarea).toHaveAttribute('aria-describedby', alert.id);
+  });
+
+  it('shows the over-the-cap message once blurred, distinct from the blank message', () => {
+    render(<FeedbackDialog onClose={vi.fn()} onSubmit={vi.fn()} />);
+    const textarea = screen.getByRole('textbox', { name: 'Feedback message' });
+    fireEvent.change(textarea, { target: { value: 'x'.repeat(FEEDBACK_BODY_MAX_LENGTH + 1) } });
+    fireEvent.blur(textarea);
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      `Messages can be at most ${FEEDBACK_BODY_MAX_LENGTH} characters.`,
+    );
   });
 
   it('wraps Tab from the last focusable control back to the first, keeping focus inside the dialog', async () => {

@@ -8,6 +8,8 @@ import {
   type SharingMember,
   type SharingScope,
 } from './api.js';
+import { emailFieldSchema } from './formFieldSchemas.js';
+import { useFormValidation } from './useFormValidation.js';
 
 /**
  * The screenplay-invitations slice's inviter-side interface: who has access, who has been invited
@@ -54,6 +56,7 @@ export function SharingDialog({
   // legitimate request, and each needs its own sentence rather than a shared failure banner.
   const [notice, setNotice] = useState<string>();
   const [actionError, setActionError] = useState<string>();
+  const { fields, validateOnSubmit } = useFormValidation({ email: emailFieldSchema }, { email });
 
   // Keyed on the scope so a dialog opened for a project and one opened for a screenplay never share
   // a cache entry. Stringified rather than spread into the key array because the shape differs
@@ -244,9 +247,10 @@ export function SharingDialog({
 
         <form
           className="sharing-invite-row"
+          noValidate
           onSubmit={(event: FormEvent<HTMLFormElement>) => {
             event.preventDefault();
-            if (email.trim().length === 0 || busy) return;
+            if (!validateOnSubmit() || busy) return;
             invite.mutate();
           }}
         >
@@ -260,7 +264,9 @@ export function SharingDialog({
               onChange={(event) => setEmail(event.target.value)}
               type="email"
               value={email}
+              {...fields.email.inputProps}
             />
+            {fields.email.showError && <p {...fields.email.errorProps}>{fields.email.error}</p>}
           </label>
           <label className="dialog-field">
             <span>Role</span>
@@ -276,7 +282,7 @@ export function SharingDialog({
           </label>
           <button
             className="primary-button"
-            disabled={email.trim().length === 0 || busy}
+            disabled={fields.email.error !== undefined || busy}
             type="submit"
           >
             {invite.isPending ? 'Inviting…' : 'Invite'}

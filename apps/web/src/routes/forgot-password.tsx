@@ -2,6 +2,8 @@ import { useId, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { GENERIC_AUTH_ERROR_MESSAGE, api } from '../api.js';
+import { emailFieldSchema } from '../formFieldSchemas.js';
+import { useFormValidation } from '../useFormValidation.js';
 
 export const Route = createFileRoute('/forgot-password')({ component: ForgotPasswordPage });
 
@@ -24,6 +26,7 @@ function ForgotPasswordPage() {
   // other route test in this codebase already relies on (`routeHarness.tsx`'s `useMutation`
   // triggers `onSuccess`; it does not track a query-library-shaped `isSuccess` flag).
   const [submitted, setSubmitted] = useState(false);
+  const { fields, validateOnSubmit } = useFormValidation({ email: emailFieldSchema }, { email });
 
   const request = useMutation({
     mutationFn: () => api.requestPasswordReset(email),
@@ -43,8 +46,10 @@ function ForgotPasswordPage() {
           <p role="status">{CONFIRMATION_MESSAGE}</p>
         ) : (
           <form
+            noValidate
             onSubmit={(event) => {
               event.preventDefault();
+              if (!validateOnSubmit()) return;
               request.mutate();
             }}
           >
@@ -57,7 +62,9 @@ function ForgotPasswordPage() {
                 type="email"
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
+                {...fields.email.inputProps}
               />
+              {fields.email.showError && <p {...fields.email.errorProps}>{fields.email.error}</p>}
             </div>
             <button className="primary-button" disabled={request.isPending} type="submit">
               {request.isPending ? 'Working…' : 'Send reset link'}

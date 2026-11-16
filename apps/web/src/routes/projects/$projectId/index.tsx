@@ -12,20 +12,26 @@ import type {
   FdxUnknownType,
   FdxUnknownTypeResolutions,
 } from '@finaler-draft/fdx';
+import { RESOURCE_TITLE_MAX_LENGTH } from '@finaler-draft/config';
 import { AccountMenu } from '../../../accountMenu.js';
 import { api, MessageApiError, type ScreenplaySummary } from '../../../api.js';
 import { ApplicationTitlebar } from '../../../applicationShell.js';
 import { CreateScreenplaySplitButton } from '../../../components/CreateScreenplaySplitButton.js';
 import { DeletedRow } from '../../../components/DeletedRow.js';
 import { OverflowMenu } from '../../../components/OverflowMenu.js';
+import { titleFieldSchema } from '../../../formFieldSchemas.js';
 import { RouteBreadcrumb } from '../../../routeBreadcrumb.js';
+import { useFormValidation } from '../../../useFormValidation.js';
 
 // The route-level title schema (apps/api/src/projects.ts's `projectTitle`:
-// `z.string().trim().min(1).max(200)`) is stricter than `screenplaySchema`'s own 250-character
-// `titleSchema` -- both the top-level `title` argument `api.createScreenplay` sends and the
-// nested `screenplay.title` must satisfy it, so this is the bound the import control clamps to,
-// not `MAX_SCREENPLAY_TITLE_LENGTH`.
-const MAX_CREATE_SCREENPLAY_TITLE_LENGTH = 200;
+// `z.string().trim().min(1).max(RESOURCE_TITLE_MAX_LENGTH)`) is stricter than `screenplaySchema`'s
+// own 250-character `titleSchema` -- both the top-level `title` argument `api.createScreenplay`
+// sends and the nested `screenplay.title` must satisfy it, so this is the bound the import control
+// clamps to, not `MAX_SCREENPLAY_TITLE_LENGTH`. Read directly from `@finaler-draft/config` (the
+// same constant `titleFieldSchema` below and the server's own `projectTitle` schema both read)
+// rather than a locally-named `200` alias, which is what this file used to carry before the
+// form-validation-messages slice added a second, independent reason to import this constant here.
+const MAX_CREATE_SCREENPLAY_TITLE_LENGTH = RESOURCE_TITLE_MAX_LENGTH;
 
 /**
  * The imported screenplay's title comes from the title page Final Draft actually carried;
@@ -278,6 +284,16 @@ function ProjectPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const [title, setTitle] = useState('Untitled Screenplay');
+  // The screenplay-title counterpart to the owner's reported project-title defect: clearing this
+  // field and submitting used to surface only the browser's own default validation bubble.
+  // `titleFieldSchema` is `createScreenplayInput`'s own rule (`apps/api/src/projects.ts`'s
+  // `title: projectTitle`, the stricter 200-character bound this file's own comment above already
+  // explains) -- the identical schema `routes/projects/index.tsx`'s project-creation field uses,
+  // shared rather than restated.
+  const { fields: createFields, validateOnSubmit: validateCreate } = useFormValidation(
+    { title: titleFieldSchema },
+    { title },
+  );
   // See the identical field on ProjectsPage (routes/projects/index.tsx) for what happens when
   // this affordance goes away: it persists until Undo or navigation away, never on a timer, and
   // survives an incidental background refetch via the orphaned-id rendering below.
@@ -502,8 +518,10 @@ function ProjectPage() {
         <h1>Screenplays</h1>
         <form
           className="create-row"
+          noValidate
           onSubmit={(event) => {
             event.preventDefault();
+            if (!validateCreate()) return;
             create.mutate();
           }}
         >
@@ -512,6 +530,7 @@ function ProjectPage() {
             required
             value={title}
             onChange={(event) => setTitle(event.target.value)}
+            {...createFields.title.inputProps}
           />
           {/* Task 3 (`progress/fdx-import.md`): the standalone "Import FDX…" button that used to
               sit on its own row is gone -- it is now the arrow's menu, directly below this one
@@ -550,6 +569,9 @@ function ProjectPage() {
             style={{ display: 'none' }}
             type="file"
           />
+          {createFields.title.showError && (
+            <p {...createFields.title.errorProps}>{createFields.title.error}</p>
+          )}
         </form>
         {importError !== undefined && (
           <p className="field-error" role="alert">

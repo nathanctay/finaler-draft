@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -94,5 +94,29 @@ describe('forgot-password page', () => {
       'href',
       '/sign-in',
     );
+  });
+
+  it('carries noValidate, so the browser never renders its own validation bubble', () => {
+    render(<ForgotPasswordPage />);
+    expect(screen.getByLabelText('Email').closest('form')).toHaveAttribute('novalidate');
+  });
+
+  it('refuses a blank submit, bypassing the Send reset link button, and shows "Enter an email address."', () => {
+    render(<ForgotPasswordPage />);
+    fireEvent.submit(screen.getByLabelText('Email').closest('form')!);
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter an email address.');
+    expect(screen.getByLabelText('Email')).toHaveFocus();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a malformed email, never reaching the anti-enumeration endpoint to find out', async () => {
+    const user = userEvent.setup();
+    render(<ForgotPasswordPage />);
+    await user.type(screen.getByLabelText('Email'), 'not-an-email');
+    await user.click(screen.getByRole('button', { name: 'Send reset link' }));
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a valid email address.');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

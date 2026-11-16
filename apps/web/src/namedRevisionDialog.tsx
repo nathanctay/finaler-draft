@@ -1,4 +1,15 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { z } from 'zod';
+import { useFormValidation } from './useFormValidation.js';
+
+/**
+ * A label has no server-side bound to share (`apps/collab`'s named-revision write accepts any
+ * non-empty string the editor's own `maxLength={200}` below already caps) -- "not blank" is this
+ * schema's whole rule, and it is still a schema, for the one reason `useFormValidation.ts`'s own
+ * top comment gives for that case: uniformity of the one validation mechanism, not because Zod is
+ * carrying any shared bound here the way the title/password schemas elsewhere do.
+ */
+const labelFieldSchema = z.string().trim().min(1, 'Enter a label.');
 
 /**
  * Collaboration slice 4a's "named milestones" revision trigger (plan.md) -- the one deliberate,
@@ -11,6 +22,14 @@ import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent 
  * Unlike `DocumentSettingsDialog`, this has a real "Save" step with its own pending/error state:
  * naming a milestone is a network request that can fail (a cooldown-free but still real 403/404),
  * and the writer needs to see that, not have the dialog silently vanish.
+ *
+ * The label field is validated through the shared `useFormValidation` hook
+ * (`useFormValidation.ts`): a blank/whitespace-only label shows "Enter a label." once the field has
+ * been blurred or Save attempted, matching every other form this mechanism now covers. `noValidate`
+ * on the `<form>` below keeps the browser's own validation bubble from ever being a possibility,
+ * even though nothing here currently carries a `required`/`pattern`/`type="email"` attribute that
+ * would trigger one today -- a future field added to this dialog gets the same protection by
+ * construction rather than by remembering to add it again.
  */
 export function NamedRevisionDialog({
   onClose,
@@ -24,6 +43,7 @@ export function NamedRevisionDialog({
   const [label, setLabel] = useState('');
   const [state, setState] = useState<'idle' | 'pending' | 'error'>('idle');
   const [error, setError] = useState<string>();
+  const { fields, validateOnSubmit } = useFormValidation({ label: labelFieldSchema }, { label });
 
   useEffect(() => {
     dialogRef.current?.querySelector<HTMLElement>('input')?.focus();
@@ -59,8 +79,8 @@ export function NamedRevisionDialog({
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!validateOnSubmit() || state === 'pending') return;
     const trimmed = label.trim();
-    if (trimmed.length === 0 || state === 'pending') return;
     setState('pending');
     setError(undefined);
     onSave(trimmed).then(
@@ -91,7 +111,7 @@ export function NamedRevisionDialog({
           Labels the screenplay&apos;s current state as a milestone in its revision history. This
           does not change the live document.
         </p>
-        <form onSubmit={handleSubmit}>
+        <form noValidate onSubmit={handleSubmit}>
           <label className="dialog-field">
             <span>Label</span>
             <input
@@ -101,8 +121,10 @@ export function NamedRevisionDialog({
               onChange={(event) => setLabel(event.target.value)}
               type="text"
               value={label}
+              {...fields.label.inputProps}
             />
           </label>
+          {fields.label.showError && <p {...fields.label.errorProps}>{fields.label.error}</p>}
           {state === 'error' && (
             <p className="field-error" role="alert">
               {error}
@@ -114,7 +136,7 @@ export function NamedRevisionDialog({
             </button>
             <button
               className="primary-button"
-              disabled={label.trim().length === 0 || state === 'pending'}
+              disabled={fields.label.error !== undefined || state === 'pending'}
               type="submit"
             >
               {state === 'pending' ? 'Saving…' : 'Save'}

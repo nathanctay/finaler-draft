@@ -98,6 +98,36 @@ const CASES: readonly ContrastCase[] = [
     themes: BOTH,
   },
   {
+    /**
+     * Found while adding inline validation messages (`progress/form-validation-messages.md`):
+     * `.field-error` already shipped inside `.dialog` (`namedRevisionDialog.tsx`,
+     * `feedbackDialog.tsx`, `restoreRevisionDialog.tsx`, `upgradeDialog.tsx`) with no case proving
+     * it stayed readable inside the dark editor shell. `--feedback-error`'s dark value is a pale
+     * salmon chosen for a dark page background, not for `.dialog`'s own permanently-white one --
+     * see the `--feedback-error-on-white` re-anchor in `styles.css` this case guards.
+     */
+    name: '.field-error in a dialog (white under both themes)',
+    markup: '<div class="dialog"><p class="field-error" role="alert">Enter a title.</p></div>',
+    target: '.field-error',
+    minimum: REAL_TEXT,
+    shell: true,
+    themes: BOTH,
+  },
+  {
+    // `.entry-card` (sign-in/forgot-password/reset-password) and `.project-list` (the two
+    // dashboard create-rows) share one declaration (`styles.css`'s `.entry-card, .project-list`),
+    // so one case covers both -- and both are light-only in the first place: neither ever sits
+    // inside `.application`'s `.dark` ancestor (see this app's own "dark theme only inside the
+    // editor shell" rule, `help-dialogs-dark-contrast.spec.ts`'s top comment).
+    name: '.field-error on an entry-card/project-list surface (light only, never inside the editor shell)',
+    markup:
+      '<main class="entry-screen"><section class="entry-card"><p class="field-error" role="alert">Enter a title.</p></section></main>',
+    target: '.field-error',
+    minimum: REAL_TEXT,
+    shell: false,
+    themes: LIGHT_ONLY,
+  },
+  {
     name: '.muted on a project screen',
     markup: '<main class="project-screen"><p class="muted">No revisions yet.</p></main>',
     target: '.muted',

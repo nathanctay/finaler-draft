@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PASSWORD_REQUIREMENTS_MESSAGE } from '@finaler-draft/config';
@@ -222,6 +222,11 @@ describe('sign-in page', () => {
     const user = userEvent.setup();
     render(<SignInPage />);
     await user.click(screen.getByRole('button', { name: 'Create an account' }));
+    // Name and Email are filled with valid values so the only alert a submit attempt reveals is
+    // the mismatch this test is about -- otherwise "Enter your name."/"Enter an email address."
+    // would also appear now that a submit attempt reveals every field's error, not only this one.
+    await user.type(screen.getByLabelText('Name'), 'Writer');
+    await user.type(screen.getByLabelText('Email'), 'writer@example.com');
     await user.type(screen.getByLabelText('Password'), 'a secure passphrase');
     await user.type(screen.getByLabelText('Confirm password'), 'not matching');
     await user.click(screen.getByRole('button', { name: 'Create account' }));
@@ -431,5 +436,94 @@ describe('sign-in page', () => {
 
     await vi.waitFor(() => expect(routeState.navigate).toHaveBeenCalledWith({ to: '/projects' }));
     expect(removeQueries).toHaveBeenCalledWith({ queryKey: ['session'] });
+  });
+
+  it('carries noValidate in both modes, so the browser never renders its own validation bubble', async () => {
+    const user = userEvent.setup();
+    render(<SignInPage />);
+    expect(screen.getByLabelText('Email').closest('form')).toHaveAttribute('novalidate');
+
+    await user.click(screen.getByRole('button', { name: 'Create an account' }));
+    expect(screen.getByLabelText('Email').closest('form')).toHaveAttribute('novalidate');
+  });
+
+  it('refuses a sign-in submit with a blank email and password, naming both and focusing email first', () => {
+    render(<SignInPage />);
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in' }).closest('form')!);
+
+    const alerts = screen.getAllByRole('alert').map((alert) => alert.textContent);
+    expect(alerts).toContain('Enter an email address.');
+    expect(alerts).toContain('Enter your password.');
+    // Email is declared before password in this form's own schema object, matching its position
+    // on screen, so it is the one that ends up focused when both are invalid at once.
+    expect(screen.getByLabelText('Email')).toHaveFocus();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a malformed email at sign-in, never reaching the server to find out', async () => {
+    const user = userEvent.setup();
+    render(<SignInPage />);
+    await user.type(screen.getByLabelText('Email'), 'not-an-email');
+    await user.type(screen.getByLabelText('Password'), 'whatever this account’s password is');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a valid email address.');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The one deliberate asymmetry in this form's password validation (see `signInPasswordField
+   * Schema`'s own module comment): sign-in must accept whatever password an existing account
+   * actually has, including one shorter than today's `PASSWORD_MIN_LENGTH` policy, and let the
+   * server be the one to say whether it is correct -- not refuse it client-side as "too short"
+   * before ever asking.
+   */
+  it('does not reject a short password at sign-in -- only the server verifies credentials, not a length bound', async () => {
+    const user = userEvent.setup();
+    render(<SignInPage />);
+    await user.type(screen.getByLabelText('Email'), 'writer@example.com');
+    await user.type(screen.getByLabelText('Password'), 'short');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    await vi.waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith('/api/auth/sign-in/email', expect.any(Object)),
+    );
+  });
+
+  it('refuses a blank Name at sign-up, distinct from a blank email or password', async () => {
+    const user = userEvent.setup();
+    render(<SignInPage />);
+    await user.click(screen.getByRole('button', { name: 'Create an account' }));
+    await user.type(screen.getByLabelText('Email'), 'writer@example.com');
+    await user.type(screen.getByLabelText('Password'), 'a secure passphrase');
+    await user.type(screen.getByLabelText('Confirm password'), 'a secure passphrase');
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter your name.');
+    expect(screen.getByLabelText('Name')).toHaveFocus();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a password under PASSWORD_MIN_LENGTH at sign-up, with the shared requirements message', async () => {
+    const user = userEvent.setup();
+    render(<SignInPage />);
+    await user.click(screen.getByRole('button', { name: 'Create an account' }));
+    await user.type(screen.getByLabelText('Name'), 'Writer');
+    await user.type(screen.getByLabelText('Email'), 'writer@example.com');
+    await user.type(screen.getByLabelText('Password'), 'short');
+    await user.click(screen.getByRole('button', { name: 'Create account' }));
+
+    expect(screen.getAllByText(PASSWORD_REQUIREMENTS_MESSAGE).length).toBeGreaterThan(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a submit dispatched directly on the form, bypassing a click on Sign in, while every field is blank', () => {
+    // `fireEvent.submit` reaches `handleSubmit` regardless of any button's own state, which is the
+    // proof that `validateOnSubmit()` itself -- not merely a disabled button sign-in's own Sign in
+    // control does not even have -- is what stops `authentication.mutate()` from being called.
+    render(<SignInPage />);
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in' }).closest('form')!);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
