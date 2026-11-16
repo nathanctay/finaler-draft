@@ -1,7 +1,7 @@
 import { screenplayFixture } from '@finaler-draft/screenplay/fixtures';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PASSWORD_REQUIREMENTS_MESSAGE } from '@finaler-draft/config';
-import { ApiError, AuthApiError, MessageApiError, api } from './api.js';
+import { ApiError, AuthApiError, GENERIC_AUTH_ERROR_MESSAGE, MessageApiError, api } from './api.js';
 
 const projectId = '216ec49a-a6c6-49ff-8e2e-5994d5ca91dd';
 const screenplayId = '38d8a6db-43f1-4b47-b8fc-c15a96f9ac0e';
@@ -236,6 +236,27 @@ describe('API client', () => {
     await expect(api.signIn('writer@example.com', 'wrong password')).rejects.toBeInstanceOf(
       AuthApiError,
     );
+  });
+
+  /*
+   * The last mile of account deletion. The server refuses session creation while `user.deleted_at`
+   * is set and answers `ACCOUNT_DELETED` (`packages/auth-server/src/index.ts`); without an entry in
+   * `authErrorMessages` that fell through to the generic "check your details and try again", which
+   * is actively misleading -- the details are correct and retrying cannot work. During the 30-day
+   * grace window this is the most likely reason a real person is refused sign-in.
+   */
+  it('surfaces ACCOUNT_DELETED as its own message rather than the generic retry advice', async () => {
+    fetchMock.mockResolvedValue(
+      response({ code: 'ACCOUNT_DELETED', message: 'raw server response' }, false, 401),
+    );
+
+    await expect(api.signIn('writer@example.com', 'correct password')).rejects.toMatchObject({
+      code: 'ACCOUNT_DELETED',
+      safeMessage: 'This account has been deleted.',
+    });
+    // Non-vacuity: the generic fallback must be a *different* string, or the assertion above could
+    // pass with no mapping at all.
+    expect(GENERIC_AUTH_ERROR_MESSAGE).not.toBe('This account has been deleted.');
   });
 
   it('derives the PASSWORD_TOO_SHORT and PASSWORD_TOO_LONG messages from the shared password policy rather than restating it', async () => {
