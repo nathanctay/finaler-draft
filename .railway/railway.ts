@@ -170,6 +170,64 @@ export default defineRailway(() => {
       PORT: preserve(),
     },
   });
+  // The grace-period account-purge cron (progress/account-purge-cron.md, apps/api/src/
+  // accountPurge.ts): hard-deletes an account and its owned, soft-deleted projects once the
+  // 30-day grace window has elapsed, plus four smaller hygiene sweeps (expired sessions and
+  // verification rows, aged-out Stripe dedupe events, resolved membership invitations). A script
+  // in this repository, run by Railway's own cron scheduler -- the owner confirmed this
+  // architecture twice, over two rejected alternatives recorded in the progress doc: `pg_cron`
+  // (not in Railway's Postgres image, and SQL alone cannot reach Stripe or send mail, which would
+  // put irreversible deletion logic outside `pnpm test`, typecheck, PR review, and audit) and
+  // `node-cron` (buys cron syntax and nothing else for a once-a-day sweep, adds a dependency while
+  // its licence review is an open launch item, and keeps a scheduler inside the web process).
+  //
+  // **`deploy.cronSchedule` is the field name, confirmed from the installed `railway` package's
+  // own types** (`DeployConfig.cronSchedule?: string | null`, `node_modules/railway/dist/
+  // index-C3uk0ruc.d.ts`) rather than guessed -- nothing else in this file's `deploy` blocks has
+  // needed it before now. `'0 3 * * *'`: once daily is far more resolution than a 30-day window
+  // needs, and 03:00 UTC is outside this product's only known usage pattern so far (nothing
+  // today demands a more precise anti-peak hour; revisit if that changes).
+  //
+  // **No `healthcheck`.** Every other service here answers an HTTP probe continuously; this one
+  // runs once per trigger and exits (see `accountPurgeCli.ts`'s own module comment for why
+  // exiting at all is the one thing Railway's cron contract strictly requires -- "If the code...
+  // does not exit, subsequent executions of the Cron will be skipped"). There is nothing for a
+  // healthcheck to probe between runs.
+  //
+  // **`preDeploy` runs the same migration `app` already runs on every deploy.** This service's
+  // own index additions (`session_expires_at_index` and friends, this slice's migration) must
+  // exist before its first scheduled run reads them, and this service's deploy is not ordered
+  // against `app`'s in `railway.ts` -- so it carries the identical, idempotent `db:migrate` step
+  // rather than depending on `app` having already deployed first.
+  //
+  // **Only `DATABASE_URL` and `NODE_ENV`, deliberately** -- see `accountPurgeCli.ts`'s own module
+  // comment for why this script does not reuse `@finaler-draft/server-config`'s
+  // `requirePersistenceEnvironment` (it would demand Stripe, mail, and collab-token variables this
+  // script never touches). No `PORT`: this service never listens on one -- it is a batch job, not
+  // a server, and declaring an unused `PORT` here would be exactly the kind of inert-looking
+  // variable this file's own header warns a future reader not to "simplify" away without reading
+  // why it is there -- except here there is no "why," so it is left out rather than added for
+  // symmetry with `app`/`collab`.
+  const accountPurge = service('account-purge', {
+    source: finalerDraft,
+    build: 'pnpm build:packages',
+    preDeploy: 'pnpm --filter @finaler-draft/database db:migrate',
+    start: 'pnpm --filter @finaler-draft/api purge:accounts',
+    replicas: { 'us-west2': 1 },
+    deploy: {
+      cronSchedule: '0 3 * * *',
+      // Matches every other service's own comment on this field: Railway's documented default
+      // restart policy is already `ON_FAILURE` with 10 retries, and declaring a value matching
+      // that default produces permanent phantom drift in `railway config plan`. 3 (not 10) is
+      // declared because it genuinely differs from the default, and because a purge run that
+      // fails three times in a row from the same transient cause (a dropped connection, say)
+      // should surface rather than retry silently until the next scheduled trigger -- the next
+      // day's run will pick up the identical backlog either way, since this module's own
+      // idempotency guarantees nothing is lost by waiting.
+      restartPolicyMaxRetries: 3,
+    },
+    env: { DATABASE_URL: preserve(), NODE_ENV: preserve() },
+  });
 
   return project('finaler draft', {
     resources: [
@@ -178,6 +236,7 @@ export default defineRailway(() => {
       Postgres,
       app,
       collab,
+      accountPurge,
       postgresVolume,
       drizzleGatewayVolume,
     ],

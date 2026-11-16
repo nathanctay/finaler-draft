@@ -78,7 +78,14 @@ export const session = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: 'cascade' }),
   },
-  (table) => [uniqueIndex('session_token_unique').on(table.token)],
+  (table) => [
+    uniqueIndex('session_token_unique').on(table.token),
+    // The account-purge cron's own scan (progress/account-purge-cron.md, apps/api/src/
+    // accountPurge.ts): `where expires_at < now()`. Mirrors `user_deleted_at_index`'s own
+    // justification one table up -- without this, every run is a full-table scan of every
+    // session this product has ever issued, not just the expired ones.
+    index('session_expires_at_index').on(table.expiresAt),
+  ],
 );
 
 export const account = pgTable('account', {
@@ -99,14 +106,22 @@ export const account = pgTable('account', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
 });
 
-export const verification = pgTable('verification', {
-  id: text('id').primaryKey(),
-  identifier: text('identifier').notNull(),
-  value: text('value').notNull(),
-  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }),
-  updatedAt: timestamp('updated_at', { withTimezone: true }),
-});
+export const verification = pgTable(
+  'verification',
+  {
+    id: text('id').primaryKey(),
+    identifier: text('identifier').notNull(),
+    value: text('value').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }),
+    updatedAt: timestamp('updated_at', { withTimezone: true }),
+  },
+  (table) => [
+    // The account-purge cron's scan (apps/api/src/accountPurge.ts): `where expires_at < now()`,
+    // identical justification to `session_expires_at_index` above.
+    index('verification_expires_at_index').on(table.expiresAt),
+  ],
+);
 
 export const projects = pgTable('projects', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -536,11 +551,20 @@ export const subscriptions = pgTable(
 // Dedupe ledger for Stripe webhook delivery (plan.md: "Events are duplicated and arrive out of
 // order. Persist event.id and reject events already processed"). Keyed on Stripe's own event id,
 // which is globally unique per event and stable across retries/redeliveries of the same event.
-export const stripeProcessedEvents = pgTable('stripe_processed_events', {
-  id: text('id').primaryKey(),
-  type: text('type').notNull(),
-  processedAt: timestamp('processed_at', { withTimezone: true }).defaultNow().notNull(),
-});
+export const stripeProcessedEvents = pgTable(
+  'stripe_processed_events',
+  {
+    id: text('id').primaryKey(),
+    type: text('type').notNull(),
+    processedAt: timestamp('processed_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    // The account-purge cron's retention sweep (apps/api/src/accountPurge.ts): `where
+    // processed_at < <retention cutoff>`. This table is an append-only dedupe ledger (its own
+    // comment above) with no other reason to ever scan by age until this slice needed one.
+    index('stripe_processed_events_processed_at_index').on(table.processedAt),
+  ],
+);
 
 // The single-editable-slot record for the free/lapsed entitlement tier (plan.md's "The free
 // tier" and "What happens when a subscription lapses"): which screenplay currently occupies a
@@ -725,5 +749,13 @@ export const membershipInvitations = pgTable(
     index('membership_invitations_invited_user_index').on(table.invitedUserId, table.status),
     // The inviter-side list for one project, which reads both scopes at once.
     index('membership_invitations_project_index').on(table.projectId),
+    // The account-purge cron's retention sweep (apps/api/src/accountPurge.ts): `where status in
+    // ('accepted', 'declined') and updated_at < <retention cutoff>`. Partial, like
+    // `document_revisions_restore_request_id_unique` above, because the scan never wants
+    // `pending` rows (those are live and never purged by age alone) -- indexing them too would
+    // only make the index larger for no query this cron ever runs.
+    index('membership_invitations_resolved_updated_at_index')
+      .on(table.updatedAt)
+      .where(sql`${table.status} in ('accepted', 'declined')`),
   ],
 );
