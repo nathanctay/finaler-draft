@@ -570,53 +570,47 @@ turns "production did not ship" into a failed CI run, but nothing turns "the nig
 into anything a human sees. A crashed cron is still entirely silent today. Worth fixing separately;
 a Railway webhook on deployment crash is the cheap version.
 
-### The workflow does not deploy this service, and should not
+### The workflow does not deploy this service -- and it must, which took two wrong turns to learn
 
 An earlier revision of this branch added a fourth `railway up` step to `quality.yml` for
 `account-purge`, on the reasoning that the service would otherwise keep running whatever snapshot
-`railway config apply` first built, forever. **That premise was wrong, and the deployment history
-disproves it.** This service's two deployments both carry commit metadata:
+`railway config apply` first built. That step was then **removed** on the reasoning that the service
+auto-deploys from GitHub, since its two deployments carry commit metadata the other services' do
+not:
 
 ```
-meta.reason: "deploy"
 meta.commitMessage: "Merge pull request #80 from nathanctay/feature/account-purge-cron"
 meta.commitHash: 4a8d135...
 meta.branch: main
 ```
 
-Those are GitHub-triggered auto-deploys. Its live source is `{repo, branch: 'main'}`, so a push to
-main rebuilds it -- which is how the crashed deployment came to exist at all. `app`'s deployments, by
-contrast, carry `meta: {reason: 'deploy'}` with **no** commit metadata, because CI's `railway up`
-uploads a snapshot with no `.git`. The two services deploy by two different mechanisms, and
-`account-purge` was never frozen.
+**That second reasoning was wrong, and the deployment history disproves it.** Across the merges of
+#81, #83 and #82, this service produced **no deployment at all**. `collab` deployed at 06:12Z on
+2026-11-16 directly from this job, with `meta: {reason: 'deploy'}` and no commit metadata, because
+CI's `railway up` uploads a snapshot with no `.git`. Waiting 200 seconds past the merge run's
+completion ruled out a lag from Railway's "Wait for CI".
 
-The step was therefore dropped rather than reworded: it would have been a second, redundant deploy of
-a service that already redeploys on push.
+So whatever produced those two deployments on 2026-11-15 -- most plausibly the service's own
+creation and the first `railway config apply`, both of which stamp the current head commit -- it is
+**not** a mechanism that fires on a merge. The evidence was misread: _"carries commit metadata"_ is
+a much weaker claim than _"deploys on every merge"_, and only the CI job demonstrably does the
+latter.
 
-One consequence worth noting and not acting on here: because this service auto-deploys from GitHub
-rather than from CI, it is not covered by the `deploy-outcome` gate the way the other three are, and
-whether a red main can deploy it depends on Railway's own "Wait for CI" setting rather than on
-anything in this repo. That is a deliberate open question, not an oversight.
+The cost was real and nearly recurred. The build-command fix above merged in PR #83 and **did not
+reach production**: the service kept running the crashed build, and the next 03:00 trigger would
+have failed identically. It took a manual `railway up` to get a working artifact out, and the step
+is now restored so this cannot depend on an unexplained mechanism again.
 
-### Railway pins cron services to `restartPolicyType: NEVER`
+Two lessons worth carrying:
 
-The declaration carried `restartPolicyMaxRetries: 3`, copied from `app` together with `app`'s
-reasoning about Railway's `ON_FAILURE` default. That is wrong for a cron service, and the evidence is
-observed rather than documented: writing `ON_FAILURE` plus 3 retries to this service through
-Railway's own API returns `updatedFields: ["restartPolicyType", "restartPolicyMaxRetries"]` -- and
-the live config still reads `restartPolicyType: "NEVER"` with no retry count at all. The write is
-accepted and silently ignored.
+- **Do not infer a deploy mechanism from deployment metadata.** Check whether deployments actually
+  appear after a merge. That is one `list-deployments` call and it settles the question.
+- **A service that deploys by a different route than every other service is a latent gap**, because
+  the gap is invisible until something needs to ship. One mechanism for everything is worth more
+  than a locally clever exception.
 
-Two consequences. The declared retry count was inert, so nothing behaved as the comment claimed. And
-because the platform refuses to store it, it was exactly the "permanent phantom drift in `railway
-config plan`" the other three services' comments warn against -- `plan` showed
-`restartPolicyType ("NEVER" → null)` and `restartPolicyMaxRetries (null → 3)` as pending changes that
-could never be applied, on every future run. Drift that can never clear is drift nobody reads.
-
-Now declared as `restartPolicyType: 'NEVER'` with no retry count, which is what Railway actually
-holds. Behaviourally that is also the right policy: a crashed run must not be restarted into the next
-scheduled trigger's window, and the next day's run picks up the identical backlog because the purge
-is idempotent.
-
-Worth noting for any future cron service in this file: the `app`/`collab`/`landing` restart-policy
-comments do not transfer to one.
+One consequence remains open and is deliberately not acted on here: this service's GitHub source
+still names `branch: main`, so if the auto-deploy mechanism ever does start firing, it will deploy
+alongside CI rather than instead of it. That is a duplicate deploy of a job that serves no traffic,
+which is harmless, and removing the branch from the source is a live-config change better made
+deliberately than as a side effect of this fix.
