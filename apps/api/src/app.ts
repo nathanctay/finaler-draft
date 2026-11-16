@@ -62,6 +62,17 @@ import {
 import type { StripeIpAllowlist } from './stripeIpAllowlist.js';
 import type { SubscriptionProjection, SubscriptionStore } from './stripeSubscriptions.js';
 import { dispatchStripeEvent } from './stripeWebhook.js';
+import {
+  RAILWAY_WEBHOOK_SECRET_HEADER,
+  createRailwayAlertDedupe,
+  isAlertableRailwayEvent,
+  railwayAlertDedupeKey,
+  railwayAlertSubject,
+  railwayAlertText,
+  railwayWebhookEventSchema,
+  secretsMatch,
+  type RailwayAlertsPort,
+} from './railwayAlerts.js';
 
 export interface AuthPort {
   baseUrl: string;
@@ -151,6 +162,15 @@ export interface BuildAppOptions {
    */
   entitlements?: EntitlementStore;
   stripe?: StripeWebhookPort | undefined;
+  /**
+   * Backs `POST /api/webhooks/railway` -- the deployment-crash alert route
+   * (progress/deployment-crash-alerts.md, `railwayAlerts.ts`). Absent means the route is not
+   * registered at all, matching `stripe`/`billing`/`collab` above: `server.ts` only constructs
+   * this when `RAILWAY_WEBHOOK_SECRET` and `ALERT_MAIL_TO` are both configured, so a deployment
+   * without them simply has no endpoint here rather than one that accepts an unauthenticated
+   * caller.
+   */
+  railwayAlerts?: RailwayAlertsPort | undefined;
   /**
    * Backs `POST /api/billing/checkout-session`, `POST /api/billing/portal-session`, and
    * `GET /api/billing/subscription` -- the purchase, manage-billing, and billing-status-read entry
@@ -1088,6 +1108,110 @@ export async function buildApp(options: BuildAppOptions = {}) {
         );
         return reply.code(200).send({ received: true });
       });
+    });
+  }
+
+  if (options.railwayAlerts) {
+    const railwayAlerts = options.railwayAlerts;
+    // One dedupe cache per `buildApp` call, i.e. one per running process in production (`server.ts`
+    // calls this once) and one fresh instance per test -- see `createRailwayAlertDedupe`'s own
+    // comment in railwayAlerts.ts for why an in-process cache, scoped to this route's closure
+    // rather than threaded through `RailwayAlertsPort`, is the right lifetime for it.
+    const dedupe = createRailwayAlertDedupe();
+    // Deliberately not `typedApp`/a declared `schema.body`: this route's own shared-secret check
+    // must run before anything about the body is trusted, and doing that ahead of a zod-schema
+    // `preValidation` binding would need the same scoped-`register` dance `stripe`'s webhook route
+    // uses for its raw-body parser. Simpler to keep this route's own ordering explicit and manual,
+    // the same choice `stripeWebhook`'s route already made for its own (different) reason.
+    app.post('/api/webhooks/railway', async (request, reply) => {
+      // Checked first, before the body is parsed into anything this route trusts -- requirement 1
+      // in progress/deployment-crash-alerts.md. This is the *entire* authentication boundary for
+      // this route: Railway's webhook delivery carries no signature to verify (railwayAlerts.ts's
+      // own module comment has the full reasoning for why there is nothing resembling
+      // `stripeWebhook.ts`'s `constructEvent` here).
+      const headerValue = request.headers[RAILWAY_WEBHOOK_SECRET_HEADER];
+      if (
+        !secretsMatch(
+          railwayAlerts.secret,
+          typeof headerValue === 'string' ? headerValue : undefined,
+        )
+      ) {
+        // Never logs the supplied header value, or even whether one was supplied at all --
+        // matching `stripeWebhook`'s own never-log-the-rejected-credential discipline. A log line
+        // that confirmed "a header was present but wrong" would hand a prober exactly the signal
+        // this check exists to deny.
+        request.log.warn(
+          { event: 'railway_webhook_secret_rejected' },
+          'Rejected a Railway webhook request with a missing or incorrect shared-secret header',
+        );
+        return reply.code(401).send({ error: 'Unauthorized' });
+      }
+
+      const parsed = railwayWebhookEventSchema.safeParse(request.body);
+      if (!parsed.success) {
+        request.log.warn(
+          { event: 'railway_webhook_payload_rejected' },
+          'Rejected a Railway webhook request whose payload did not match the documented shape',
+        );
+        return reply.code(400).send({ error: 'Invalid payload' });
+      }
+      const webhookEvent = parsed.data;
+
+      if (!isAlertableRailwayEvent(webhookEvent)) {
+        // 2xx and no email -- requirement 3. Alerting on a successful deploy, a build starting,
+        // or a removal trains the reader to ignore this inbox, which is the same failure as never
+        // building the route at all.
+        request.log.info(
+          { event: 'railway_webhook_acknowledged', type: webhookEvent.type },
+          'Acknowledged a Railway webhook event that is not alertable',
+        );
+        return reply.code(200).send({ received: true });
+      }
+
+      const dedupeKey = railwayAlertDedupeKey(webhookEvent);
+      if (dedupe.hasSeen(dedupeKey)) {
+        // Still 2xx: from Railway's side this delivery is indistinguishable from one that was
+        // handled normally, and acknowledging it as such is what stops the retry, not a 4xx/5xx
+        // that would invite yet another one.
+        request.log.info(
+          { event: 'railway_webhook_deduplicated', type: webhookEvent.type },
+          'Suppressed a duplicate deployment alert -- likely a retried delivery',
+        );
+        return reply.code(200).send({ received: true });
+      }
+
+      try {
+        await railwayAlerts.mail.send({
+          to: railwayAlerts.mailTo,
+          subject: railwayAlertSubject(webhookEvent),
+          text: railwayAlertText(webhookEvent),
+        });
+      } catch (error) {
+        // 5xx, deliberately -- requirement 7. Unlike `feedback.ts`, where the database row is
+        // authoritative and the notification email is best-effort, the email *is* the entire
+        // point of this route. Returning 200 here would tell Railway's bounded retry the alert
+        // was delivered when it was not, reproducing the exact silent failure this route exists
+        // to close.
+        request.log.error(
+          {
+            event: 'railway_webhook_mail_failed',
+            err: error instanceof Error ? error.name : 'UnknownError',
+          },
+          'Failed to send a deployment alert email',
+        );
+        return reply.code(502).send({ error: 'Failed to send the deployment alert email' });
+      }
+
+      // Marked seen only now, after the send has actually succeeded -- never before attempting
+      // it. See `RailwayAlertDedupe`'s own comment for why marking it earlier would let a
+      // transient mail failure permanently suppress the very retry that was Railway's only
+      // mechanism for getting the alert out at all.
+      dedupe.markSeen(dedupeKey);
+      request.log.info(
+        { event: 'railway_webhook_alert_sent', type: webhookEvent.type },
+        'Sent a deployment alert email',
+      );
+      return reply.code(200).send({ received: true });
     });
   }
 

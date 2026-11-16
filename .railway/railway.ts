@@ -113,6 +113,26 @@ export default defineRailway(() => {
       MAIL_FROM_ADDRESS: preserve(),
       NODE_ENV: preserve(),
       PORT: preserve(),
+      /*
+       * The deployment-crash alert webhook (progress/deployment-crash-alerts.md,
+       * apps/api/src/railwayAlerts.ts). Declared here for the identical reason `FEEDBACK_MAIL_TO`
+       * just above is: a variable set in the dashboard but absent from this file is **deleted**
+       * by the next `railway config apply`, and `requirePersistenceEnvironment` throws on a
+       * missing `RAILWAY_WEBHOOK_SECRET`/`ALERT_MAIL_TO` in production -- so omitting either here
+       * would arm a crash-loop on a later, unrelated infrastructure apply.
+       *
+       * The IaC SDK installed here (`railway@3.11.0`) has no webhook primitive at all -- confirmed
+       * by reading its exported surface (`node_modules/railway/dist/iac/index.d.ts` and the
+       * underlying `index-C3uk0ruc.d.ts`): no `webhook()` function, and no `webhook`-shaped field
+       * on `ProjectDefinition`/`ServiceConfig`. The webhook itself (the URL Railway posts to, and
+       * the custom `x-finaler-draft-webhook-secret` header carrying the value of
+       * `RAILWAY_WEBHOOK_SECRET` below) is therefore configured through the Railway dashboard's
+       * own Webhooks tab (or the Railway MCP's `create-webhook`/`update-webhook` tools), not
+       * declared here -- this file only owns the two environment variables the route itself
+       * reads.
+       */
+      RAILWAY_WEBHOOK_SECRET: preserve(),
+      ALERT_MAIL_TO: preserve(),
       RESEND_API_KEY: preserve(),
       STRIPE_PRICE_ID_ANNUAL: preserve(),
       STRIPE_PRICE_ID_MONTHLY: preserve(),

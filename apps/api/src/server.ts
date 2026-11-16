@@ -152,6 +152,18 @@ async function buildPersistentApp(
   // slice for why cookie-based authentication no longer works once `app` and `collab` are on two
   // different hosts.
   const collabTokenConfigured = Boolean(persistence.COLLAB_TOKEN_SECRET);
+  // The deployment-crash alert webhook (progress/deployment-crash-alerts.md). Optional in every
+  // environment short of production (`requirePersistenceEnvironment` makes both mandatory there)
+  // -- a development or test process without either configured still starts, just without
+  // `POST /api/webhooks/railway` registered at all (see `BuildAppOptions.railwayAlerts` in
+  // app.ts: `undefined` here means the route does not exist, not that it exists and rejects
+  // everyone). Gated on *both* variables, not `RAILWAY_WEBHOOK_SECRET` alone: a route that could
+  // authenticate a caller but had nowhere to send the resulting alert would defeat the entire
+  // point of building it (requirement 7, progress/deployment-crash-alerts.md: "the email is the
+  // entire point of this route").
+  const railwayAlertsConfigured = Boolean(
+    persistence.RAILWAY_WEBHOOK_SECRET && persistence.ALERT_MAIL_TO,
+  );
   // `stripeConfigured` alone used to be the only gate here, which is exactly what let this
   // allowlist reject the developer's own `stripe listen` traffic in every local run: see
   // `shouldEnforceStripeIpAllowlist`'s own comment for the incident and the reasoning against a
@@ -264,6 +276,16 @@ async function buildPersistentApp(
       subscriptions,
     ),
     collab: collabTokenConfigured ? { secret: persistence.COLLAB_TOKEN_SECRET! } : undefined,
+    // The deployment-crash alert webhook. Reuses the same `mail` port `createAuth` and `sharing`
+    // above were given -- one mail path for this process, never a second one, the identical
+    // reasoning `invitationMail.ts`'s and `feedbackMail.ts`'s own wiring here already follow.
+    railwayAlerts: railwayAlertsConfigured
+      ? {
+          secret: persistence.RAILWAY_WEBHOOK_SECRET!,
+          mailTo: persistence.ALERT_MAIL_TO!,
+          mail,
+        }
+      : undefined,
     stripe: stripeConfigured
       ? {
           client: stripeClient!,
