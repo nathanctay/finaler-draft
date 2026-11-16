@@ -194,11 +194,14 @@ export default defineRailway(() => {
   // does not exit, subsequent executions of the Cron will be skipped"). There is nothing for a
   // healthcheck to probe between runs.
   //
-  // **`preDeploy` runs the same migration `app` already runs on every deploy.** This service's
-  // own index additions (`session_expires_at_index` and friends, this slice's migration) must
-  // exist before its first scheduled run reads them, and this service's deploy is not ordered
-  // against `app`'s in `railway.ts` -- so it carries the identical, idempotent `db:migrate` step
-  // rather than depending on `app` having already deployed first.
+  // **No migration step, and the original reasoning for having one did not survive checking.**
+  // That reasoning was: this slice's migration adds indexes the purge reads, this service's deploy
+  // is not ordered against `app`'s, so it should run the idempotent `db:migrate` itself. Two
+  // things are wrong with it. The migration adds *only* indexes (`session_expires_at_index` and
+  // three siblings -- `0013_violet_steve_rogers.sql`), and a missing index makes a nightly batch
+  // job slower, never incorrect. And giving a 03:00 cron the ability to migrate production races
+  // whatever schema `app` believes it is running against, on a schedule nobody watches. `app` owns
+  // migrations, for the ordering reason its own declaration states -- see the `start` field below.
   //
   // **Only `DATABASE_URL` and `NODE_ENV`, deliberately** -- see `accountPurgeCli.ts`'s own module
   // comment for why this script does not reuse `@finaler-draft/server-config`'s
@@ -210,21 +213,63 @@ export default defineRailway(() => {
   // symmetry with `app`/`collab`.
   const accountPurge = service('account-purge', {
     source: finalerDraft,
-    build: 'pnpm build:packages',
-    preDeploy: 'pnpm --filter @finaler-draft/database db:migrate',
+    /*
+     * **`build:packages` alone is not enough, and shipping it that way broke the first real run.**
+     * `start` below runs `apps/api`'s `purge:accounts`, which is `node dist/accountPurgeCli.js` --
+     * a file produced by `apps/api`'s own `tsc` build. The root `build:packages` script builds
+     * `packages/*` only; `apps/api` is deliberately not in it (that is what root `build` adds). So
+     * the container started, found no `dist/accountPurgeCli.js`, and exited 1 with
+     * `MODULE_NOT_FOUND` -- deployment `6692ab23` CRASHED on its first scheduled trigger, meaning
+     * the grace-period purge had never once executed between this service being created and this
+     * fix.
+     *
+     * Not root `build`: that additionally builds `web`, `landing` and `collab`, none of which this
+     * cron loads. The rule this field has to satisfy is narrow and worth stating plainly, because
+     * nothing else in this file checks it -- **a service's build must produce the entry point its
+     * own `start` runs.** These two fields were written independently and nothing failed until a
+     * cron fired at 03:00, which is the worst place to learn it.
+     */
+    build: 'pnpm build:packages && pnpm --filter @finaler-draft/api build',
+    /*
+     * **No `preDeploy` migration here, deliberately.** `app` owns migrations, and the reason is in
+     * its own declaration above: `app` deploys before `collab` precisely so the schema is migrated
+     * before the other service reading that database restarts against it. One owner, one ordering.
+     *
+     * Copying that `preDeploy` onto a *cron* service -- which is what this originally did -- gives a
+     * nightly job the ability to migrate the production database at 03:00, racing whatever schema
+     * `app` currently believes it is running against, on a schedule nobody is watching. It also
+     * failed outright on the first real run: the service had no `DATABASE_URL` yet, so
+     * `db:migrate` exited 1 with "DATABASE_URL is required for Drizzle commands" before the purge
+     * script was ever reached.
+     *
+     * This job needs no migration of its own. It reads a schema `app` has already migrated, and if
+     * it ever runs against a database older than its own expectations the correct outcome is a loud
+     * failure, not a 3am schema change.
+     */
     start: 'pnpm --filter @finaler-draft/api purge:accounts',
     replicas: { 'us-west2': 1 },
     deploy: {
       cronSchedule: '0 3 * * *',
-      // Matches every other service's own comment on this field: Railway's documented default
-      // restart policy is already `ON_FAILURE` with 10 retries, and declaring a value matching
-      // that default produces permanent phantom drift in `railway config plan`. 3 (not 10) is
-      // declared because it genuinely differs from the default, and because a purge run that
-      // fails three times in a row from the same transient cause (a dropped connection, say)
-      // should surface rather than retry silently until the next scheduled trigger -- the next
-      // day's run will pick up the identical backlog either way, since this module's own
-      // idempotency guarantees nothing is lost by waiting.
-      restartPolicyMaxRetries: 3,
+      /*
+       * **`NEVER`, declared explicitly, and no `restartPolicyMaxRetries` -- unlike every other
+       * service here.** The other three omit `restartPolicyType` (Railway's default is already
+       * `ON_FAILURE`) and declare `restartPolicyMaxRetries: 3`. Both are wrong for a cron service,
+       * and the reason is observed rather than documented: writing `ON_FAILURE` + 3 retries to this
+       * service through Railway's own API reports both fields as updated and then silently keeps
+       * `NEVER` with no retry count. Railway pins cron services to `NEVER`.
+       *
+       * So the previous declaration here (`restartPolicyMaxRetries: 3`, copied from `app` along with
+       * `app`'s reasoning) was inert, and worse than inert: a value the platform refuses to store is
+       * exactly the "permanent phantom drift in `railway config plan`" the other three services'
+       * comments warn against -- every future plan would have shown it as a pending change forever.
+       * Declaring the value Railway actually holds is what makes a plan read clean, which is the only
+       * way drift stays meaningful.
+       *
+       * Behaviourally this is also right: a crashed run must not be restarted into the next
+       * scheduled trigger's window. The next day's run picks up the identical backlog, since the
+       * purge is idempotent.
+       */
+      restartPolicyType: 'NEVER',
     },
     env: { DATABASE_URL: preserve(), NODE_ENV: preserve() },
   });
