@@ -144,6 +144,24 @@ jobs:
         run: npx --yes @railway/cli@5.63.1 up --ci --service collab
       - name: Deploy landing
         run: npx --yes @railway/cli@5.63.1 up --ci --service landing
+      # The grace-period purge cron. This step was added on this branch's first revision, removed
+      # again on the reasoning that the service auto-deploys from GitHub -- its deployments carry
+      # `commitHash`/`branch: main`, which the other three services' deployments do not -- and is
+      # now restored, because **that reasoning was wrong and the deployment history disproves it**.
+      # Across the merges of #81, #83 and #82 this service produced no deployment at all, while
+      # `collab` and the others deployed from this job on schedule. Whatever created its two
+      # deployments on 2026-11-15, it does not fire on a merge. "Carries commit metadata" turned out
+      # to be far weaker evidence than "deploys on every merge", which only this job is observed to
+      # do.
+      #
+      # The cost of the gap was not theoretical: a build-command fix for a cron that had never once
+      # executed sat merged but undeployed, and would have crashed again at the next 03:00 trigger.
+      #
+      # Last, deliberately. It serves no traffic, so the three user-facing services should not queue
+      # behind it, and it runs after `app`, whose `preDeploy` owns migrations. This service
+      # deliberately runs none of its own.
+      - name: Deploy the account-purge cron
+        run: npx --yes @railway/cli@5.63.1 up --ci --service account-purge
 
   # Turns "production did not ship" into a failed run, which is the only thing here that actually
   # reaches a human.
