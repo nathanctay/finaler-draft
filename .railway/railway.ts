@@ -250,15 +250,26 @@ export default defineRailway(() => {
     replicas: { 'us-west2': 1 },
     deploy: {
       cronSchedule: '0 3 * * *',
-      // Matches every other service's own comment on this field: Railway's documented default
-      // restart policy is already `ON_FAILURE` with 10 retries, and declaring a value matching
-      // that default produces permanent phantom drift in `railway config plan`. 3 (not 10) is
-      // declared because it genuinely differs from the default, and because a purge run that
-      // fails three times in a row from the same transient cause (a dropped connection, say)
-      // should surface rather than retry silently until the next scheduled trigger -- the next
-      // day's run will pick up the identical backlog either way, since this module's own
-      // idempotency guarantees nothing is lost by waiting.
-      restartPolicyMaxRetries: 3,
+      /*
+       * **`NEVER`, declared explicitly, and no `restartPolicyMaxRetries` -- unlike every other
+       * service here.** The other three omit `restartPolicyType` (Railway's default is already
+       * `ON_FAILURE`) and declare `restartPolicyMaxRetries: 3`. Both are wrong for a cron service,
+       * and the reason is observed rather than documented: writing `ON_FAILURE` + 3 retries to this
+       * service through Railway's own API reports both fields as updated and then silently keeps
+       * `NEVER` with no retry count. Railway pins cron services to `NEVER`.
+       *
+       * So the previous declaration here (`restartPolicyMaxRetries: 3`, copied from `app` along with
+       * `app`'s reasoning) was inert, and worse than inert: a value the platform refuses to store is
+       * exactly the "permanent phantom drift in `railway config plan`" the other three services'
+       * comments warn against -- every future plan would have shown it as a pending change forever.
+       * Declaring the value Railway actually holds is what makes a plan read clean, which is the only
+       * way drift stays meaningful.
+       *
+       * Behaviourally this is also right: a crashed run must not be restarted into the next
+       * scheduled trigger's window. The next day's run picks up the identical backlog, since the
+       * purge is idempotent.
+       */
+      restartPolicyType: 'NEVER',
     },
     env: { DATABASE_URL: preserve(), NODE_ENV: preserve() },
   });
