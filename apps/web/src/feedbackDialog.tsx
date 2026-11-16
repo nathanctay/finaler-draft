@@ -1,6 +1,20 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { FEEDBACK_BODY_MAX_LENGTH } from '@finaler-draft/config';
+import { z } from 'zod';
 import { ApiError, MessageApiError } from './api.js';
+import { useFormValidation } from './useFormValidation.js';
+
+/**
+ * Exactly `submitFeedbackInput`'s own rule (`apps/api/src/feedback.ts`:
+ * `z.string().trim().min(1).max(FEEDBACK_BODY_MAX_LENGTH)`), read from the same shared
+ * `@finaler-draft/config` constant that schema itself uses -- the identical reason
+ * `renameDialog.tsx`'s title schema reads `RESOURCE_TITLE_MAX_LENGTH` rather than restating it.
+ */
+const messageFieldSchema = z
+  .string()
+  .trim()
+  .min(1, 'Enter a message.')
+  .max(FEEDBACK_BODY_MAX_LENGTH, `Messages can be at most ${FEEDBACK_BODY_MAX_LENGTH} characters.`);
 
 /**
  * Help > Send feedback. The backend capture path (`apps/api/src/feedback.ts`,
@@ -19,6 +33,16 @@ import { ApiError, MessageApiError } from './api.js';
  * the caller (`App.tsx`, the diff route), which is the one place that knows this screen's own
  * `route`/`screenplayId`/`appVersion` context -- the identical division of labour
  * `NamedRevisionDialog.onSave` already has with `api.createNamedRevision`.
+ *
+ * The message field's own blank/too-long rule is validated through the shared
+ * `useFormValidation` hook (`useFormValidation.ts`), the same mechanism every other form in this
+ * app now uses: "Enter a message."/"Messages can be at most N characters." appears beneath the
+ * textarea once it has been blurred or Send attempted, replacing what used to be only a disabled
+ * Send button and a live counter with no stated reason. The live counter (`body.length` against
+ * the raw, untrimmed value) and the textarea's own `maxLength` attribute are unchanged -- the
+ * schema is the second, independent guard against a paste or a submit mid-composition landing the
+ * trimmed value over the cap anyway, exactly as before this hook existed. `noValidate` on the
+ * `<form>` below keeps the browser's own bubble from ever being a possibility.
  */
 export function FeedbackDialog({
   onClose,
@@ -32,6 +56,7 @@ export function FeedbackDialog({
   const [body, setBody] = useState('');
   const [state, setState] = useState<'idle' | 'pending' | 'error'>('idle');
   const [error, setError] = useState<string>();
+  const { fields, validateOnSubmit } = useFormValidation({ body: messageFieldSchema }, { body });
 
   useEffect(() => {
     dialogRef.current?.querySelector<HTMLElement>('textarea')?.focus();
@@ -66,18 +91,16 @@ export function FeedbackDialog({
   }
 
   // Trimmed for the identical reason the server trims (`feedback.ts`'s
-  // `z.string().trim().min(1).max(...)`): a message of only whitespace is not a message, and the
-  // count shown below must agree with what the server will actually see, not with the raw
-  // textarea value a trailing newline could inflate.
+  // `z.string().trim().min(1).max(...)`): a message of only whitespace is not a message, and what
+  // is actually sent must agree with what the server will see, not with the raw textarea value a
+  // trailing newline could inflate. `messageFieldSchema` validates against this same trimmed
+  // notion (its own `.trim()`), so `fields.body.error` and this value never disagree about whether
+  // the message is blank or over the cap.
   const trimmed = body.trim();
-  // `maxLength` on the textarea below already stops ordinary typing at the cap; this is the
-  // belt-and-suspenders half (a paste, or a submit mid-composition) that keeps Send disabled
-  // rather than relying on the browser attribute alone to make the doomed submission unreachable.
-  const tooLong = trimmed.length > FEEDBACK_BODY_MAX_LENGTH;
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (trimmed.length === 0 || tooLong || state === 'pending') return;
+    if (!validateOnSubmit() || state === 'pending') return;
     setState('pending');
     setError(undefined);
     onSubmit(trimmed).then(
@@ -104,7 +127,7 @@ export function FeedbackDialog({
           Tell us what went wrong or what would help. This never includes anything from your
           screenplay.
         </p>
-        <form onSubmit={handleSubmit}>
+        <form noValidate onSubmit={handleSubmit}>
           <label className="dialog-field">
             <span>Message</span>
             <textarea
@@ -114,11 +137,13 @@ export function FeedbackDialog({
               onChange={(event) => setBody(event.target.value)}
               rows={6}
               value={body}
+              {...fields.body.inputProps}
             />
           </label>
           <p className="muted feedback-dialog-count">
             {body.length} / {FEEDBACK_BODY_MAX_LENGTH}
           </p>
+          {fields.body.showError && <p {...fields.body.errorProps}>{fields.body.error}</p>}
           {state === 'error' && (
             <p className="field-error" role="alert">
               {error}
@@ -130,7 +155,7 @@ export function FeedbackDialog({
             </button>
             <button
               className="primary-button"
-              disabled={trimmed.length === 0 || tooLong || state === 'pending'}
+              disabled={fields.body.error !== undefined || state === 'pending'}
               type="submit"
             >
               {state === 'pending' ? 'Sending…' : 'Send'}

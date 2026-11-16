@@ -269,4 +269,53 @@ describe('RenameDialog', () => {
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'a' });
     expect(onClose).not.toHaveBeenCalled();
   });
+
+  it('carries noValidate, so the browser never renders its own validation bubble', () => {
+    render(
+      <RenameDialog initialTitle="Draft One" kind="project" onClose={vi.fn()} onRename={vi.fn()} />,
+    );
+    expect(screen.getByRole('dialog').querySelector('form')).toHaveAttribute('novalidate');
+  });
+
+  it('marks the field aria-invalid and wires aria-describedby to the message, only once shown', async () => {
+    const user = userEvent.setup();
+    render(
+      <RenameDialog initialTitle="Draft One" kind="project" onClose={vi.fn()} onRename={vi.fn()} />,
+    );
+    const input = screen.getByRole('textbox', { name: 'Title' });
+    expect(input).toHaveAttribute('aria-invalid', 'false');
+    expect(input).not.toHaveAttribute('aria-describedby');
+
+    await user.clear(input);
+    await user.tab();
+
+    const alert = screen.getByRole('alert');
+    expect(input).toHaveAttribute('aria-invalid', 'true');
+    expect(input).toHaveAttribute('aria-describedby', alert.id);
+  });
+
+  it('refuses a submit dispatched directly on the form, bypassing the disabled Rename button, while the title is blank', () => {
+    // The disabled attribute on the Rename button already keeps a *click* or *Enter* from ever
+    // firing a submit event while the title is invalid (see "never calls onRename for a blank
+    // title, even via Enter" above) -- which means a mutation that deleted this component's own
+    // `validateOnSubmit()` guard inside `handleSubmit` would have nothing left to catch it: every
+    // existing test reaches the guard only through a path the disabled button already blocks. This
+    // test reaches `handleSubmit` directly with `fireEvent.submit`, which dispatches a real submit
+    // event regardless of any button's disabled state, so it is the one proof that the guard
+    // itself -- not merely the disabled button -- is what stops `onRename` from being called.
+    const onRename = vi.fn();
+    render(
+      <RenameDialog
+        initialTitle="Draft One"
+        kind="project"
+        onClose={vi.fn()}
+        onRename={onRename}
+      />,
+    );
+    fireEvent.change(screen.getByRole('textbox', { name: 'Title' }), { target: { value: '' } });
+    fireEvent.submit(screen.getByRole('dialog').querySelector('form')!);
+
+    expect(onRename).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a title.');
+  });
 });

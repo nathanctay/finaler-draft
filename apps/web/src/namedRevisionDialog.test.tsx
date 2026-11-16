@@ -140,4 +140,43 @@ describe('NamedRevisionDialog', () => {
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'a' });
     expect(onClose).not.toHaveBeenCalled();
   });
+
+  it('carries noValidate, so the browser never renders its own validation bubble', () => {
+    render(<NamedRevisionDialog onClose={vi.fn()} onSave={vi.fn()} />);
+    expect(screen.getByRole('dialog').querySelector('form')).toHaveAttribute('novalidate');
+  });
+
+  it('shows "Enter a label." once a typed label is cleared and blurred, wired via aria-describedby/aria-invalid', async () => {
+    const user = userEvent.setup();
+    render(<NamedRevisionDialog onClose={vi.fn()} onSave={vi.fn()} />);
+    const input = screen.getByRole('textbox', { name: 'Revision label' });
+    expect(input).toHaveAttribute('aria-invalid', 'false');
+
+    // An edit must happen before blur reveals anything (see useFormValidation.ts's "Blur alone is
+    // not enough") -- typing then clearing is a real edit, unlike a bare focus-and-tab-away on a
+    // field that was only ever autofocused.
+    await user.type(input, 'Draft 2');
+    await user.clear(input);
+    await user.tab();
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('Enter a label.');
+    expect(input).toHaveAttribute('aria-invalid', 'true');
+    expect(input).toHaveAttribute('aria-describedby', alert.id);
+  });
+
+  it('refuses a submit dispatched directly on the form, bypassing the disabled Save button, while the label is blank', () => {
+    // See the identical test in renameDialog.test.tsx for why this specific bypass matters: the
+    // disabled Save button already keeps a click or Enter from reaching `handleSubmit` while the
+    // label is invalid (the "never submits a blank label even via Enter" test above), so only a
+    // submit dispatched directly on the form -- bypassing that button entirely -- can prove
+    // `handleSubmit`'s own `validateOnSubmit()` guard, not merely the disabled attribute, is what
+    // stops `onSave` from being called.
+    const onSave = vi.fn();
+    render(<NamedRevisionDialog onClose={vi.fn()} onSave={onSave} />);
+    fireEvent.submit(screen.getByRole('dialog').querySelector('form')!);
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a label.');
+  });
 });

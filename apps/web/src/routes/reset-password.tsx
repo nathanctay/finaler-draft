@@ -1,10 +1,28 @@
 import { useId, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { createFileRoute, Link } from '@tanstack/react-router';
-import { PASSWORD_MIN_LENGTH, PASSWORD_REQUIREMENTS_MESSAGE } from '@finaler-draft/config';
+import {
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+  PASSWORD_REQUIREMENTS_MESSAGE,
+} from '@finaler-draft/config';
+import { z } from 'zod';
 import { AuthApiError, GENERIC_AUTH_ERROR_MESSAGE, api } from '../api.js';
+import { describedBy, useFormValidation } from '../useFormValidation.js';
 
 export const Route = createFileRoute('/reset-password')({ component: ResetPasswordPage });
+
+/**
+ * This page's one field *is* a new password -- the account's existing one is being replaced, not
+ * verified -- so, unlike `routes/sign-in.tsx`'s sign-in-mode password field, it is correct to
+ * enforce the real bound here: the same `minPasswordLength`/`maxPasswordLength` Better Auth checks
+ * server-side (`packages/auth-server/src/index.ts`, reading these identical
+ * `@finaler-draft/config` constants).
+ */
+const newPasswordFieldSchema = z
+  .string()
+  .min(PASSWORD_MIN_LENGTH, PASSWORD_REQUIREMENTS_MESSAGE)
+  .max(PASSWORD_MAX_LENGTH, PASSWORD_REQUIREMENTS_MESSAGE);
 
 function ResetPasswordPage() {
   const passwordId = useId();
@@ -35,6 +53,12 @@ function ResetPasswordPage() {
     },
     onSuccess: () => setDone(true),
   });
+  // Declared unconditionally for the identical reason `reset` above is: the rules of hooks, not
+  // because the `!token` branch below renders a form that could reach it.
+  const { fields, validateOnSubmit } = useFormValidation(
+    { password: newPasswordFieldSchema },
+    { password },
+  );
 
   if (!token) {
     return (
@@ -72,15 +96,16 @@ function ResetPasswordPage() {
           </>
         ) : (
           <form
+            noValidate
             onSubmit={(event) => {
               event.preventDefault();
+              if (!validateOnSubmit()) return;
               reset.mutate();
             }}
           >
             <div className="entry-field">
               <label htmlFor={passwordId}>New password</label>
               <input
-                aria-describedby={`${passwordId}-hint`}
                 autoComplete="new-password"
                 id={passwordId}
                 minLength={PASSWORD_MIN_LENGTH}
@@ -88,10 +113,18 @@ function ResetPasswordPage() {
                 type="password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
+                {...fields.password.inputProps}
+                aria-describedby={describedBy(
+                  `${passwordId}-hint`,
+                  fields.password.showError ? fields.password.errorProps.id : undefined,
+                )}
               />
               <p className="field-hint" id={`${passwordId}-hint`}>
                 {PASSWORD_REQUIREMENTS_MESSAGE}
               </p>
+              {fields.password.showError && (
+                <p {...fields.password.errorProps}>{fields.password.error}</p>
+              )}
             </div>
             <button className="primary-button" disabled={reset.isPending} type="submit">
               {reset.isPending ? 'Working…' : 'Set new password'}

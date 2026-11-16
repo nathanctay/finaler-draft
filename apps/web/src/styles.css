@@ -173,7 +173,14 @@
   --dark-text-07: #e1e7e9;
   --dark-border-08: #53616a;
   --dark-text-09: #20252b;
-  --feedback-error: #a02c22;
+  /* `--feedback-error-on-white` is the fixed literal (never redefined by `.dark`); `--feedback
+     -error` is the themed value every page-chrome error (`.sign-out-error`, `.readonly-banner`'s
+     own `.field-error`) is meant to follow, and `.dark` below redefines only this second one.
+     Split for the identical reason `--text-04-on-white`/`--text-04` are split a few lines above:
+     a light-island surface (`.dialog` chief among them) needs to re-anchor back to the fixed
+     value, which the selector group just below this block does. */
+  --feedback-error-on-white: #a02c22;
+  --feedback-error: var(--feedback-error-on-white);
 }
 
 .dark {
@@ -221,6 +228,18 @@
  * only `--text-04` rule a dialog contains is `.primary-button:disabled`, whose *background* is
  * `--surface-11`, which `.dark` does redefine -- so inside a dark shell that button is dark, and its
  * text must follow the theme rather than the dialog. The two menus contain no such pairing.
+ *
+ * `--feedback-error` joins this same group for the identical reason, found while adding inline
+ * validation messages to every form in this app (`progress/form-validation-messages.md`):
+ * `.field-error` already shipped inside `.dialog` (`namedRevisionDialog.tsx`, `feedbackDialog.tsx`,
+ * `restoreRevisionDialog.tsx`, `upgradeDialog.tsx`) with no case exercising it inside the dark
+ * editor shell, so the dark theme's own `--feedback-error` -- a pale salmon chosen to read against
+ * a *dark* panel -- was being painted onto `.dialog`'s own permanently-white background. Measured:
+ * `#f2a49b` on white is 1.99:1, nowhere near the 4.5:1 floor `text-contrast.spec.ts` holds every
+ * other real-text rule to; re-anchored to `--feedback-error-on-white` it is the unchanged `#a02c22`
+ * that already cleared 7.3:1 on white in the light theme. See that spec's own `.field-error in a
+ * dialog` case for the regression test, and the module's own mutation table for the proof this
+ * reverts to the broken number when un-anchored.
  */
 .page,
 .title-page,
@@ -228,6 +247,7 @@
 .toast,
 .element-menu,
 .overflow-menu-list {
+  --feedback-error: var(--feedback-error-on-white);
   --text-07: var(--text-07-on-white);
 }
 
@@ -3289,12 +3309,21 @@ select:focus-visible,
 
 .create-row {
   display: flex;
+  /* `flex-wrap: wrap` plus the `.field-error` rule just below is `.deleted-row`'s own technique
+     for the identical problem: a validation message is a third flex item in a row that otherwise
+     holds exactly an input and a button, and it needs to drop to its own full-width line rather
+     than squeeze in beside them. */
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 28px;
 }
 
 .create-row input {
   flex: 1;
+}
+
+.create-row .field-error {
+  flex-basis: 100%;
 }
 
 /*

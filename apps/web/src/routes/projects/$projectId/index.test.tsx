@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { RESOURCE_TITLE_MAX_LENGTH } from '@finaler-draft/config';
 import {
   fakeJsonResponse,
   fetchMock,
@@ -119,6 +120,51 @@ describe('project page', () => {
         'https://checkout.stripe.test/test-session',
       ),
     );
+  });
+});
+
+describe('the New screenplay title field', () => {
+  beforeEach(resetRouteHarness);
+
+  it('carries noValidate, so the browser never renders its own "please fill out this field" bubble', () => {
+    routeState.query = { data: [], isError: false, isLoading: false };
+    render(<ProjectPage />);
+    expect(screen.getByLabelText('New screenplay title').closest('form')).toHaveAttribute(
+      'novalidate',
+    );
+  });
+
+  it('refuses a blank title -- the screenplay-creation counterpart of the owner’s project-title report -- and shows "Enter a title."', () => {
+    routeState.query = { data: [], isError: false, isLoading: false };
+    render(<ProjectPage />);
+    const input = screen.getByLabelText('New screenplay title');
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.submit(input.closest('form')!);
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a title.');
+    expect(input).toHaveFocus();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      `/api/projects/${projectId}/screenplays`,
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('rejects a title whose trimmed length exceeds RESOURCE_TITLE_MAX_LENGTH, surfaced on blur', () => {
+    routeState.query = { data: [], isError: false, isLoading: false };
+    render(<ProjectPage />);
+    const input = screen.getByLabelText('New screenplay title');
+    fireEvent.change(input, { target: { value: 'x'.repeat(RESOURCE_TITLE_MAX_LENGTH + 1) } });
+    fireEvent.blur(input);
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      `Titles can be at most ${RESOURCE_TITLE_MAX_LENGTH} characters.`,
+    );
+  });
+
+  it('defaults to "Untitled Screenplay", which is already valid -- no message on first render', () => {
+    routeState.query = { data: [], isError: false, isLoading: false };
+    render(<ProjectPage />);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });
 

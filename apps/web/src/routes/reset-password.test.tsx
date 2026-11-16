@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PASSWORD_REQUIREMENTS_MESSAGE } from '@finaler-draft/config';
@@ -100,5 +100,51 @@ describe('reset-password page', () => {
 
     render(<ResetPasswordPage />);
     expect(screen.getByRole('alert')).toHaveTextContent('could not complete');
+  });
+
+  it('carries noValidate, so the browser never renders its own validation bubble', () => {
+    setSearch('?token=abc123');
+    render(<ResetPasswordPage />);
+    expect(screen.getByLabelText('New password').closest('form')).toHaveAttribute('novalidate');
+  });
+
+  it('refuses a submit dispatched directly on the form while the password is blank, bypassing Set new password', () => {
+    setSearch('?token=abc123');
+    render(<ResetPasswordPage />);
+    fireEvent.submit(screen.getByLabelText('New password').closest('form')!);
+
+    expect(screen.getByRole('alert')).toHaveTextContent(PASSWORD_REQUIREMENTS_MESSAGE);
+    expect(screen.getByLabelText('New password')).toHaveFocus();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('/api/auth/reset-password'),
+      expect.anything(),
+    );
+  });
+
+  it('rejects a password under PASSWORD_MIN_LENGTH, unlike sign-in which must accept a short existing one', async () => {
+    setSearch('?token=abc123');
+    const user = userEvent.setup();
+    render(<ResetPasswordPage />);
+    await user.type(screen.getByLabelText('New password'), 'short');
+    await user.click(screen.getByRole('button', { name: 'Set new password' }));
+
+    expect(screen.getByRole('alert')).toHaveTextContent(PASSWORD_REQUIREMENTS_MESSAGE);
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('/api/auth/reset-password'),
+      expect.anything(),
+    );
+  });
+
+  it('associates both the static hint and, once shown, the validation message with the input', async () => {
+    setSearch('?token=abc123');
+    render(<ResetPasswordPage />);
+    const input = screen.getByLabelText('New password');
+    const hintId = `${input.id}-hint`;
+    expect(input.getAttribute('aria-describedby')).toBe(hintId);
+
+    fireEvent.submit(input.closest('form')!);
+    const describedBy = input.getAttribute('aria-describedby')!.split(' ');
+    expect(describedBy).toContain(hintId);
+    expect(describedBy).toContain(screen.getByRole('alert').id);
   });
 });

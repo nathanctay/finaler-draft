@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { RESOURCE_TITLE_MAX_LENGTH } from '@finaler-draft/config';
 import { MessageApiError } from './api.js';
+import { titleFieldSchema } from './formFieldSchemas.js';
+import { useFormValidation } from './useFormValidation.js';
 
 /**
  * The 3-dot-menu "Rename…" item's dialog, on both the project screen
@@ -22,16 +24,19 @@ import { MessageApiError } from './api.js';
  * from scratch -- the one real difference between "save a new label" and "rename an existing
  * thing."
  *
- * **Validated before submission, inline**, mirroring the registration form's password-confirmation
- * mismatch (routes/sign-in.tsx's `showMismatchError`): a field-level message appears, and Rename
- * disables, once the field has been blurred or a submit attempted -- not only after a round trip
- * to the server. The two rules enforced -- non-empty after trimming, at most
- * `RESOURCE_TITLE_MAX_LENGTH` characters -- are exactly `renameInput`'s own
+ * **Validated before submission, inline**, via the shared `useFormValidation` hook
+ * (`useFormValidation.ts`) every form-validation-messages-slice form now uses: a field-level
+ * message appears, and Rename disables, once the field has been blurred or a submit attempted --
+ * not only after a round trip to the server. The one rule enforced -- non-empty after trimming, at
+ * most `RESOURCE_TITLE_MAX_LENGTH` characters -- is exactly `renameInput`'s own
  * (`apps/api/src/projects.ts`: `z.string().trim().min(1).max(RESOURCE_TITLE_MAX_LENGTH)`), read
  * from the same shared `@finaler-draft/config` constant that schema itself uses rather than a
  * second `200` literal maintained here independently: a bound that drifted from the server's own
  * would mean this dialog accepting a title the server would still reject with a 400, or rejecting
- * one the server would have allowed.
+ * one the server would have allowed. `noValidate` on the `<form>` below is what keeps the browser's
+ * own validation bubble from ever pre-empting this message -- the `maxLength` attribute still stops
+ * a keystroke past the bound (assistive and conventional), but no native constraint-validation UI
+ * is allowed to render for it.
  *
  * A **server refusal is shown as the server's own sentence**, not a bare "Request failed (403)" --
  * the pattern `RestoreRevisionDialog.handleConfirm` already established for exactly this reason:
@@ -55,12 +60,10 @@ export function RenameDialog({
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const headingId = useId();
-  const validationErrorId = useId();
   const [title, setTitle] = useState(initialTitle);
-  const [touched, setTouched] = useState(false);
-  const [submitAttempted, setSubmitAttempted] = useState(false);
   const [state, setState] = useState<'idle' | 'pending' | 'error'>('idle');
   const [serverError, setServerError] = useState<string>();
+  const { fields, validateOnSubmit } = useFormValidation({ title: titleFieldSchema }, { title });
 
   useEffect(() => {
     const input = dialogRef.current?.querySelector<HTMLInputElement>('input');
@@ -96,23 +99,17 @@ export function RenameDialog({
     }
   }
 
-  // Validated against the trimmed value, matching `renameInput`'s own `z.string().trim().min(1).
-  // max(...)` exactly -- zod's `.trim()` runs before `.min`/`.max` are checked, so a title that is
-  // only whitespace, or one whose *trimmed* length clears 200, must answer the same way here as it
-  // would on the server.
+  // The trimmed value is what is actually sent -- `titleFieldSchema`'s own `.trim()` only governs
+  // what counts as valid, it does not change what this component holds in state or submits.
   const trimmed = title.trim();
-  const validationError =
-    trimmed.length === 0
-      ? 'Enter a title.'
-      : trimmed.length > RESOURCE_TITLE_MAX_LENGTH
-        ? `Titles can be at most ${RESOURCE_TITLE_MAX_LENGTH} characters.`
-        : undefined;
-  const showValidationError = validationError !== undefined && (touched || submitAttempted);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setSubmitAttempted(true);
-    if (validationError !== undefined || state === 'pending') return;
+    // Checked first, ahead of the pending guard below: a submit attempted while the title is
+    // invalid must reveal the message and stop here, even if (hypothetically) a request were
+    // already in flight -- there is no ordering in which an invalid title should be allowed to
+    // skip straight to the pending branch because the button was also disabled for another reason.
+    if (!validateOnSubmit() || state === 'pending') return;
     setState('pending');
     setServerError(undefined);
     onRename(trimmed).then(
@@ -141,25 +138,19 @@ export function RenameDialog({
         role="dialog"
       >
         <h2 id={headingId}>{kind === 'project' ? 'Rename project' : 'Rename screenplay'}</h2>
-        <form onSubmit={handleSubmit}>
+        <form noValidate onSubmit={handleSubmit}>
           <label className="dialog-field">
             <span>Title</span>
             <input
-              aria-describedby={showValidationError ? validationErrorId : undefined}
-              aria-invalid={showValidationError}
               disabled={state === 'pending'}
               maxLength={RESOURCE_TITLE_MAX_LENGTH}
-              onBlur={() => setTouched(true)}
               onChange={(event) => setTitle(event.target.value)}
               type="text"
               value={title}
+              {...fields.title.inputProps}
             />
           </label>
-          {showValidationError && (
-            <p className="field-error" id={validationErrorId} role="alert">
-              {validationError}
-            </p>
-          )}
+          {fields.title.showError && <p {...fields.title.errorProps}>{fields.title.error}</p>}
           {state === 'error' && (
             <p className="field-error" role="alert">
               {serverError}
@@ -171,7 +162,7 @@ export function RenameDialog({
             </button>
             <button
               className="primary-button"
-              disabled={validationError !== undefined || state === 'pending'}
+              disabled={fields.title.error !== undefined || state === 'pending'}
               type="submit"
             >
               {state === 'pending' ? 'Renaming…' : 'Rename'}
