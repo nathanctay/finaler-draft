@@ -75,6 +75,20 @@
      every other manuscript-adjacent rule to -- verified there in both themes. */
   --fd-find-match-surface: #fdf1b8;
   --fd-find-match-current-surface: #f6c343;
+  /* `.destructive-button`'s own fill (routes/account.delete.tsx's "Delete account"/"Delete
+     anyway"). A literal, not a reuse of `--feedback-error` (which `.dark` *does* redefine, to a
+     light pink meant for text painted on a dark surface, not a button fill) -- this is the same
+     "own surface, resolved against its own background, never an ancestor's" rule `.primary-button`
+     already follows with `--surface-14`/`--surface-01`, neither of which `.dark` touches either.
+     Measured (`contrastRatio`, the same function `text-contrast.spec.ts` uses): white text on this
+     background is 7.30:1, clear of the 4.5:1 real-text floor, identically in both themes since
+     nothing here is theme-conditional. Chosen to match `--feedback-error`'s own light-theme value
+     exactly (`#a02c22`) rather than inventing a second red for this codebase to track. */
+  --fd-destructive-surface: #a02c22;
+  /* The hover/focus shade, one step darker, matching `.primary-button:hover`'s own relationship to
+     `--border-13` (the darker of its two tokens). 8.94:1 against white -- darker, so still clear
+     of the floor. */
+  --fd-destructive-surface-hover: #8a241b;
   --surface-13: #75bc88;
   --surface-14: #276252;
   --surface-15: #34566d;
@@ -2457,6 +2471,40 @@ select:focus-visible,
   color: var(--text-04);
 }
 
+/*
+ * routes/account.delete.tsx's "Delete account"/"Delete anyway". Structurally identical to
+ * `.primary-button` above -- same border width, radius, font, padding -- but filled with
+ * `--fd-destructive-surface` rather than `--surface-14`, both literals `.dark` leaves alone, so
+ * this control needs no dark-theme rule of its own and is verified in both themes by
+ * `text-contrast.spec.ts` for exactly that reason: a theme-independent surface still has to be
+ * *proven* theme-independent, not assumed. See that custom property's own comment (top of this
+ * file) for why it is a literal and not `--feedback-error`.
+ */
+.destructive-button {
+  border: 1px solid var(--fd-destructive-surface-hover);
+  border-radius: 1px;
+  background: var(--fd-destructive-surface);
+  color: #fff;
+  font:
+    600 13px 'IBM Plex Sans',
+    sans-serif;
+  padding: 11px 16px;
+}
+
+.destructive-button:hover:not(:disabled) {
+  background: var(--fd-destructive-surface-hover);
+}
+
+/* Identical disabled treatment to `.primary-button:disabled` immediately above, and for the same
+   reason -- this file has no shared "disabled filled button" rule to delegate to instead, so each
+   filled-button class states it once, on itself. */
+.destructive-button:disabled {
+  cursor: default;
+  border-color: var(--border-05);
+  background: var(--surface-11);
+  color: var(--text-04);
+}
+
 .text-button {
   /* `block` so consecutive text buttons stack rather than sitting side by side on one line. The
      entry screens now render two together -- "Resend verification email" and "I already have an
@@ -3880,6 +3928,15 @@ select:focus-visible,
   display: block;
   color: var(--text-08);
   font-size: 12px;
+}
+
+/* routes/account.delete.tsx's list of owned projects with other collaborators. Each `<li>` reuses
+   `.restore-row`/`.restore-row-title` as-is -- the same "title on the left, one action on the
+   right" idiom the Deleted page already established -- so only the list's own reset is new. */
+.account-deletion-project-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .loading-screen {

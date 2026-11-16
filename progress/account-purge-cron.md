@@ -495,3 +495,128 @@ What remains genuinely unverified is the same thing the agent said: no `railway 
 is a manual reviewed step by design (`.railway/README.md`) and nothing in CI runs it, so the cron
 does not exist in production until someone applies it. That is the one action needed to finish this
 slice, and it is the owner's to take.
+
+## Two corrections after the first real production run
+
+The cron was applied to Railway and **fired before this branch merged**, which surfaced two problems
+in the service declaration. Neither was in the purge logic.
+
+### The `preDeploy` migration is removed
+
+The declaration carried `preDeploy: 'pnpm --filter @finaler-draft/database db:migrate'`, copied from
+`app`. The first scheduled run failed on it outright:
+
+```
+ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @finaler-draft/database db:migrate
+DATABASE_URL is required for Drizzle commands.
+```
+
+The immediate cause was a missing variable (below), but removing the step is right regardless, and
+the original justification for having it does not survive checking. That justification was: this
+slice's migration adds indexes the purge reads, this service's deploy is not ordered against
+`app`'s, so it should run the idempotent migration itself.
+
+- The migration (`0013_violet_steve_rogers.sql`) adds **only indexes** -- four of them. A missing
+  index makes a nightly batch job slower; it never makes it incorrect. So the purge does not need
+  the migration to have run before its first execution.
+- Giving a 03:00 cron the ability to migrate the production database races whatever schema `app`
+  believes it is running against, on a schedule nobody is watching. `app` owns migrations for the
+  ordering reason its own declaration states: it deploys before `collab` so the schema is migrated
+  before the other reader of that database restarts against it. One owner, one ordering.
+
+If this job ever runs against a schema older than it expects, a loud failure is the correct outcome,
+not a 3am schema change.
+
+### `preserve()` on a brand-new service preserves nothing
+
+The declaration had `env: { DATABASE_URL: preserve(), NODE_ENV: preserve() }`, and the live service
+had **neither** -- only Railway's own injected `RAILWAY_*` values.
+
+That is the mechanism worth remembering: `preserve()` means "keep whatever Railway already holds for
+this key", which is exactly right for an existing service and a no-op for a new one. It is the
+`FEEDBACK_MAIL_TO` lesson inverted -- there, _omitting_ a variable from this file deleted it; here,
+`preserve()`-ing it on a service that had never existed never created it. A new service's variables
+have to be set once, by hand, before `preserve()` has anything to hold on to. The owner has since
+set both.
+
+### The build command did not produce the entry point the start command runs
+
+**The purge had never once executed.** Deployment `6692ab23` (from the merge of PR #80) built and
+deployed fine, then CRASHED the moment its first 03:00 trigger fired:
+
+```
+Error: Cannot find module '/app/apps/api/dist/accountPurgeCli.js'
+code: 'MODULE_NOT_FOUND'
+ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @finaler-draft/api purge:accounts: `node dist/accountPurgeCli.js`
+```
+
+`start` is `pnpm --filter @finaler-draft/api purge:accounts`, which is `node dist/accountPurgeCli.js`
+-- produced by `apps/api`'s own `tsc` build. `build` was `pnpm build:packages`, and that root script
+builds `packages/*` only: `apps/api` is deliberately not in it, which is precisely what root `build`
+adds on top. Verified both directions rather than assumed: the script list has no `@finaler-draft/api`
+filter, and running `pnpm --filter @finaler-draft/api build` does produce `dist/accountPurgeCli.js`.
+
+Fixed to `pnpm build:packages && pnpm --filter @finaler-draft/api build` -- not root `build`, which
+would additionally build `web`, `landing` and `collab`, none of which this cron loads.
+
+**The general rule, since nothing in this project currently checks it: a service's build must produce
+the entry point its own `start` runs.** Those two fields were written independently, both looked
+reasonable in review, and the mismatch surfaced only when a cron fired at 03:00 -- the worst place to
+learn it. Every other service here happens to satisfy the rule because it runs `pnpm build`.
+
+**This was invisible, and that is the more important problem.** The deploy succeeded; only the
+_execution_ failed, hours later, on a schedule nobody watches. `deploy-outcome` in `quality.yml`
+turns "production did not ship" into a failed CI run, but nothing turns "the nightly job crashed"
+into anything a human sees. A crashed cron is still entirely silent today. Worth fixing separately;
+a Railway webhook on deployment crash is the cheap version.
+
+### The workflow does not deploy this service, and should not
+
+An earlier revision of this branch added a fourth `railway up` step to `quality.yml` for
+`account-purge`, on the reasoning that the service would otherwise keep running whatever snapshot
+`railway config apply` first built, forever. **That premise was wrong, and the deployment history
+disproves it.** This service's two deployments both carry commit metadata:
+
+```
+meta.reason: "deploy"
+meta.commitMessage: "Merge pull request #80 from nathanctay/feature/account-purge-cron"
+meta.commitHash: 4a8d135...
+meta.branch: main
+```
+
+Those are GitHub-triggered auto-deploys. Its live source is `{repo, branch: 'main'}`, so a push to
+main rebuilds it -- which is how the crashed deployment came to exist at all. `app`'s deployments, by
+contrast, carry `meta: {reason: 'deploy'}` with **no** commit metadata, because CI's `railway up`
+uploads a snapshot with no `.git`. The two services deploy by two different mechanisms, and
+`account-purge` was never frozen.
+
+The step was therefore dropped rather than reworded: it would have been a second, redundant deploy of
+a service that already redeploys on push.
+
+One consequence worth noting and not acting on here: because this service auto-deploys from GitHub
+rather than from CI, it is not covered by the `deploy-outcome` gate the way the other three are, and
+whether a red main can deploy it depends on Railway's own "Wait for CI" setting rather than on
+anything in this repo. That is a deliberate open question, not an oversight.
+
+### Railway pins cron services to `restartPolicyType: NEVER`
+
+The declaration carried `restartPolicyMaxRetries: 3`, copied from `app` together with `app`'s
+reasoning about Railway's `ON_FAILURE` default. That is wrong for a cron service, and the evidence is
+observed rather than documented: writing `ON_FAILURE` plus 3 retries to this service through
+Railway's own API returns `updatedFields: ["restartPolicyType", "restartPolicyMaxRetries"]` -- and
+the live config still reads `restartPolicyType: "NEVER"` with no retry count at all. The write is
+accepted and silently ignored.
+
+Two consequences. The declared retry count was inert, so nothing behaved as the comment claimed. And
+because the platform refuses to store it, it was exactly the "permanent phantom drift in `railway
+config plan`" the other three services' comments warn against -- `plan` showed
+`restartPolicyType ("NEVER" → null)` and `restartPolicyMaxRetries (null → 3)` as pending changes that
+could never be applied, on every future run. Drift that can never clear is drift nobody reads.
+
+Now declared as `restartPolicyType: 'NEVER'` with no retry count, which is what Railway actually
+holds. Behaviourally that is also the right policy: a crashed run must not be restarted into the next
+scheduled trigger's window, and the next day's run picks up the identical backlog because the purge
+is idempotent.
+
+Worth noting for any future cron service in this file: the `app`/`collab`/`landing` restart-policy
+comments do not transfer to one.

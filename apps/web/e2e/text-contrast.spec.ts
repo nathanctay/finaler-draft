@@ -283,6 +283,32 @@ const CASES: readonly ContrastCase[] = [
     themes: BOTH,
   },
   {
+    /*
+     * routes/account.delete.tsx's "Delete account"/"Delete anyway". The whole point of
+     * `--fd-destructive-surface` (styles.css, top of file) is that it is a literal `.dark` never
+     * redefines, so this button's own background -- not an ancestor's -- should resolve identically
+     * in both themes. That claim is exactly the kind this project has twice gotten wrong by
+     * assuming rather than measuring (this file's own module comment), so it is measured here
+     * rather than taken as self-evident from the custom property's definition.
+     */
+    name: '.destructive-button (its own literal fill, unaffected by either theme)',
+    markup:
+      '<div class="dialog"><div class="dialog-actions"><button class="destructive-button" type="button">Delete account</button></div></div>',
+    target: '.destructive-button',
+    minimum: REAL_TEXT,
+    shell: true,
+    themes: BOTH,
+  },
+  {
+    name: '.destructive-button:disabled',
+    markup:
+      '<div class="dialog"><div class="dialog-actions"><button class="destructive-button" disabled type="button">Delete account</button></div></div>',
+    target: '.destructive-button:disabled',
+    minimum: INACTIVE_CONTROL,
+    shell: true,
+    themes: BOTH,
+  },
+  {
     name: '.text-button:disabled',
     markup:
       '<main class="project-screen"><button class="text-button" disabled type="button">Restore</button></main>',
