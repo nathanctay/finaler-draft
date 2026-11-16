@@ -213,7 +213,23 @@ export default defineRailway(() => {
   // symmetry with `app`/`collab`.
   const accountPurge = service('account-purge', {
     source: finalerDraft,
-    build: 'pnpm build:packages',
+    /*
+     * **`build:packages` alone is not enough, and shipping it that way broke the first real run.**
+     * `start` below runs `apps/api`'s `purge:accounts`, which is `node dist/accountPurgeCli.js` --
+     * a file produced by `apps/api`'s own `tsc` build. The root `build:packages` script builds
+     * `packages/*` only; `apps/api` is deliberately not in it (that is what root `build` adds). So
+     * the container started, found no `dist/accountPurgeCli.js`, and exited 1 with
+     * `MODULE_NOT_FOUND` -- deployment `6692ab23` CRASHED on its first scheduled trigger, meaning
+     * the grace-period purge had never once executed between this service being created and this
+     * fix.
+     *
+     * Not root `build`: that additionally builds `web`, `landing` and `collab`, none of which this
+     * cron loads. The rule this field has to satisfy is narrow and worth stating plainly, because
+     * nothing else in this file checks it -- **a service's build must produce the entry point its
+     * own `start` runs.** These two fields were written independently and nothing failed until a
+     * cron fired at 03:00, which is the worst place to learn it.
+     */
+    build: 'pnpm build:packages && pnpm --filter @finaler-draft/api build',
     /*
      * **No `preDeploy` migration here, deliberately.** `app` owns migrations, and the reason is in
      * its own declaration above: `app` deploys before `collab` precisely so the schema is migrated

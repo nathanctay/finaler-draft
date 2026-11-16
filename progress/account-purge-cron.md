@@ -538,3 +538,62 @@ this key", which is exactly right for an existing service and a no-op for a new 
 `preserve()`-ing it on a service that had never existed never created it. A new service's variables
 have to be set once, by hand, before `preserve()` has anything to hold on to. The owner has since
 set both.
+
+### The build command did not produce the entry point the start command runs
+
+**The purge had never once executed.** Deployment `6692ab23` (from the merge of PR #80) built and
+deployed fine, then CRASHED the moment its first 03:00 trigger fired:
+
+```
+Error: Cannot find module '/app/apps/api/dist/accountPurgeCli.js'
+code: 'MODULE_NOT_FOUND'
+ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @finaler-draft/api purge:accounts: `node dist/accountPurgeCli.js`
+```
+
+`start` is `pnpm --filter @finaler-draft/api purge:accounts`, which is `node dist/accountPurgeCli.js`
+-- produced by `apps/api`'s own `tsc` build. `build` was `pnpm build:packages`, and that root script
+builds `packages/*` only: `apps/api` is deliberately not in it, which is precisely what root `build`
+adds on top. Verified both directions rather than assumed: the script list has no `@finaler-draft/api`
+filter, and running `pnpm --filter @finaler-draft/api build` does produce `dist/accountPurgeCli.js`.
+
+Fixed to `pnpm build:packages && pnpm --filter @finaler-draft/api build` -- not root `build`, which
+would additionally build `web`, `landing` and `collab`, none of which this cron loads.
+
+**The general rule, since nothing in this project currently checks it: a service's build must produce
+the entry point its own `start` runs.** Those two fields were written independently, both looked
+reasonable in review, and the mismatch surfaced only when a cron fired at 03:00 -- the worst place to
+learn it. Every other service here happens to satisfy the rule because it runs `pnpm build`.
+
+**This was invisible, and that is the more important problem.** The deploy succeeded; only the
+_execution_ failed, hours later, on a schedule nobody watches. `deploy-outcome` in `quality.yml`
+turns "production did not ship" into a failed CI run, but nothing turns "the nightly job crashed"
+into anything a human sees. A crashed cron is still entirely silent today. Worth fixing separately;
+a Railway webhook on deployment crash is the cheap version.
+
+### The workflow does not deploy this service, and should not
+
+An earlier revision of this branch added a fourth `railway up` step to `quality.yml` for
+`account-purge`, on the reasoning that the service would otherwise keep running whatever snapshot
+`railway config apply` first built, forever. **That premise was wrong, and the deployment history
+disproves it.** This service's two deployments both carry commit metadata:
+
+```
+meta.reason: "deploy"
+meta.commitMessage: "Merge pull request #80 from nathanctay/feature/account-purge-cron"
+meta.commitHash: 4a8d135...
+meta.branch: main
+```
+
+Those are GitHub-triggered auto-deploys. Its live source is `{repo, branch: 'main'}`, so a push to
+main rebuilds it -- which is how the crashed deployment came to exist at all. `app`'s deployments, by
+contrast, carry `meta: {reason: 'deploy'}` with **no** commit metadata, because CI's `railway up`
+uploads a snapshot with no `.git`. The two services deploy by two different mechanisms, and
+`account-purge` was never frozen.
+
+The step was therefore dropped rather than reworded: it would have been a second, redundant deploy of
+a service that already redeploys on push.
+
+One consequence worth noting and not acting on here: because this service auto-deploys from GitHub
+rather than from CI, it is not covered by the `deploy-outcome` gate the way the other three are, and
+whether a red main can deploy it depends on Railway's own "Wait for CI" setting rather than on
+anything in this repo. That is a deliberate open question, not an oversight.
