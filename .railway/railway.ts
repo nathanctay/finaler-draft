@@ -194,11 +194,14 @@ export default defineRailway(() => {
   // does not exit, subsequent executions of the Cron will be skipped"). There is nothing for a
   // healthcheck to probe between runs.
   //
-  // **`preDeploy` runs the same migration `app` already runs on every deploy.** This service's
-  // own index additions (`session_expires_at_index` and friends, this slice's migration) must
-  // exist before its first scheduled run reads them, and this service's deploy is not ordered
-  // against `app`'s in `railway.ts` -- so it carries the identical, idempotent `db:migrate` step
-  // rather than depending on `app` having already deployed first.
+  // **No migration step, and the original reasoning for having one did not survive checking.**
+  // That reasoning was: this slice's migration adds indexes the purge reads, this service's deploy
+  // is not ordered against `app`'s, so it should run the idempotent `db:migrate` itself. Two
+  // things are wrong with it. The migration adds *only* indexes (`session_expires_at_index` and
+  // three siblings -- `0013_violet_steve_rogers.sql`), and a missing index makes a nightly batch
+  // job slower, never incorrect. And giving a 03:00 cron the ability to migrate production races
+  // whatever schema `app` believes it is running against, on a schedule nobody watches. `app` owns
+  // migrations, for the ordering reason its own declaration states -- see the `start` field below.
   //
   // **Only `DATABASE_URL` and `NODE_ENV`, deliberately** -- see `accountPurgeCli.ts`'s own module
   // comment for why this script does not reuse `@finaler-draft/server-config`'s
@@ -211,7 +214,22 @@ export default defineRailway(() => {
   const accountPurge = service('account-purge', {
     source: finalerDraft,
     build: 'pnpm build:packages',
-    preDeploy: 'pnpm --filter @finaler-draft/database db:migrate',
+    /*
+     * **No `preDeploy` migration here, deliberately.** `app` owns migrations, and the reason is in
+     * its own declaration above: `app` deploys before `collab` precisely so the schema is migrated
+     * before the other service reading that database restarts against it. One owner, one ordering.
+     *
+     * Copying that `preDeploy` onto a *cron* service -- which is what this originally did -- gives a
+     * nightly job the ability to migrate the production database at 03:00, racing whatever schema
+     * `app` currently believes it is running against, on a schedule nobody is watching. It also
+     * failed outright on the first real run: the service had no `DATABASE_URL` yet, so
+     * `db:migrate` exited 1 with "DATABASE_URL is required for Drizzle commands" before the purge
+     * script was ever reached.
+     *
+     * This job needs no migration of its own. It reads a schema `app` has already migrated, and if
+     * it ever runs against a database older than its own expectations the correct outcome is a loud
+     * failure, not a 3am schema change.
+     */
     start: 'pnpm --filter @finaler-draft/api purge:accounts',
     replicas: { 'us-west2': 1 },
     deploy: {

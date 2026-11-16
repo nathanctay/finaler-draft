@@ -495,3 +495,46 @@ What remains genuinely unverified is the same thing the agent said: no `railway 
 is a manual reviewed step by design (`.railway/README.md`) and nothing in CI runs it, so the cron
 does not exist in production until someone applies it. That is the one action needed to finish this
 slice, and it is the owner's to take.
+
+## Two corrections after the first real production run
+
+The cron was applied to Railway and **fired before this branch merged**, which surfaced two problems
+in the service declaration. Neither was in the purge logic.
+
+### The `preDeploy` migration is removed
+
+The declaration carried `preDeploy: 'pnpm --filter @finaler-draft/database db:migrate'`, copied from
+`app`. The first scheduled run failed on it outright:
+
+```
+ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @finaler-draft/database db:migrate
+DATABASE_URL is required for Drizzle commands.
+```
+
+The immediate cause was a missing variable (below), but removing the step is right regardless, and
+the original justification for having it does not survive checking. That justification was: this
+slice's migration adds indexes the purge reads, this service's deploy is not ordered against
+`app`'s, so it should run the idempotent migration itself.
+
+- The migration (`0013_violet_steve_rogers.sql`) adds **only indexes** -- four of them. A missing
+  index makes a nightly batch job slower; it never makes it incorrect. So the purge does not need
+  the migration to have run before its first execution.
+- Giving a 03:00 cron the ability to migrate the production database races whatever schema `app`
+  believes it is running against, on a schedule nobody is watching. `app` owns migrations for the
+  ordering reason its own declaration states: it deploys before `collab` so the schema is migrated
+  before the other reader of that database restarts against it. One owner, one ordering.
+
+If this job ever runs against a schema older than it expects, a loud failure is the correct outcome,
+not a 3am schema change.
+
+### `preserve()` on a brand-new service preserves nothing
+
+The declaration had `env: { DATABASE_URL: preserve(), NODE_ENV: preserve() }`, and the live service
+had **neither** -- only Railway's own injected `RAILWAY_*` values.
+
+That is the mechanism worth remembering: `preserve()` means "keep whatever Railway already holds for
+this key", which is exactly right for an existing service and a no-op for a new one. It is the
+`FEEDBACK_MAIL_TO` lesson inverted -- there, _omitting_ a variable from this file deleted it; here,
+`preserve()`-ing it on a service that had never existed never created it. A new service's variables
+have to be set once, by hand, before `preserve()` has anything to hold on to. The owner has since
+set both.
