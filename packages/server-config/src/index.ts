@@ -93,6 +93,26 @@ const serverEnvironment = z.object({
   // "fails at startup, not at the first submission" reason `RESEND_API_KEY`/`MAIL_FROM_ADDRESS`
   // already do.
   FEEDBACK_MAIL_TO: z.string().email().optional(),
+  // The deployment-crash alert webhook (`POST /api/webhooks/railway`,
+  // apps/api/src/railwayAlerts.ts). Railway's webhook delivery carries no signature -- there is no
+  // equivalent of Stripe's `constructEvent` to verify against -- so this shared secret, carried in
+  // a custom header Railway's delivery form lets the receiver name, is the entire authentication
+  // boundary for that route. Optional here for the same reason the Resend/Stripe/collab-token/
+  // feedback fields above are: a health/static-only process, and local development without this
+  // configured, both need to start -- `apps/api`'s `buildApp` simply never registers the route
+  // without it (progress/deployment-crash-alerts.md: "an unauthenticated endpoint that emails on
+  // request is worse than no endpoint" -- a route that existed but accepted any caller would be
+  // actively worse than one that does not exist). `requirePersistenceEnvironment` below makes it
+  // mandatory in production, for the identical "fails at startup, not at the next silent crash"
+  // reason `STRIPE_WEBHOOK_SECRET` already does.
+  RAILWAY_WEBHOOK_SECRET: z.string().optional(),
+  // The deployment-crash alert's email destination. Deliberately a separate variable from
+  // `FEEDBACK_MAIL_TO` above, not a reuse of it: feedback may later route to a shared inbox a
+  // wider team reads (see that variable's own comment), and an operational crash alert -- the
+  // kind of message that needs a human to act within minutes, not whenever someone next checks a
+  // shared inbox -- must not be forced to follow it there if that happens. The two destinations
+  // are allowed to diverge from the day this variable is introduced, not retrofitted later.
+  ALERT_MAIL_TO: z.string().email().optional(),
 });
 
 export type ServerEnvironment = z.infer<typeof serverEnvironment>;
@@ -118,6 +138,8 @@ export function requirePersistenceEnvironment(environment: ServerEnvironment) {
       STRIPE_PRICE_ID_ANNUAL: z.string().optional(),
       COLLAB_TOKEN_SECRET: z.string().min(32).optional(),
       FEEDBACK_MAIL_TO: z.string().email().optional(),
+      RAILWAY_WEBHOOK_SECRET: z.string().optional(),
+      ALERT_MAIL_TO: z.string().email().optional(),
     })
     .parse(environment);
   if (environment.NODE_ENV === 'production') {
@@ -172,6 +194,22 @@ export function requirePersistenceEnvironment(environment: ServerEnvironment) {
       throw new Error(
         'FEEDBACK_MAIL_TO is required in production: without it, the "Send feedback" capture ' +
           "path's best-effort notification email has no destination address.",
+      );
+    }
+    // The deployment-crash alert webhook (progress/deployment-crash-alerts.md). A production
+    // process started without both of these either cannot authenticate Railway's webhook
+    // delivery at all (no shared secret to compare the custom header against, so the route is
+    // never registered -- see `RailwayAlertsPort`'s own comment in app.ts) or has nowhere to send
+    // the alert email it exists to send. Either gap reproduces the exact incident this route was
+    // built to close: the `account-purge` cron crashed on its first scheduled run with
+    // `MODULE_NOT_FOUND`, and nobody found out until a worktree cleanup turned it up by chance.
+    // Failing here, at startup, turns a missing variable into a deploy-time error instead of a
+    // second silent crash nobody hears about.
+    if (!persistence.RAILWAY_WEBHOOK_SECRET || !persistence.ALERT_MAIL_TO) {
+      throw new Error(
+        'RAILWAY_WEBHOOK_SECRET and ALERT_MAIL_TO are required in production: without them, ' +
+          "the deployment-crash alert webhook has no shared secret to authenticate Railway's " +
+          'webhook delivery and nowhere to send the resulting alert email.',
       );
     }
   }
