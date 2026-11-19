@@ -21,7 +21,13 @@ vi.mock('@tanstack/react-router', async (importOriginal) =>
 
 const { Route } = await import('./index.js');
 const ProjectsPage = Route.options.component!;
-const sessionUser: SessionUser = { email: 'writer@example.com', id: 'writer-1', name: 'Writer' };
+const sessionUser: SessionUser = {
+  createdAt: '2026-01-01T00:00:00.000Z',
+  email: 'writer@example.com',
+  emailVerified: true,
+  id: 'writer-1',
+  name: 'Writer',
+};
 
 function contextWithSession(user: SessionUser | null) {
   return { context: { queryClient: { ensureQueryData: vi.fn().mockResolvedValue(user) } } };
@@ -43,11 +49,11 @@ describe('projects page', () => {
   });
 
   /**
-   * The account menu's own behaviour (sign-out, Deleted items, Manage Subscription, the
-   * sign-out-failure message) is `accountMenu.test.tsx`'s responsibility now -- see that file's
-   * own comment on why this page no longer carries a second copy of those assertions. What is
-   * still this page's own to prove: that the one real control mounted here *is* that shared
-   * component, and that Deleted items has no second, bare way in alongside it.
+   * The account menu's own behaviour (sign-out, Manage account, the sign-out-failure message) is
+   * `accountMenu.test.tsx`'s responsibility now -- see that file's own comment on why this page
+   * no longer carries a second copy of those assertions. What is still this page's own to prove:
+   * that the one real control mounted here *is* that shared component, and that Deleted items
+   * has no second, bare way in alongside it.
    */
   it('mounts the shared account menu, with no bare link to Deleted items alongside it', () => {
     render(<ProjectsPage />);

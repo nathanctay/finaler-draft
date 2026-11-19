@@ -47,3 +47,14 @@ export const emailFieldSchema = z
   .trim()
   .min(1, 'Enter an email address.')
   .email('Enter a valid email address.');
+
+/**
+ * "Not blank" is this one's whole rule -- Better Auth's own sign-up accepts any non-empty name,
+ * and there is no server-side bound beyond that to share (see `useFormValidation.ts`'s own top
+ * comment on why a field with no shared bound still gets a schema, for uniformity). Originally
+ * local to `routes/sign-in.tsx`; moved here once `routes/account/index.tsx`'s own name field
+ * (the Account info tab's "apply immediately" name change, `progress/manage-account-page.md`)
+ * became a second caller of the identical rule -- the exact threshold this module's own top
+ * comment names for promoting a field-local schema into this shared one.
+ */
+export const nameFieldSchema = z.string().trim().min(1, 'Enter your name.');

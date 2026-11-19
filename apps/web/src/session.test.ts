@@ -2,7 +2,13 @@ import { QueryClient } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { guardSessionUser, sessionQueryOptions } from './session.js';
 
-const user = { email: 'writer@example.com', id: 'writer-1', name: 'Writer' };
+const user = {
+  createdAt: '2026-01-01T00:00:00.000Z',
+  email: 'writer@example.com',
+  emailVerified: true,
+  id: 'writer-1',
+  name: 'Writer',
+};
 
 function fakeQueryClient(ensureQueryData: () => Promise<unknown>): QueryClient {
   return { ensureQueryData } as unknown as QueryClient;

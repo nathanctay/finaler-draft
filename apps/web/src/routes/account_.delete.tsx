@@ -15,6 +15,18 @@ import { guardSessionUser } from '../session.js';
  * (`progress/account-deletion-backend.md`) is an **informed override, never a hard block** -- this
  * page is the one place that override is offered.
  *
+ * **Filename.** `account_.delete.tsx`, not `account.delete.tsx` -- the trailing underscore is
+ * TanStack Router's "non-nested route" escape (`@tanstack/router-generator`'s own
+ * `hasParentRoute`, which compares raw `routePath` strings before `removeUnderscores` ever runs,
+ * so the extra character is exactly what keeps this file's route from matching as a descendant).
+ * `progress/manage-account-page.md` added a real layout route at `/account`
+ * (`routes/account.tsx`, left-side navigation, three nested tabs), and without this escape every
+ * file whose name starts with `account.` -- this one included -- would have nested under it, each
+ * tab's titlebar-and-nav chrome wrapping around what is supposed to be *this* page's own full,
+ * independent screen. The resolved URL is still the unchanged `/account/delete`; nothing about
+ * this page's behaviour, its guard, or its tests changed, only the filename needed to say "do not
+ * nest me."
+ *
  * **Where this lives, and why a route at all.** There is no account/settings page in this app
  * (`accountMenu.tsx`'s own module comment lists the three destinations that existed before this
  * slice). This follows `routes/billing.subscription.tsx`/`routes/deleted.tsx` exactly: a flat
@@ -22,7 +34,9 @@ import { guardSessionUser } from '../session.js';
  * by the same `guardSessionUser` every other authenticated route uses -- not nested under
  * `/projects`, for the identical reason those two pages give (`routes/deleted.tsx`'s own comment:
  * "it shouldn't say Projects before the page in the header. That doesn't make sense" -- this page
- * is not inside a project either).
+ * is not inside a project either). Both of those two now redirect into the new layout
+ * (`routes/account.subscription.tsx`/`routes/account.deleted.tsx`); this page alone stays where it
+ * is, per the owner's explicit instruction that it "stays exactly where it is."
  *
  * **The two flows.**
  *
@@ -91,7 +105,7 @@ import { guardSessionUser } from '../session.js';
  * between this file and the backend's own prose "30 days" to keep the two in lockstep, because
  * slice C has not defined one yet.
  */
-export const Route = createFileRoute('/account/delete')({
+export const Route = createFileRoute('/account_/delete')({
   beforeLoad: async ({ context }) => {
     const user = await guardSessionUser(context.queryClient);
     if (!user) throw redirect({ to: '/sign-in' });
@@ -126,7 +140,6 @@ function AccountDeletedPage() {
   return (
     <main className="project-screen">
       <section className="project-list">
-        <p className="eyebrow">ACCOUNT</p>
         <h1>Your account has been deleted</h1>
         <p>
           You have been signed out of every session, and any subscription has been cancelled. Your
@@ -198,7 +211,6 @@ function DeleteAccountForm({ onDeleted }: { onDeleted: () => void }) {
         documentTitle="Delete account"
       />
       <section className="project-list">
-        <p className="eyebrow">ACCOUNT</p>
         <h1>Delete your account</h1>
         <p>
           Deleting your account stops it from working immediately: you are signed out everywhere,
@@ -261,16 +273,38 @@ function DeleteAccountForm({ onDeleted }: { onDeleted: () => void }) {
                 </ul>
               </>
             )}
-            <button
-              className="destructive-button"
-              onClick={() => {
-                if (hasCollaboratorProjects) setOverrideOpen(true);
-                else setConfirmOpen(true);
-              }}
-              type="button"
-            >
-              {hasCollaboratorProjects ? 'Delete anyway' : 'Delete account'}
-            </button>
+            {/* **The way out, which this page shipped without.** Reaching here is itself a
+                confirmation step -- a writer arrives by pressing "Delete account" on the Account
+                info tab -- and the only control was the destructive one, so the single way to
+                change your mind was the browser's back button. The owner's own report: "we don't
+                have a 'dont delete' button. Just 'delete account'/'delete anyway'. We need a
+                'dont delete' button to bring the user back to the settings page."
+
+                **Ordered destructive-first, escape second**, at the owner's explicit direction:
+                "I think the don't delete button should go on the right side of the delete button,
+                rather than the left." That is also this product's own idiom -- a retro desktop,
+                where the confirming action leads and the way out follows it, the order Windows has
+                used for OK/Cancel for decades, rather than the macOS reverse. It is the opposite of
+                where this first shipped.
+
+                A `Link`, not a button with a navigate call: it is navigation, so it should
+                middle-click, open in a new tab, and show its target on hover like any other link.
+                `.destructive-button` already rides a `Link` the same way on the Account info tab. */}
+            <div className="page-actions">
+              <button
+                className="destructive-button"
+                onClick={() => {
+                  if (hasCollaboratorProjects) setOverrideOpen(true);
+                  else setConfirmOpen(true);
+                }}
+                type="button"
+              >
+                {hasCollaboratorProjects ? 'Delete anyway' : 'Delete account'}
+              </button>
+              <Link className="secondary-button" to="/account">
+                Don&rsquo;t delete
+              </Link>
+            </div>
           </>
         )}
       </section>

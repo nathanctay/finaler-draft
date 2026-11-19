@@ -8,7 +8,13 @@ vi.mock('@tanstack/react-router', async (importOriginal) =>
 
 const { Route } = await import('./$projectId.js');
 const ProjectLayout = Route.options.component!;
-const sessionUser: SessionUser = { email: 'writer@example.com', id: 'writer-1', name: 'Writer' };
+const sessionUser: SessionUser = {
+  createdAt: '2026-01-01T00:00:00.000Z',
+  email: 'writer@example.com',
+  emailVerified: true,
+  id: 'writer-1',
+  name: 'Writer',
+};
 const projectId = '216ec49a-a6c6-49ff-8e2e-5994d5ca91dd';
 
 function contextWithSession(user: SessionUser | null) {

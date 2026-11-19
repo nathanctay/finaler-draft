@@ -9,7 +9,13 @@ vi.mock('@tanstack/react-query', async () =>
 
 const { useAuth } = await import('./useAuth.js');
 
-const sessionUser: SessionUser = { email: 'writer@example.com', id: 'writer-1', name: 'Writer' };
+const sessionUser: SessionUser = {
+  createdAt: '2026-01-01T00:00:00.000Z',
+  email: 'writer@example.com',
+  emailVerified: true,
+  id: 'writer-1',
+  name: 'Writer',
+};
 
 describe('useAuth', () => {
   beforeEach(resetRouteHarness);
