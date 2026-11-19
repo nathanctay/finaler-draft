@@ -79,6 +79,12 @@ describe('createAuth', () => {
           // progress/transactional-email.md), so this cannot be `false` any more.
           requireEmailVerification: true,
         }),
+        // The Manage account page's email change (progress/manage-account-page.md):
+        // `updateEmailWithoutVerification` and `sendChangeEmailConfirmation` are deliberately
+        // absent, not merely falsy -- see this call site's own comment for why their absence,
+        // not a `false` here, is what makes the verification-first path the only one Better
+        // Auth's installed `changeEmail` handler can reach.
+        user: { changeEmail: { enabled: true } },
       }),
     );
   });

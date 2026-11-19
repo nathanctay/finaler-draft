@@ -14,7 +14,13 @@ vi.mock('@tanstack/react-router', async (importOriginal) =>
 
 const { Route } = await import('./sign-in.js');
 const SignInPage = Route.options.component!;
-const user: SessionUser = { email: 'writer@example.com', id: 'writer-1', name: 'Writer' };
+const user: SessionUser = {
+  createdAt: '2026-01-01T00:00:00.000Z',
+  email: 'writer@example.com',
+  emailVerified: true,
+  id: 'writer-1',
+  name: 'Writer',
+};
 
 function contextWithSession(sessionUser: SessionUser | null) {
   return { context: { queryClient: { ensureQueryData: vi.fn().mockResolvedValue(sessionUser) } } };

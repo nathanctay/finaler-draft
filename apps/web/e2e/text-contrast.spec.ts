@@ -135,6 +135,82 @@ const CASES: readonly ContrastCase[] = [
     shell: false,
     themes: LIGHT_ONLY,
   },
+  // The Manage account page's own left-side navigation (routes/account.tsx,
+  // progress/manage-account-page.md). Light-only for the same reason `.muted on a project
+  // screen` above is: this never sits inside the editor's `.application.dark` shell either.
+  {
+    name: 'account nav link (not the current tab), on the account window surface',
+    markup:
+      '<div class="account-window"><nav class="account-nav"><a class="account-nav-link" href="/account/subscription">Manage Subscription</a></nav></div>',
+    target: '.account-nav-link',
+    minimum: REAL_TEXT,
+    shell: false,
+    themes: LIGHT_ONLY,
+  },
+  {
+    // `.account-nav-link-active` paints its own background directly, so this is the one case in
+    // this group where the target itself, not an ancestor, is the correct background to resolve
+    // -- the identical reasoning `.find-match` below gives for the same shape of rule.
+    name: 'account nav link (the current tab), against its own highlighted background',
+    markup:
+      '<div class="account-window"><nav class="account-nav"><a class="account-nav-link account-nav-link-active" href="/account">Account info</a></nav></div>',
+    target: '.account-nav-link-active',
+    minimum: REAL_TEXT,
+    shell: false,
+    themes: LIGHT_ONLY,
+  },
+  {
+    // Deliberately pinned even though nothing about this rule looked risky going in: `--text-09`
+    // on `--surface-02` measures 4.91:1, barely past the 4.5 floor, and this project has shipped
+    // a token one step too faint on a light-only surface before (this spec's own top comment).
+    name: '.account-info-status, on the account window surface',
+    markup:
+      '<div class="account-window"><div class="account-tab-content"><p class="account-info-status">Check newwriter@example.test for a link to confirm this change.</p></div></div>',
+    target: '.account-info-status',
+    minimum: REAL_TEXT,
+    shell: false,
+    themes: LIGHT_ONLY,
+  },
+  {
+    // 4.81:1 -- past the 4.5 floor, but by the narrowest margin of any rule in this spec, so it is
+    // pinned deliberately. `--text-08` was chosen for this label over the `--text-09` the value
+    // rows use because a ledger's label column should recede; one step fainter would not clear the
+    // floor at all.
+    name: '.account-fact label column, on the account window surface',
+    markup:
+      '<div class="account-window"><div class="account-tab-content"><p class="dialog-field account-fact"><span>Member since</span><span class="account-info-value">14 March 2026</span></p></div></div>',
+    target: '.account-fact > span:first-child',
+    minimum: REAL_TEXT,
+    shell: false,
+    themes: LIGHT_ONLY,
+  },
+  {
+    // The email confirmation tooltip (`routes/account/index.tsx`'s `EmailStatusDot`). It is
+    // `visibility: hidden` until hover, which is why the markup forces it visible: this measures
+    // the colours it paints when shown, not whether it is shown.
+    name: '.email-status-tooltip, on its own bubble background',
+    markup:
+      '<div class="account-window"><div class="account-tab-content"><span class="email-status-tooltip" style="visibility: visible; position: static">Confirmed</span></div></div>',
+    target: '.email-status-tooltip',
+    minimum: REAL_TEXT,
+    shell: false,
+    themes: LIGHT_ONLY,
+  },
+  {
+    // "Cancel" in edit mode. Shares one declaration with `.dialog-actions button`, so this guards
+    // the secondary treatment everywhere it is used, not only this page. Its *text* is what has to
+    // clear the floor; the 1px `--border-04` boundary measures just 1.64:1 against this surface and
+    // is deliberately not asserted -- the button is identified by its own label, so that border is
+    // reinforcement rather than the thing carrying the component's identity. Recorded as a standing
+    // design weakness, not a contrast failure.
+    name: '.secondary-button text, on its own button background',
+    markup:
+      '<div class="account-window"><div class="account-tab-content"><button class="secondary-button" type="button">Cancel</button></div></div>',
+    target: '.secondary-button',
+    minimum: REAL_TEXT,
+    shell: false,
+    themes: LIGHT_ONLY,
+  },
   {
     name: '.scene-list small',
     markup:

@@ -1339,6 +1339,92 @@ describe.skipIf(!databaseUrl)('PostgreSQL persistence integration', () => {
     expect(verifiedSignIn.headers['set-cookie']).toBeDefined();
   });
 
+  describe('change-email verification-first flow (progress/manage-account-page.md)', () => {
+    it('does not change the stored email until the new address is confirmed through the real verify-email link', async () => {
+      const oldEmail = 'change-email-pending@example.test';
+      const newEmail = 'change-email-confirmed@example.test';
+      const { cookie } = await signUp(oldEmail);
+      const accountId = await userIdFor(oldEmail);
+
+      const changeRequest = await app!.inject({
+        method: 'POST',
+        url: '/api/auth/change-email',
+        headers: { cookie },
+        payload: { newEmail, callbackURL: '/verify-email' },
+      });
+      expect(changeRequest.statusCode).toBe(200);
+
+      // Mutation-table row 1: applying this immediately, instead of after verification, is
+      // exactly the regression this assertion exists to catch -- the stored email must still be
+      // the old one right after the request that started the change, not the new one.
+      const beforeConfirmation = await pool!.query<{ email: string }>(
+        'select email from "user" where id = $1',
+        [accountId],
+      );
+      expect(beforeConfirmation.rows[0]?.email).toBe(oldEmail);
+
+      // The verification mail went to the *new* address -- `user.changeEmail`'s configuration
+      // (packages/auth-server/src/index.ts) has neither `updateEmailWithoutVerification` nor
+      // `sendChangeEmailConfirmation` set, so Better Auth's installed `changeEmail` handler falls
+      // through to reusing `emailVerification.sendVerificationEmail` addressed to `newEmail`
+      // directly, skipping the confirm-the-old-address hop entirely.
+      await verifyEmail(newEmail);
+
+      const afterConfirmation = await pool!.query<{ email: string }>(
+        'select email from "user" where id = $1',
+        [accountId],
+      );
+      expect(afterConfirmation.rows[0]?.email).toBe(newEmail);
+
+      // The old address no longer signs in; the new one, once a password is attached to this
+      // same account, would -- proven indirectly here by confirming the row itself moved, which
+      // is what `databaseHooks`/`requireEmailVerification` and every other sign-in check in this
+      // file key off of.
+      const signInOldEmail = await app!.inject({
+        method: 'POST',
+        url: '/api/auth/sign-in/email',
+        payload: { email: oldEmail, password: 'correct-horse-battery-staple' },
+      });
+      expect(signInOldEmail.statusCode).not.toBe(200);
+    });
+
+    it("answers identically whether the new address is free or already belongs to another account, and never changes or exposes the other account's row", async () => {
+      // Better Auth's own anti-enumeration design for this endpoint (confirmed by reading the
+      // installed `api/routes/update-user.mjs` directly, and recorded on `user.changeEmail`'s own
+      // configuration comment): a taken address gets the identical `{status: true}` a free one
+      // does, and no mail is sent for it. This is the one case `routes/account/index.tsx` cannot
+      // tell apart either, by construction -- this test is what proves the server-side half of
+      // that claim is real, not assumed from reading the source alone.
+      const requester = 'change-email-requester@example.test';
+      const alreadyTaken = 'change-email-already-taken@example.test';
+      await signUp(alreadyTaken);
+      const { cookie } = await signUp(requester);
+
+      const changeRequest = await app!.inject({
+        method: 'POST',
+        url: '/api/auth/change-email',
+        headers: { cookie },
+        payload: { newEmail: alreadyTaken, callbackURL: '/verify-email' },
+      });
+      expect(changeRequest.statusCode).toBe(200);
+
+      const requesterRow = await pool!.query<{ email: string }>(
+        'select email from "user" where email = $1',
+        [requester],
+      );
+      // Unchanged -- the requester's own account still has their own email, not the one they
+      // asked to change to and cannot have.
+      expect(requesterRow.rows[0]?.email).toBe(requester);
+
+      const takenAccountRow = await pool!.query<{ email: string }>(
+        'select email from "user" where email = $1',
+        [alreadyTaken],
+      );
+      // The other account's own row is untouched by a stranger's request naming its address.
+      expect(takenAccountRow.rows[0]?.email).toBe(alreadyTaken);
+    });
+  });
+
   it('refuses to sign in an account once its user row is soft-deleted, through the real databaseHooks.session.create.before gate', async () => {
     // Proves `packages/auth-server/src/index.ts`'s `refusePendingSessionForDeletedAccount` is
     // actually wired into this real `betterAuth` instance and actually fires on a real

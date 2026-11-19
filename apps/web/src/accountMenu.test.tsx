@@ -74,29 +74,25 @@ describe('account menu', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
-  it('reaches the Deleted page from the account menu', async () => {
+  it('reaches the Manage account page from the account menu', async () => {
+    // Collapsed from three destination-specific entries to this one, `progress/manage-account-
+    // page.md`: Deleted items, Manage Subscription, and Delete account are all tabs under
+    // `/account` now (routes/account.tsx), reached by its own left-side navigation rather than a
+    // second choice made here.
     const user = userEvent.setup();
     render(<AccountMenu />);
     await user.click(screen.getByRole('button', { name: 'Account menu' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Deleted items' }));
-    expect(routeState.navigate).toHaveBeenCalledWith({ to: '/deleted' });
+    await user.click(screen.getByRole('menuitem', { name: 'Manage account' }));
+    expect(routeState.navigate).toHaveBeenCalledWith({ to: '/account' });
   });
 
-  it('reaches the Manage Subscription page from the account menu -- one entry regardless of tier', async () => {
+  it('offers exactly two entries -- Manage account and Sign out, not the old four', async () => {
     const user = userEvent.setup();
     render(<AccountMenu />);
     await user.click(screen.getByRole('button', { name: 'Account menu' }));
-    // No tier-conditional labelling or behaviour: the destination page itself decides what a
-    // free, paid, or lapsed account sees, so the menu item is a single, always-present link.
-    await user.click(screen.getByRole('menuitem', { name: 'Manage Subscription' }));
-    expect(routeState.navigate).toHaveBeenCalledWith({ to: '/billing/subscription' });
-  });
-
-  it('reaches the account-deletion page from the account menu', async () => {
-    const user = userEvent.setup();
-    render(<AccountMenu />);
-    await user.click(screen.getByRole('button', { name: 'Account menu' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Delete account' }));
-    expect(routeState.navigate).toHaveBeenCalledWith({ to: '/account/delete' });
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
+      'Manage account',
+      'Sign out',
+    ]);
   });
 });
