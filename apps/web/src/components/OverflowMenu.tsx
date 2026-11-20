@@ -82,7 +82,7 @@ function moveFocusAmong(items: readonly HTMLElement[], delta: 1 | -1) {
  * a real accessible name on the trigger, `aria-haspopup`/`aria-expanded`, Enter/Space to open
  * (free from a real `<button>`'s own native activation, not reimplemented here), Escape to close
  * with focus returned to the trigger, and full keyboard operability. Used for both the per-row
- * overflow menu (Delete) and the header's account menu (Deleted items, Sign out) -- two
+ * overflow menu (Delete) and the header's account menu (Manage account, Sign out) -- two
  * unrelated item sets behind the identical interaction contract, which is exactly what this
  * component factors out. One level of submenu (`OverflowMenuItem.submenuItems`) is also supported,
  * added for the File menu's "Download" -- see that field's own comment.

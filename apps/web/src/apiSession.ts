@@ -42,8 +42,17 @@ export class ApiError extends Error {
   }
 }
 
+// `createdAt`/`emailVerified` -- the Account info tab's "Member since"/"Email status" rows
+// (`routes/account/index.tsx`, `progress/manage-account-page.md`). Both are already present on
+// every real `GET /api/auth/get-session` response (Better Auth returns them on `user` by
+// default); this is a client-side schema widening only -- no server change, confirmed against
+// the installed Better Auth source. `createdAt` stays a plain ISO string, matching
+// `billingPresentation.ts`'s own `formatDate`, which every other date already on this page
+// (`currentPeriodEnd`, `canceledAt`) is passed through the identical way.
 const sessionUserSchema = z.object({
+  createdAt: z.string(),
   email: z.string(),
+  emailVerified: z.boolean(),
   id: z.string(),
   name: z.string(),
 });

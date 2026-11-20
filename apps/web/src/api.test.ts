@@ -21,7 +21,15 @@ describe('API client', () => {
   it('sends authenticated JSON requests for every supported operation', async () => {
     fetchMock
       .mockResolvedValueOnce(
-        response({ user: { email: 'writer@example.com', id: 'writer-1', name: 'Writer' } }),
+        response({
+          user: {
+            createdAt: '2026-01-01T00:00:00.000Z',
+            email: 'writer@example.com',
+            emailVerified: true,
+            id: 'writer-1',
+            name: 'Writer',
+          },
+        }),
       )
       .mockResolvedValueOnce(response({ token: 'session-token' }))
       .mockResolvedValueOnce(response({ token: 'session-token' }))
@@ -86,7 +94,9 @@ describe('API client', () => {
       );
 
     await expect(api.session()).resolves.toEqual({
+      createdAt: '2026-01-01T00:00:00.000Z',
       email: 'writer@example.com',
+      emailVerified: true,
       id: 'writer-1',
       name: 'Writer',
     });
@@ -307,10 +317,20 @@ describe('API client', () => {
   describe('api.session', () => {
     it('resolves to the signed-in user for a valid session body', async () => {
       fetchMock.mockResolvedValue(
-        response({ user: { email: 'writer@example.com', id: 'writer-1', name: 'Writer' } }),
+        response({
+          user: {
+            createdAt: '2026-01-01T00:00:00.000Z',
+            email: 'writer@example.com',
+            emailVerified: true,
+            id: 'writer-1',
+            name: 'Writer',
+          },
+        }),
       );
       await expect(api.session()).resolves.toEqual({
+        createdAt: '2026-01-01T00:00:00.000Z',
         email: 'writer@example.com',
+        emailVerified: true,
         id: 'writer-1',
         name: 'Writer',
       });

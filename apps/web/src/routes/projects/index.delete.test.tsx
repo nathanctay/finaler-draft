@@ -297,19 +297,20 @@ describe('projects page: delete and undo', () => {
     expect(screen.queryByRole('link', { name: /deleted/i })).not.toBeInTheDocument();
   });
 
-  // The account menu's own "Manage Subscription" entry is a static link to
-  // routes/billing.subscription.tsx, which owns the billing-subscription/plans fetches itself --
-  // opening the menu triggers none of its own. This page's own `/api/entitlement` fetch (the
-  // lapse-chooser banner, routes/projects/index.tsx) is a separate, page-level concern: it fires
-  // once on mount regardless of the menu, which is exactly what the "no extra fetch" assertion
-  // below checks for, rather than asserting the endpoint is never called at all -- a real
-  // regression check found and fixed here once already (progress/billing-checkout.md's "A
-  // regression, found and fixed": an earlier, eager, unconditional entitlement fetch on this same
-  // page measurably slowed `test:system:persistence` under Playwright's 3-worker contention,
-  // since this is the one page nearly every system-suite flow touches at least once). The banner
-  // reintroduces an unconditional fetch by necessity -- see routes/projects/index.tsx's own
-  // comment on why, and its `staleTime` -- so this test's job now is narrower: prove the menu
-  // itself adds nothing beyond what the page already fetches.
+  // The account menu's own "Manage account" entry is a static link to the layout route
+  // (routes/account.tsx, progress/manage-account-page.md -- it collapsed the old "Manage
+  // Subscription"/"Deleted items"/"Delete account" entries into this one), which owns every
+  // billing/deletion fetch itself -- opening the menu triggers none of its own. This page's own
+  // `/api/entitlement` fetch (the lapse-chooser banner, routes/projects/index.tsx) is a separate,
+  // page-level concern: it fires once on mount regardless of the menu, which is exactly what the
+  // "no extra fetch" assertion below checks for, rather than asserting the endpoint is never
+  // called at all -- a real regression check found and fixed here once already
+  // (progress/billing-checkout.md's "A regression, found and fixed": an earlier, eager,
+  // unconditional entitlement fetch on this same page measurably slowed `test:system:persistence`
+  // under Playwright's 3-worker contention, since this is the one page nearly every system-suite
+  // flow touches at least once). The banner reintroduces an unconditional fetch by necessity --
+  // see routes/projects/index.tsx's own comment on why, and its `staleTime` -- so this test's job
+  // now is narrower: prove the menu itself adds nothing beyond what the page already fetches.
   it('opening the account menu fetches nothing beyond the page’s own entitlement fetch', async () => {
     const user = userEvent.setup();
     renderPage();
@@ -319,7 +320,7 @@ describe('projects page: delete and undo', () => {
     );
     const callsBeforeMenuOpen = fetchMock.mock.calls.length;
     await user.click(screen.getByRole('button', { name: 'Account menu' }));
-    expect(screen.getByRole('menuitem', { name: 'Manage Subscription' })).toBeVisible();
+    expect(screen.getByRole('menuitem', { name: 'Manage account' })).toBeVisible();
     expect(fetchMock.mock.calls.length).toBe(callsBeforeMenuOpen);
     expect(fetchMock).not.toHaveBeenCalledWith('/api/billing/subscription', expect.anything());
   });

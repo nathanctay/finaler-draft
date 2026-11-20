@@ -6,7 +6,13 @@ import { Route as indexRoute } from './routes/index.js';
 import { Route as projectRoute } from './routes/projects/$projectId.js';
 
 const projectId = '216ec49a-a6c6-49ff-8e2e-5994d5ca91dd';
-const user: SessionUser = { email: 'writer@example.com', id: 'writer-1', name: 'Writer' };
+const user: SessionUser = {
+  createdAt: '2026-01-01T00:00:00.000Z',
+  email: 'writer@example.com',
+  emailVerified: true,
+  id: 'writer-1',
+  name: 'Writer',
+};
 
 /** Stands in for the router context's `queryClient`, without a real QueryClient. */
 function contextWithSession(sessionUser: SessionUser | null) {

@@ -14,13 +14,17 @@ import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
 import { Route as DeletedRouteImport } from './routes/deleted'
+import { Route as AccountRouteImport } from './routes/account'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ProjectsIndexRouteImport } from './routes/projects/index'
+import { Route as AccountIndexRouteImport } from './routes/account/index'
 import { Route as ProjectsProjectIdRouteImport } from './routes/projects/$projectId'
 import { Route as BillingSuccessRouteImport } from './routes/billing.success'
 import { Route as BillingSubscriptionRouteImport } from './routes/billing.subscription'
 import { Route as BillingCanceledRouteImport } from './routes/billing.canceled'
-import { Route as AccountDeleteRouteImport } from './routes/account.delete'
+import { Route as AccountDeleteRouteImport } from './routes/account_.delete'
+import { Route as AccountSubscriptionRouteImport } from './routes/account.subscription'
+import { Route as AccountDeletedRouteImport } from './routes/account.deleted'
 import { Route as ProjectsProjectIdIndexRouteImport } from './routes/projects/$projectId/index'
 import { Route as ProjectsProjectIdScreenplaysScreenplayIdIndexRouteImport } from './routes/projects/$projectId.screenplays.$screenplayId/index'
 import { Route as ProjectsProjectIdScreenplaysScreenplayIdRevisionsIndexRouteImport } from './routes/projects/$projectId.screenplays.$screenplayId.revisions/index'
@@ -52,6 +56,11 @@ const DeletedRoute = DeletedRouteImport.update({
   path: '/deleted',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AccountRoute = AccountRouteImport.update({
+  id: '/account',
+  path: '/account',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
@@ -61,6 +70,11 @@ const ProjectsIndexRoute = ProjectsIndexRouteImport.update({
   id: '/projects/',
   path: '/projects/',
   getParentRoute: () => rootRouteImport,
+} as any)
+const AccountIndexRoute = AccountIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AccountRoute,
 } as any)
 const ProjectsProjectIdRoute = ProjectsProjectIdRouteImport.update({
   id: '/projects/$projectId',
@@ -83,9 +97,19 @@ const BillingCanceledRoute = BillingCanceledRouteImport.update({
   getParentRoute: () => rootRouteImport,
 } as any)
 const AccountDeleteRoute = AccountDeleteRouteImport.update({
-  id: '/account/delete',
+  id: '/account_/delete',
   path: '/account/delete',
   getParentRoute: () => rootRouteImport,
+} as any)
+const AccountSubscriptionRoute = AccountSubscriptionRouteImport.update({
+  id: '/subscription',
+  path: '/subscription',
+  getParentRoute: () => AccountRoute,
+} as any)
+const AccountDeletedRoute = AccountDeletedRouteImport.update({
+  id: '/deleted',
+  path: '/deleted',
+  getParentRoute: () => AccountRoute,
 } as any)
 const ProjectsProjectIdIndexRoute = ProjectsProjectIdIndexRouteImport.update({
   id: '/',
@@ -123,16 +147,20 @@ const ProjectsProjectIdScreenplaysScreenplayIdRevisionsRevisionIdDiffRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/account': typeof AccountRouteWithChildren
   '/deleted': typeof DeletedRoute
   '/forgot-password': typeof ForgotPasswordRoute
   '/reset-password': typeof ResetPasswordRoute
   '/sign-in': typeof SignInRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/account/deleted': typeof AccountDeletedRoute
+  '/account/subscription': typeof AccountSubscriptionRoute
   '/account/delete': typeof AccountDeleteRoute
   '/billing/canceled': typeof BillingCanceledRoute
   '/billing/subscription': typeof BillingSubscriptionRoute
   '/billing/success': typeof BillingSuccessRoute
   '/projects/$projectId': typeof ProjectsProjectIdRouteWithChildren
+  '/account/': typeof AccountIndexRoute
   '/projects': typeof ProjectsIndexRoute
   '/projects/$projectId/': typeof ProjectsProjectIdIndexRoute
   '/projects/$projectId/screenplays/$screenplayId': typeof ProjectsProjectIdScreenplaysScreenplayIdIndexRoute
@@ -147,10 +175,13 @@ export interface FileRoutesByTo {
   '/reset-password': typeof ResetPasswordRoute
   '/sign-in': typeof SignInRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/account/deleted': typeof AccountDeletedRoute
+  '/account/subscription': typeof AccountSubscriptionRoute
   '/account/delete': typeof AccountDeleteRoute
   '/billing/canceled': typeof BillingCanceledRoute
   '/billing/subscription': typeof BillingSubscriptionRoute
   '/billing/success': typeof BillingSuccessRoute
+  '/account': typeof AccountIndexRoute
   '/projects': typeof ProjectsIndexRoute
   '/projects/$projectId': typeof ProjectsProjectIdIndexRoute
   '/projects/$projectId/screenplays/$screenplayId': typeof ProjectsProjectIdScreenplaysScreenplayIdIndexRoute
@@ -161,16 +192,20 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/account': typeof AccountRouteWithChildren
   '/deleted': typeof DeletedRoute
   '/forgot-password': typeof ForgotPasswordRoute
   '/reset-password': typeof ResetPasswordRoute
   '/sign-in': typeof SignInRoute
   '/verify-email': typeof VerifyEmailRoute
-  '/account/delete': typeof AccountDeleteRoute
+  '/account/deleted': typeof AccountDeletedRoute
+  '/account/subscription': typeof AccountSubscriptionRoute
+  '/account_/delete': typeof AccountDeleteRoute
   '/billing/canceled': typeof BillingCanceledRoute
   '/billing/subscription': typeof BillingSubscriptionRoute
   '/billing/success': typeof BillingSuccessRoute
   '/projects/$projectId': typeof ProjectsProjectIdRouteWithChildren
+  '/account/': typeof AccountIndexRoute
   '/projects/': typeof ProjectsIndexRoute
   '/projects/$projectId/': typeof ProjectsProjectIdIndexRoute
   '/projects/$projectId/screenplays/$screenplayId/': typeof ProjectsProjectIdScreenplaysScreenplayIdIndexRoute
@@ -182,16 +217,20 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/account'
     | '/deleted'
     | '/forgot-password'
     | '/reset-password'
     | '/sign-in'
     | '/verify-email'
+    | '/account/deleted'
+    | '/account/subscription'
     | '/account/delete'
     | '/billing/canceled'
     | '/billing/subscription'
     | '/billing/success'
     | '/projects/$projectId'
+    | '/account/'
     | '/projects'
     | '/projects/$projectId/'
     | '/projects/$projectId/screenplays/$screenplayId'
@@ -206,10 +245,13 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/sign-in'
     | '/verify-email'
+    | '/account/deleted'
+    | '/account/subscription'
     | '/account/delete'
     | '/billing/canceled'
     | '/billing/subscription'
     | '/billing/success'
+    | '/account'
     | '/projects'
     | '/projects/$projectId'
     | '/projects/$projectId/screenplays/$screenplayId'
@@ -219,16 +261,20 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/account'
     | '/deleted'
     | '/forgot-password'
     | '/reset-password'
     | '/sign-in'
     | '/verify-email'
-    | '/account/delete'
+    | '/account/deleted'
+    | '/account/subscription'
+    | '/account_/delete'
     | '/billing/canceled'
     | '/billing/subscription'
     | '/billing/success'
     | '/projects/$projectId'
+    | '/account/'
     | '/projects/'
     | '/projects/$projectId/'
     | '/projects/$projectId/screenplays/$screenplayId/'
@@ -239,6 +285,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AccountRoute: typeof AccountRouteWithChildren
   DeletedRoute: typeof DeletedRoute
   ForgotPasswordRoute: typeof ForgotPasswordRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
@@ -289,6 +336,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DeletedRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/account': {
+      id: '/account'
+      path: '/account'
+      fullPath: '/account'
+      preLoaderRoute: typeof AccountRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/': {
       id: '/'
       path: '/'
@@ -302,6 +356,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/projects'
       preLoaderRoute: typeof ProjectsIndexRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/account/': {
+      id: '/account/'
+      path: '/'
+      fullPath: '/account/'
+      preLoaderRoute: typeof AccountIndexRouteImport
+      parentRoute: typeof AccountRoute
     }
     '/projects/$projectId': {
       id: '/projects/$projectId'
@@ -331,12 +392,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof BillingCanceledRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/account/delete': {
-      id: '/account/delete'
+    '/account_/delete': {
+      id: '/account_/delete'
       path: '/account/delete'
       fullPath: '/account/delete'
       preLoaderRoute: typeof AccountDeleteRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/account/subscription': {
+      id: '/account/subscription'
+      path: '/subscription'
+      fullPath: '/account/subscription'
+      preLoaderRoute: typeof AccountSubscriptionRouteImport
+      parentRoute: typeof AccountRoute
+    }
+    '/account/deleted': {
+      id: '/account/deleted'
+      path: '/deleted'
+      fullPath: '/account/deleted'
+      preLoaderRoute: typeof AccountDeletedRouteImport
+      parentRoute: typeof AccountRoute
     }
     '/projects/$projectId/': {
       id: '/projects/$projectId/'
@@ -376,6 +451,21 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface AccountRouteChildren {
+  AccountDeletedRoute: typeof AccountDeletedRoute
+  AccountSubscriptionRoute: typeof AccountSubscriptionRoute
+  AccountIndexRoute: typeof AccountIndexRoute
+}
+
+const AccountRouteChildren: AccountRouteChildren = {
+  AccountDeletedRoute: AccountDeletedRoute,
+  AccountSubscriptionRoute: AccountSubscriptionRoute,
+  AccountIndexRoute: AccountIndexRoute,
+}
+
+const AccountRouteWithChildren =
+  AccountRoute._addFileChildren(AccountRouteChildren)
+
 interface ProjectsProjectIdRouteChildren {
   ProjectsProjectIdIndexRoute: typeof ProjectsProjectIdIndexRoute
   ProjectsProjectIdScreenplaysScreenplayIdIndexRoute: typeof ProjectsProjectIdScreenplaysScreenplayIdIndexRoute
@@ -401,6 +491,7 @@ const ProjectsProjectIdRouteWithChildren =
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AccountRoute: AccountRouteWithChildren,
   DeletedRoute: DeletedRoute,
   ForgotPasswordRoute: ForgotPasswordRoute,
   ResetPasswordRoute: ResetPasswordRoute,

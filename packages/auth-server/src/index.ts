@@ -263,6 +263,47 @@ export function createAuth(environment: AuthEnvironment, dependencies: CreateAut
       // Turning it off is about not surprising the account's real owner, not about abuse.
       sendOnSignIn: false,
     },
+    // The Manage account page's email change (progress/manage-account-page.md), the owner's own
+    // decision recorded there: a new address must be verified before it takes effect, never
+    // applied immediately, and never gated behind a password re-prompt.
+    //
+    // `enabled: true` is the only flag this needs. Confirmed by reading the installed 1.6.25
+    // `api/routes/update-user.mjs`'s `changeEmail` handler directly, not from the package's own
+    // (newer-looking) type declarations, which still describe a `sendChangeEmailVerification`
+    // callback this installed version does not have:
+    //
+    // - `updateEmailWithoutVerification` stays unset (`undefined`, falsy): its branch only ever
+    //   fires when the *current* session is `emailVerified !== true`, and every account reaching
+    //   this page already is (`requireEmailVerification: true` above, plus the migration that
+    //   backfilled every pre-existing account). Leaving it unset means that branch can never run
+    //   for a real writer, so the email is never swapped in before anything is confirmed.
+    // - `sendChangeEmailConfirmation` also stays unset. Setting it would mail a *confirmation*
+    //   link to the **old** address first, which the writer would have to click before a
+    //   verification link ever reaches the new one -- a second hop the owner did not ask for.
+    // - With both unset, `changeEmail`'s own logic falls through to its last branch: it reuses
+    //   `emailVerification.sendVerificationEmail` immediately above, unchanged, addressed to the
+    //   *new* email (`{...session.user, email: newEmail}`), with a token whose `requestType`
+    //   (`'change-email-verification'`) the installed `verify-email.mjs` route recognises
+    //   specially -- *that* handler, not this one, is what actually writes the new address to
+    //   `user.email`, and only once that link is clicked. No mail-sending code of this slice's
+    //   own is needed: the identical `verification_email_failed` logging and rethrow above already
+    //   covers a Resend outage on this path too, and nothing is written to `user.email` until the
+    //   link is followed either way -- so a failed send leaves the database exactly as it was,
+    //   never claiming a change nobody can confirm.
+    //
+    // **A real limitation, not an oversight.** When `newEmail` already belongs to another
+    // account, this same installed handler creates a verification token but sends no mail at all
+    // and still answers `{status: true}` -- indistinguishable, from the HTTP response alone, from
+    // "a verification email is on its way." That is Better Auth's own anti-enumeration design
+    // (the identical shape `sendResetPassword`'s own always-generic response already uses in this
+    // file), and there is no configuration flag that changes it. `routes/account/index.tsx`'s own
+    // comment records how the web client's copy is worded to stay honest about that rather than
+    // claim a distinction this server cannot actually make.
+    user: {
+      changeEmail: {
+        enabled: true,
+      },
+    },
     // Account deletion's sign-in refusal -- see `refusePendingSessionForDeletedAccount`'s own
     // comment for the full reasoning (the mechanism, why it is here rather than on one route, and
     // what it does and does not reveal). `pool` is the same connection pool `createAuth` already

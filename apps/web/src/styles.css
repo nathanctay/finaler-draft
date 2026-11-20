@@ -181,6 +181,22 @@
      value, which the selector group just below this block does. */
   --feedback-error-on-white: #a02c22;
   --feedback-error: var(--feedback-error-on-white);
+  /* The positive counterpart to `--feedback-error`, added for the Account info tab's email
+     confirmation dot (`.email-status-dot`). Split `-on-white`/themed on the same pattern as the
+     error pair above, and re-anchored in the light-island group below, so a later use inside a
+     permanently-white surface cannot repeat the `.field-error`-inside-`.dialog` bug.
+
+     **No `.dark` override, deliberately.** Unlike `--feedback-error`, nothing in the editor shell
+     uses this yet: the only surface it reaches is `.account-window`, whose `--surface-02`
+     (`#fbfbf7`) `.dark` never redefines -- the account page is a plain route, the same light-only
+     family as `.entry-card`/`.project-list`. Inventing a dark value here would be declaring a
+     contrast figure nothing measures. Add one alongside the first dark-shell use.
+
+     `#197033` on `#fbfbf7` is **5.94:1**, measured -- comfortably past the 3:1 floor WCAG 1.4.11
+     sets for a non-text indicator, and tonally paired with the error red's own 7.03:1 on that
+     same surface. */
+  --feedback-success-on-white: #197033;
+  --feedback-success: var(--feedback-success-on-white);
 }
 
 .dark {
@@ -248,6 +264,7 @@
 .element-menu,
 .overflow-menu-list {
   --feedback-error: var(--feedback-error-on-white);
+  --feedback-success: var(--feedback-success-on-white);
   --text-07: var(--text-07-on-white);
 }
 
@@ -2337,6 +2354,286 @@ select:focus-visible,
 }
 
 /*
+ * The Manage account page's own window (`routes/account.tsx`, `progress/manage-account-page.md`)
+ * -- a system-settings window with a left list of tabs, not an admin dashboard sidebar (the
+ * owner rejected a rail for *application* navigation earlier in this project; a settings window's
+ * own left pane is a different thing, and this is what he asked for here). Same card idiom every
+ * other flat "reached from the account menu" screen already renders inside --
+ * `.entry-card`/`.project-list`'s own border, radius, background and shadow tokens, widened into
+ * two columns and -- per the owner's own follow-up ("it should take up the whole page, even if
+ * the content can fit into the small square") -- freed of any fixed-width cap at all, filling the
+ * page within `.project-list`'s own gutter convention instead. Never rendered inside the editor's
+ * `.application.dark` shell (this is one of the flat routes reached from the account menu, like
+ * `.project-list` itself), so -- like `.destructive-button` above -- every token here is read
+ * against its own, permanently light surface; `text-contrast.spec.ts`'s own light-only cases are
+ * what prove that rather than assume it.
+ */
+.account-window {
+  display: grid;
+  margin: 64px auto;
+  width: calc(100vw - 40px);
+  /* Fills the page rather than shrinking to its content -- the owner's own words: "why is it
+     just a small square. It should take up the whole page, even if the content can fit into the
+     small square." `var(--fd-shell-titlebar-row)` is the same 38px `.titlebar` itself reads on
+     this exact family of plain routes (see that rule's own comment on why it lives on `:root`);
+     128px is `.project-list`'s own `margin: 64px auto` convention, top and bottom, which this
+     window keeps instead of inventing a second vertical rhythm. `grid-template-rows: 1fr` is
+     what lets the single row actually consume that height -- an implicit `auto` row would stay
+     sized to its content and leave the extra space empty beneath it, `align-items: stretch`
+     (the grid default) notwithstanding, since there is nothing to stretch into without this. */
+  min-height: calc(100vh - var(--fd-shell-titlebar-row) - 128px);
+  grid-template-columns: 200px 1fr;
+  grid-template-rows: 1fr;
+  border: 1px solid var(--border-08);
+  border-radius: 2px;
+  background: var(--surface-02);
+  box-shadow: 12px 12px 0 var(--shadow-tint-01);
+}
+
+@media (width <= 640px) {
+  .account-window {
+    /* Unchanged from before this pass: nav and content stack as two rows rather than sharing
+       the desktop's single full-height one, so `grid-template-rows` reverts to the implicit
+       `auto` default here instead of carrying the desktop's `1fr` into a layout it was never
+       meant for. */
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+  }
+}
+
+.account-nav {
+  /* No explicit height: the grid's own `grid-template-rows: 1fr` plus the default `align-items:
+     stretch` is what makes this column -- and the border painted on it -- run the full height
+     of the window rather than stopping at the last link. */
+  border-right: 1px solid var(--border-08);
+  padding: 20px 0;
+}
+
+@media (width <= 640px) {
+  .account-nav {
+    border-bottom: 1px solid var(--border-08);
+    border-right: 0;
+  }
+}
+
+.account-nav ul {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* The transparent 3px edge is reserved on *every* link, not added to the active one: a border that
+   appears on selection would shift all three labels sideways as the writer moves between tabs. */
+.account-nav-link {
+  display: block;
+  border-left: 3px solid transparent;
+  padding: 10px 20px 10px 17px;
+  color: var(--text-11);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.account-nav-link:hover {
+  background: var(--surface-03);
+}
+
+/* The current tab. `--text-18` is this app's own near-black body-text token (already used by
+   `.entry-card h1`/`.project-list h1` a few rules up), not a themed "selected" colour invented for
+   this one rule -- measured against `--surface-05`, 13.27:1, comfortably past the 4.5:1 real-text
+   floor `text-contrast.spec.ts` holds every rule here to (see that spec's own "account nav" case,
+   measured against this exact background). */
+/* Selection is marked structurally, not only by a background tint. `--surface-16` is the
+   titlebar's own colour -- the darkest chrome in this app -- so the active tab is tied to the
+   window frame above it rather than to an accent invented for this one list. In an interface whose
+   whole idiom is hard 1px edges, an edge is the honest way to say "you are here"; a tint alone
+   reads as a hover state that got stuck. */
+.account-nav-link-active {
+  border-left-color: var(--surface-16);
+  background: var(--surface-05);
+  color: var(--text-18);
+}
+
+.account-tab-content {
+  padding: 32px 36px;
+}
+
+.account-tab-content .project-list {
+  width: auto;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+}
+
+/* The Account info tab (routes/account/index.tsx) -- view mode (read-only pairs plus "Edit info")
+   and edit mode (one `.dialog-field` per input, the same label-above-input shape
+   `renameDialog.tsx`/`sharingDialog.tsx` already use outside an actual `.dialog`) share this one
+   container: a vertical stack of whatever the current mode renders, so switching modes never
+   shifts the surrounding page layout. */
+.account-info-field {
+  display: grid;
+  margin-bottom: 20px;
+  gap: 10px;
+  max-width: 420px;
+}
+
+/* View mode only: the read-only rows read as a **ledger**, not a form.
+ *
+ * `.dialog-field` -- which these rows reuse for their label/value pairing -- is input layout:
+ * label stacked above its control, 12px, in a 420px column. That is right for the dialogs it was
+ * built for and wrong here, and it is what made the panel read "a little off" even once the window
+ * filled the page: a settings window that *states facts* looks like a ledger, with the label and
+ * its value on one line and a hairline between rows. The owner's two reports -- "Name and email
+ * just doesn't take up much space" and "the styling is still lacking something" -- are both this.
+ *
+ * `grid-template-columns: minmax(0, 11rem) 1fr` rather than two equal halves: the labels are short
+ * and fixed in character ("Member since" is the longest), so a column sized to them keeps every
+ * value on the same left edge -- which is the whole point of a ledger, and what makes four facts
+ * scan as one table instead of four unrelated lines.
+ *
+ * `--border-08` for the rule: the same hairline `.account-window` and `.account-nav` already draw,
+ * so the rows look ruled by the same pen as the window they sit in. The last row drops it, so the
+ * list ends rather than trailing off into an empty rule. */
+.account-fact {
+  display: grid;
+  grid-template-columns: minmax(0, 11rem) 1fr;
+  align-items: baseline;
+  gap: 16px;
+  border-bottom: 1px solid var(--border-08);
+  padding: 11px 0;
+  margin: 0;
+}
+
+.account-fact:last-of-type {
+  border-bottom: 0;
+}
+
+/* The label column. Stays the quiet caption `.dialog-field` already makes it -- the owner was
+   explicit that only the value grows -- but gains the letterspacing `.eyebrow` uses, so it reads
+   as a column heading rather than as small body text that lost an argument with its value. */
+.account-fact > span:first-child {
+  color: var(--text-08);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* The stated value on a read-only row, deliberately larger than its own label -- the owner's words:
+   "the text of the info needs to be bigger. Not the label, but the info itself." `.dialog-field`
+   just above sets 12px for the whole row, which is right for the label (a caption) and is what made
+   the value read small, since it simply inherited it. 15px/700 is `.subscription-plan`'s own size
+   and weight -- the existing idiom in this app for one bold stated fact -- rather than a size
+   invented here. `muted` is the deliberate alternative for a row that could not establish its fact
+   (see `PlanRow`): a failure is not the thing the eye should land on. */
+.account-info-value {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+/* The email confirmation indicator: a dot beside the address, green when the stored address is
+   verified and red when it is not, with its state in a hover tooltip -- the owner's own request,
+   replacing an earlier full "Email status" row that cost a line to say one word.
+
+   **Colour is not the only carrier of this meaning.** The dot is a `role="img"` with an
+   `aria-label` naming its state, so a screen reader announces it rather than meeting an unlabelled
+   decoration, and the `title` that produces the hover tooltip is a second, visible channel. That
+   matters more than usual here: a red/green pair is the single most common confusable palette, so
+   the state has to be readable without perceiving which of the two it is. Both colours are also
+   measured against this surface rather than assumed -- see `--feedback-success-on-white`.
+
+   A sighted keyboard-only user still cannot summon a `title`; that is a real gap in the native
+   tooltip, noted rather than papered over, and the accessible name is what carries them. */
+/* The hit target and positioning context, not the dot itself. A 9px dot is a poor place to aim,
+   and a native `title` on one is worse: it needs a second of hover before the OS draws anything,
+   and the owner reported never seeing it ("there is no hover tooltip on th email dot"). So the
+   tooltip below is this app's own -- it appears immediately, it is styled like the rest of the
+   window chrome instead of as an OS bubble, and it is reachable by keyboard, which a `title`
+   never is.
+
+   `tabindex="0"` on a non-interactive element is a deliberate, narrow exception: a hover-only
+   affordance is invisible to anyone not using a pointer, and this is the only channel carrying the
+   confirmation state besides the accessible name. One extra tab stop on a page with four controls
+   is a smaller cost than a fact only mouse users can reach. */
+.email-status {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  /* The dot is 9px; this pads the aim to a comfortable target without moving the dot itself. */
+  padding: 4px;
+  margin: -4px;
+}
+
+.email-status-dot {
+  display: block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--feedback-success);
+}
+
+.email-status-dot-unconfirmed {
+  background: var(--feedback-error);
+}
+
+/* Hidden by default and revealed on hover or keyboard focus. `visibility`, not `display: none`:
+   the label keeps a box, so its width is already resolved when it appears and the bubble cannot
+   reflow on first paint. */
+.email-status-tooltip {
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 50%;
+  transform: translateX(-50%);
+  visibility: hidden;
+  z-index: 1;
+  border: 1px solid var(--border-08);
+  border-radius: 2px;
+  background: var(--surface-02);
+  padding: 3px 7px;
+  /* Matches `.eyebrow`'s own letterspaced-caption treatment -- the existing idiom in this app for
+     a small annotation -- rather than a size invented for this one bubble. */
+  color: var(--text-09);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  /* The window's own signature, scaled down: a hard offset shadow with no blur, the same shape
+     `.account-window`/`.project-list` wear at 12px. A blurred shadow here would read as a
+     different design language in miniature. */
+  box-shadow: 2px 2px 0 var(--shadow-tint-01);
+}
+
+.email-status:hover .email-status-tooltip,
+.email-status:focus-visible .email-status-tooltip {
+  visibility: visible;
+}
+
+/* The dot sits on the value's own line, after the address, so the row still reads as one fact. */
+.account-info-value-with-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* A row of page-level actions. `.account-info-field-row` is the Account info tab's own ("Edit info"
+   alone in view mode, "Save info"/"Cancel" together in edit mode); `.page-actions` is the same row
+   under a name that reads honestly on a page which is not that form -- the delete page's
+   "Don't delete" beside "Delete account". One declaration, two entry points, for the same reason
+   `.dialog-actions button, .secondary-button` are grouped rather than restated. */
+.account-info-field-row,
+.page-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.account-info-status {
+  margin: 0;
+  color: var(--text-09);
+  font-size: 12px;
+}
+
+/*
  * A section heading with one action aligned to its right -- the revision-history list's "Back to
  * screenplay" beside its own `<h1>`.
  *
@@ -2472,7 +2769,9 @@ select:focus-visible,
 }
 
 /*
- * routes/account.delete.tsx's "Delete account"/"Delete anyway". Structurally identical to
+ * routes/account_.delete.tsx's "Delete account"/"Delete anyway" (also reused, as a plain link
+ * styled the same way, for the Account info tab's own "Delete account" button that navigates
+ * there -- routes/account/index.tsx). Structurally identical to
  * `.primary-button` above -- same border width, radius, font, padding -- but filled with
  * `--fd-destructive-surface` rather than `--surface-14`, both literals `.dark` leaves alone, so
  * this control needs no dark-theme rule of its own and is verified in both themes by
@@ -3020,6 +3319,7 @@ select:focus-visible,
   font-size: 12px;
 }
 
+.dialog-field input[type='email'],
 .dialog-field input[type='number'],
 .dialog-field input[type='text'],
 .dialog-field textarea {
@@ -3272,11 +3572,50 @@ select:focus-visible,
   background: var(--surface-03);
   padding: 6px 14px;
   color: inherit;
+  font: inherit;
   font-size: 12px;
 }
 
 .dialog-actions button:hover,
 .dialog-actions button:focus-visible {
+  background: var(--surface-06);
+}
+
+/*
+ * The quieter of two adjacent page-level actions -- the Account info tab's "Cancel" and the delete
+ * page's "Don't delete". Both shipped wrong in a different way: "Cancel" had no class at all and
+ * rendered as raw browser chrome, and once classed, both read as undersized next to the button
+ * they sit beside. The owner: "Its smaller than every other button on the site, and this doesn't
+ * really make sense."
+ *
+ * **Geometry is `.primary-button`/`.destructive-button`'s, exactly** -- `1px` radius, `600 13px`,
+ * `11px 16px` -- so a pair of adjacent actions is one pair of matching shapes differing only in
+ * weight. Only the *colours* are quieter: the `--border-04`/`--surface-03` treatment the dialogs
+ * already use for a secondary action. Size was never what made this button secondary.
+ *
+ * **Deliberately no longer grouped with `.dialog-actions button`**, which it briefly was. The two
+ * are the same idea in different contexts, and the dialogs are a genuinely denser one: their
+ * actions sit inches from the text they act on, at 12px, and every button inside `.dialog-actions`
+ * already renders at that size including `.primary-button` (that selector out-specifies it).
+ * Resizing those would change all eight dialogs, which the owner has not asked for -- so the
+ * duplication here is two different answers to two different questions, not drift.
+ */
+.secondary-button {
+  border: 1px solid var(--border-04);
+  border-radius: 1px;
+  background: var(--surface-03);
+  color: inherit;
+  font:
+    600 13px 'IBM Plex Sans',
+    sans-serif;
+  padding: 11px 16px;
+  /* A `Link` carries `.secondary-button` on the delete page; without this it keeps the underline
+     and the visited colour every other anchor has, and stops looking like a button at all. */
+  text-decoration: none;
+}
+
+.secondary-button:hover,
+.secondary-button:focus-visible {
   background: var(--surface-06);
 }
 

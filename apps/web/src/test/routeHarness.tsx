@@ -192,8 +192,20 @@ export async function reactRouterMock(
   const actual = (await importOriginal()) as typeof ReactRouter;
   return {
     ...actual,
-    Link: ({ children, to }: { children: React.ReactNode; to: string }) => (
-      <a href={to}>{children}</a>
+    // `...rest` forwards whatever else a caller passes -- `aria-current`, `className` -- onto the
+    // rendered anchor. `routes/account.tsx`'s own left-side navigation is the first caller that
+    // needs either (the active tab's `aria-current="page"` and its highlighted class), and the
+    // real `Link` does the identical thing with its own `activeProps`/other DOM attributes, so a
+    // test exercising them should see them on the mock too, the same way a test exercising `href`
+    // already does via `to` below.
+    Link: ({
+      children,
+      to,
+      ...rest
+    }: { children: React.ReactNode; to: string } & Record<string, unknown>) => (
+      <a href={to} {...rest}>
+        {children}
+      </a>
     ),
     Outlet: () => <div>Outlet</div>,
     useLocation: () => ({ pathname: routeState.pathname }),
