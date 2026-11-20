@@ -41,6 +41,27 @@ import {
 import { encodeCollabRestoredMessage } from '@finaler-draft/config';
 import { collabDebounceOverride } from './debounceOverride.js';
 
+// COL-1 backstop (progress/collab-durability-and-checkpoints.md). Registered unconditionally,
+// before anything else in this module runs, so a rejection that reaches here from *any* source --
+// not only the `onChange` hook below, whose own `try`/`catch` is the primary defense -- is logged
+// instead of taking the whole process down. Node's default behaviour for an unhandled rejection is
+// to throw, which ends the process; reading the installed `@hocuspocus/server` source confirms it
+// calls every hook (`this.hooks(name, payload)`) with no `await` and no `.catch` at several call
+// sites, and `hooks()` itself rethrows on a rejected hook, so this is not a hypothetical defense
+// against a handler this file forgot to write -- it is a defense against every one it has not
+// written yet, and against Hocuspocus's own extensions, which this process does not control.
+// Deliberately does not rethrow or exit: the one thing worse than an unhandled rejection crashing
+// the process is a handler for it that crashes the process anyway.
+process.on('unhandledRejection', (reason) => {
+  console.error(
+    JSON.stringify({
+      event: 'collab_unhandled_rejection',
+      errorName: reason instanceof Error ? reason.name : 'UnknownError',
+      reason: reason instanceof Error ? reason.message : String(reason),
+    }),
+  );
+});
+
 try {
   if (shouldLoadRootEnvironment(process.env)) {
     loadRootEnvironment();
@@ -299,26 +320,64 @@ try {
     // before they are ever applied to `document`, and `onChange` only fires for updates that
     // *were* applied -- so this hook, by construction, only ever logs a write from a connection
     // that was actually allowed to make one.
-    async onChange({ document, documentName, update, context }) {
+    //
+    // **The `try`/`catch` below is load-bearing** (progress/collab-durability-and-checkpoints.md,
+    // COL-1). Reading the installed `@hocuspocus/server` source confirms `handleDocumentUpdate`
+    // calls `this.hooks("onChange", changePayload)` with no `await` and no `.catch`, and `hooks()`
+    // itself logs and *rethrows* on a rejected hook -- so a rejection this function lets escape
+    // becomes an unhandled promise rejection, and Node's default for that is to end the process.
+    // `appendUpdate` can reject for entirely ordinary reasons (the pool's connection timeout, the
+    // statement timeout, a dropped connection, a Postgres restart), and the failure is correlated
+    // across every open document, not isolated to one -- so letting it escape here means one
+    // database blip takes down every writer on every screenplay, not just this one update.
+    // Catching converts that into the one case this hook can actually recover from: this update is
+    // not durable, so this connection -- and only this connection -- is closed. Closing (rather
+    // than swallowing and continuing) matters for the same reason `appendUpdate` runs *before* the
+    // update is allowed to count as durable at all: the in-memory `document` already has this
+    // update applied and already broadcast it to every other connection (Hocuspocus applies and
+    // relays before `onChange` ever fires), so if this failure were merely logged and ignored, the
+    // next debounced `store` would project a document into `canonical_screenplay` containing an
+    // edit the durable log never received. Closing the connection -- the same `connection.close()`
+    // `membershipNotifications.ts` already uses to force a resync -- makes the client's own
+    // provider reconnect and resend from the state it still holds locally, so the edit is not lost,
+    // only delayed until the database (or this connection) recovers.
+    async onChange({ document, documentName, update, context, connection: liveConnection }) {
       const connection = readAuthenticatedConnectionContext(context);
       // No context (a server-internal `DirectConnection`; this application never makes one) means
       // there is no connection whose epoch this update belongs to, and appending it under a guessed
       // epoch is exactly the mistake slice 5 exists to prevent. Skipped rather than defaulted.
       if (!connection) return;
-      await appendUpdate(pool, {
-        // Deliberately the *connection's own* epoch, not the screenplay's current one. These are the
-        // same number for every ordinary connection, and differ only for a connection that outlived
-        // a restore -- in which case this update belongs to the epoch it was made against, and
-        // writing it under the current epoch would be precisely the auto-merge into the restored
-        // screenplay that plan.md step 5 forbids. (That update cannot normally reach this hook at
-        // all: `supersedeRestoredDocuments` forces such a connection read-only the moment the restore
-        // commits, and a read-only connection's updates never get applied, so `onChange` never fires
-        // for them. This is the second of the two mechanisms, not the first.)
-        screenplayId: connection.screenplayId,
-        epoch: connection.epoch,
-        update,
-        actorId: connection.actorId,
-      });
+      try {
+        await appendUpdate(pool, {
+          // Deliberately the *connection's own* epoch, not the screenplay's current one. These are the
+          // same number for every ordinary connection, and differ only for a connection that outlived
+          // a restore -- in which case this update belongs to the epoch it was made against, and
+          // writing it under the current epoch would be precisely the auto-merge into the restored
+          // screenplay that plan.md step 5 forbids. (That update cannot normally reach this hook at
+          // all: `supersedeRestoredDocuments` forces such a connection read-only the moment the restore
+          // commits, and a read-only connection's updates never get applied, so `onChange` never fires
+          // for them. This is the second of the two mechanisms, not the first.)
+          screenplayId: connection.screenplayId,
+          epoch: connection.epoch,
+          update,
+          actorId: connection.actorId,
+        });
+      } catch (error) {
+        // Not durable. Logged structurally (no update bytes, no document content -- just the
+        // identifiers needed to find this in the database's own logs) and the connection is closed
+        // rather than left open to send further updates on top of a log that is missing this one.
+        console.error(
+          JSON.stringify({
+            event: 'collab_append_update_failed',
+            screenplayId: connection.screenplayId,
+            epoch: connection.epoch,
+            errorName: error instanceof Error ? error.name : 'UnknownError',
+            reason: error instanceof Error ? error.message : String(error),
+          }),
+        );
+        liveConnection?.close();
+        return;
+      }
       void document; // reconstruction reads the durable log, not this live object -- see updateLog.ts.
       void documentName; // the (screenplayId, epoch) pair it encodes is already on `context`.
       // Resets this screenplay's idle-session timer -- by construction, `onChange` only ever fires

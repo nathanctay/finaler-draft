@@ -124,6 +124,12 @@ async function startServer(
   wrapVerifyToken: (
     real: (token: string, now: Date) => Promise<ConnectionTokenVerification>,
   ) => (token: string, now: Date) => Promise<ConnectionTokenVerification> = (real) => real,
+  // COL-1 (progress/collab-durability-and-checkpoints.md). Defaults to `appendUpdate` unchanged
+  // (every existing test calls `startServer()` with no second argument) -- the append-failure
+  // test below is the only caller that wraps it, to make `onChange`'s own `appendUpdate` call
+  // reject on demand without needing to actually break this shared suite's real Postgres
+  // connection. Same shape and same reasoning as `wrapVerifyToken` just above.
+  wrapAppendUpdate: (real: typeof appendUpdate) => typeof appendUpdate = (real) => real,
 ): Promise<Server> {
   const realVerifyToken = (token: string, now: Date) =>
     verifyConnectionToken(COLLAB_TOKEN_TEST_SECRET, token, now);
@@ -136,6 +142,7 @@ async function startServer(
   // meaningful: `authenticateConnection` must classify *whatever* `verifyToken` throws as
   // transient, regardless of why it threw.)
   const verifyToken = wrapVerifyToken(realVerifyToken);
+  const appendUpdateImpl = wrapAppendUpdate(appendUpdate);
   // Collaboration slice 5's `LISTEN`/`NOTIFY` bridge, wired exactly as `server.ts` wires it -- a
   // dedicated `pg.Client` (never a pooled one; a `LISTEN` is session state) adapted to
   // `NotificationClient`. This is what makes a restore committed by `@finaler-draft/database`'s
@@ -210,8 +217,11 @@ async function startServer(
     // harness rebuilds the server's hook wiring rather than importing `server.ts` (a
     // self-executing entrypoint, not an exported config), so it has to be kept in step by hand.
     // The tests below (append, compaction-under-load, quarantine, presence) exist specifically to
-    // catch that file and this one drifting apart.
-    async onChange({ document, documentName, update, context }) {
+    // catch that file and this one drifting apart. The `try`/`catch` and `connection.close()`
+    // below mirror COL-1's fix (progress/collab-durability-and-checkpoints.md) exactly: see
+    // `server.ts`'s own `onChange` for why letting `appendUpdate`'s rejection escape this hook
+    // would become an unhandled promise rejection that ends the whole process.
+    async onChange({ document, documentName, update, context, connection: liveConnection }) {
       // The connection's *own* epoch, read off the context, exactly as `server.ts` does -- never the
       // document name used as a bare screenplay id (which is what this harness did before
       // collaboration slice 5), and never the screenplay's current epoch. An update made against a
@@ -219,12 +229,26 @@ async function startServer(
       // auto-merge into the restored screenplay plan.md step 5 forbids.
       const connection = readAuthenticatedConnectionContext(context);
       if (!connection) return;
-      await appendUpdate(pool!, {
-        screenplayId: connection.screenplayId,
-        epoch: connection.epoch,
-        update,
-        actorId: connection.actorId,
-      });
+      try {
+        await appendUpdateImpl(pool!, {
+          screenplayId: connection.screenplayId,
+          epoch: connection.epoch,
+          update,
+          actorId: connection.actorId,
+        });
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            event: 'collab_append_update_failed',
+            screenplayId: connection.screenplayId,
+            epoch: connection.epoch,
+            errorName: error instanceof Error ? error.name : 'UnknownError',
+            reason: error instanceof Error ? error.message : String(error),
+          }),
+        );
+        liveConnection?.close();
+        return;
+      }
       void document;
       void documentName;
     },
@@ -1192,6 +1216,137 @@ describe.skipIf(!databaseUrl)('Hocuspocus collaboration server', () => {
       reconnected.destroy();
     }
   }, 30_000);
+
+  // COL-1 (progress/collab-durability-and-checkpoints.md). The audit's own reproduction shows
+  // Hocuspocus calling `onChange` with no `await` and no `.catch`, so a rejecting `appendUpdate`
+  // became an unhandled promise rejection that ends the whole process -- one failed insert for one
+  // document took down every writer on every document. The fix catches inside `onChange`, closes
+  // only the connection that sent the failing update (never swallows it, since the in-memory
+  // document and every other connection already have it), and registers a process-level
+  // `unhandledRejection` handler as a backstop. This test proves the first two guarantees
+  // end-to-end: the process survives a rejecting `appendUpdate`, and the edit it lost durability
+  // for is not lost from the client's own perspective -- it becomes durable once the client
+  // resyncs. `server.ts`'s own process-level backstop is proven separately, directly against
+  // `server.ts` itself, in `server.test.ts` -- this harness never runs `server.ts` as a process at
+  // all (see `startServer`'s own comment), so it cannot be what catches a regression there.
+  it('a failed append closes the connection instead of crashing the process, and the edit becomes durable once the client resyncs', async () => {
+    const owner = await signUp('owner-append-failure-test@example.test');
+    const { screenplayId } = await createProjectAndScreenplay(owner.actorId);
+
+    // Fails the very first `appendUpdate` call this server instance makes and succeeds on every
+    // call after -- standing in for one database blip (a dropped connection, a statement timeout)
+    // rather than a lasting outage, which is exactly the shape COL-1 describes.
+    // Armed *after* the initial sync below, not here. Set to 1 up front and the very first append
+    // this server instance makes is the one that fails -- and that is the document's own seeding
+    // append, not the writer's edit, which leaves no durable state at all and fails this test with
+    // "No durable state for epoch 0" long before it reaches what it is actually about.
+    let failuresRemaining = 0;
+    await server!.destroy();
+    server = await startServer(undefined, (real) => async (pool, params) => {
+      if (failuresRemaining > 0) {
+        failuresRemaining -= 1;
+        throw new Error('Simulated appendUpdate failure (integration test fault injection)');
+      }
+      return real(pool, params);
+    });
+    serverUrl = server.webSocketURL;
+
+    // The actual proof that the process survives: if `onChange`'s rejection ever escaped
+    // uncaught, it would surface here, not as a thrown exception this `try` could catch (the
+    // rejection happens inside Hocuspocus's own unawaited hook chain), but as a real
+    // `process.on('unhandledRejection', ...)` event -- the identical signal that, without a
+    // registered listener, ends the process in production. Node 24 requires only one such
+    // listener for an unhandled rejection to NOT terminate the process, so simply observing
+    // whether this fires is a direct, faithful stand-in for "the process stayed alive," without
+    // this test needing to fork its own subprocess.
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandledRejections.push(reason);
+    process.on('unhandledRejection', onUnhandledRejection);
+
+    const { provider } = connectProviderWithSocket(screenplayId, owner.token);
+    try {
+      await waitForSynced(provider);
+      // One edit that succeeds first, so this screenplay has durable state to compare against. A
+      // brand-new screenplay has none until its first successful append, and without this the
+      // "not yet durable" check below fails with "No durable state for epoch 0" -- which is true
+      // but says nothing about the edit this test is actually about.
+      writeLine(provider, 'This line was durable before the blip.');
+      // `waitForCanonicalText`, not a `reconstructDocumentState` poll: reconstruction needs a
+      // *checkpoint*, which only the debounced `store` writes -- `appendUpdate` alone never creates
+      // one. Waiting for the canonical projection is this suite's own established way of waiting
+      // for that store to have happened (see the restore tests' identical use), and it is what
+      // makes the reconstruction reads below meaningful rather than throwing "No durable state".
+      await waitForCanonicalText(screenplayId, 'This line was durable before the blip.');
+
+      // Now arm the one-shot failure: everything up to here (including the seeding append) was
+      // allowed to succeed, so what fails is exactly one writer edit, which is the shape COL-1
+      // describes -- one database blip, not an outage.
+      failuresRemaining = 1;
+
+      writeLine(provider, 'This line must survive a failed append.');
+
+      // **What `connection.close()` actually does, which is not what its name suggests.** Reading
+      // the installed `@hocuspocus/server` source: it removes the connection from the document,
+      // fires the `onClose` callbacks, and sends a close *message* over the socket -- it never
+      // closes the WebSocket itself. So no `'close'` or `'disconnect'` fires on the client provider
+      // (both are real events it emits; neither is reachable this way), and an earlier revision of
+      // this test waited on them and hung for its full 20-second budget, reading as a broken fix
+      // when the fix was working correctly.
+      //
+      // The connection leaving the document is the honest server-side observable, and it is the one
+      // that matters: a connection no longer attached to the document cannot send further updates
+      // on top of a log that is missing this one.
+      await waitForCondition(
+        () =>
+          (server!.hocuspocus.documents
+            .get(formatCollabDocumentName(screenplayId, DEFAULT_EPOCH))
+            ?.getConnectionsCount() ?? 0) === 0,
+      );
+
+      // Give the hook's own catch, and Node's microtask queue, a real turn before asserting
+      // nothing escaped -- the mutation this guards against (removing the `try`/`catch`) would
+      // otherwise show up here only on the very next tick.
+      await sleep(50);
+      expect(unhandledRejections).toEqual([]);
+
+      // Not yet durable: the one `appendUpdate` call for this edit was the one made to fail.
+      const beforeRetry = await reconstructedText(screenplayId, DEFAULT_EPOCH);
+      expect(beforeRetry).not.toContain('This line must survive a failed append.');
+
+      // Simulates the live in-memory document being evicted -- the only path through which a
+      // reconnecting client's own retained edit is ever re-offered to a healthy `appendUpdate`.
+      // Reconnecting to the *same* still-resident document (what would happen if this test simply
+      // waited for the provider's own auto-reconnect against the still-running server) produces
+      // no new sync diff at all: the live document already has this edit applied -- Hocuspocus
+      // applies an update to `document` before `onChange` ever runs, regardless of what the hook
+      // does afterward -- so client and server already agree in memory and have nothing left to
+      // exchange. Evicting is exactly what `unloadDocument` does in the real server once a
+      // document's last connection drops (`shouldUnloadDocument`'s own check, confirmed by reading
+      // the installed `@hocuspocus/server` source); forcing it here deterministically, rather than
+      // waiting out whatever idle window a real deployment happens to apply, is what makes this
+      // test non-flaky.
+      const documentName = formatCollabDocumentName(screenplayId, DEFAULT_EPOCH);
+      const liveDocument = server!.hocuspocus.documents.get(documentName);
+      server!.hocuspocus.documents.delete(documentName);
+      liveDocument?.destroy();
+
+      // The provider's own automatic reconnect (its `websocketProvider`, never destroyed, still
+      // holds the edit in its local `Y.Doc`) lands on a freshly reloaded document --
+      // `createFetch`/`reconstructDocumentState` rebuilt from the durable log alone, which never
+      // received the failed update -- and the ensuing sync exchange is what finally resends it.
+      await waitForSynced(provider);
+      await waitForCondition(() =>
+        projectedText(provider).includes('This line must survive a failed append.'),
+      );
+      await waitForCondition(async () => {
+        const text = await reconstructedText(screenplayId, DEFAULT_EPOCH);
+        return text.includes('This line must survive a failed append.');
+      });
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+      provider.destroy();
+    }
+  }, 60_000);
 
   // The two tests below prove the classification `progress/collaboration-slice-1.md` records as
   // the fix for the permanent-hang bug: a thrown, unexpected error during `onAuthenticate` (a

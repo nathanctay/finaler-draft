@@ -47,9 +47,19 @@ function migrationFileNames(): { before: string[]; bootstrap: string } {
   const all = readdirSync(drizzleDirectory)
     .filter((name) => name.endsWith('.sql'))
     .sort();
-  const bootstrap = all.find((name) => name.startsWith('0007'));
-  if (!bootstrap) throw new Error('Migration 0007 is missing from packages/database/drizzle.');
-  return { before: all.filter((name) => name !== bootstrap), bootstrap };
+  const bootstrapIndex = all.findIndex((name) => name.startsWith('0007'));
+  if (bootstrapIndex === -1) {
+    throw new Error('Migration 0007 is missing from packages/database/drizzle.');
+  }
+  // Strictly the migrations numbered *before* 0007, not "every migration except 0007" -- this
+  // test's own doc comment says it applies the chain "in two halves," and a later migration
+  // (COL-2, progress/collab-durability-and-checkpoints.md: 0014 touches
+  // `document_yjs_checkpoints`'s own index by name) can depend on 0007 having already created the
+  // table that index lives on. Applying it before 0007 -- which `all.filter((name) => name !==
+  // bootstrap)` used to do, by accident, for every migration after 0007 -- fails loudly on exactly
+  // that dependency; slicing at the bootstrap's own position is what this test's comment already
+  // described, just not what the filter above it actually implemented.
+  return { before: all.slice(0, bootstrapIndex), bootstrap: all[bootstrapIndex]! };
 }
 
 const adminUrl = process.env.TEST_DATABASE_URL;

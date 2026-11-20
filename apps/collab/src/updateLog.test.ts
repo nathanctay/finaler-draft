@@ -191,6 +191,33 @@ function createFakePool() {
           target.push(...remaining);
           return { rows: [] };
         }
+        if (sql.startsWith('delete from document_yjs_checkpoints')) {
+          // Parses the `order by`/`limit` out of the real production SQL text, rather than
+          // assuming "keep the newest" or importing `CHECKPOINTS_RETAINED` directly, so this fake
+          // exercises exactly what the query sent to Postgres actually says to keep -- a mutation
+          // that changed the retained count *or* silently reversed the sort (keeping the oldest
+          // rows and deleting the newest -- precisely "delete the newest checkpoint row") must
+          // actually corrupt what this fake stores, not merely corrupt a string this fake ignores.
+          const [screenplayId, epoch] = values as [string, number];
+          const orderMatch = /order by id (asc|desc)/.exec(sql);
+          const limitMatch = /limit (\d+)/.exec(sql);
+          if (!orderMatch || !limitMatch) {
+            throw new Error(`Checkpoint prune query has no recognizable order/limit: ${sql}`);
+          }
+          const direction = orderMatch[1] === 'desc' ? 1 : -1;
+          const retain = Number(limitMatch[1]);
+          const target = writableCheckpoints();
+          const kept = target
+            .filter((c) => c.screenplayId === screenplayId && c.epoch === epoch)
+            .sort((a, b) => direction * (b.id - a.id));
+          const keepIds = new Set(kept.slice(0, retain).map((c) => c.id));
+          const remaining = target.filter(
+            (c) => !(c.screenplayId === screenplayId && c.epoch === epoch) || keepIds.has(c.id),
+          );
+          target.length = 0;
+          target.push(...remaining);
+          return { rows: [] };
+        }
         throw new Error(
           `Unexpected query in fake pool: ${sql} (values: ${JSON.stringify(values)})`,
         );
@@ -604,6 +631,63 @@ describe('createCheckpoint (compaction)', () => {
     // Specifically: update3's own content ("three") is the part that went missing.
     expect(reconstructed!.doc.getText('body').toString()).not.toContain('three');
     expect(tables.checkpoints.length).toBe(3); // seed, A's, and B's stale one shadowing it.
+  });
+
+  // COL-2 (progress/collab-durability-and-checkpoints.md). Before this, nothing ever deleted a
+  // `document_yjs_checkpoints` row, and each one holds the entire merged Yjs state -- unbounded
+  // growth that the audit measured filling the production volume in on the order of tens of
+  // writer-hours. This proves the bound actually holds across many real compactions, not just one,
+  // and that reconstruction is still correct at every step along the way -- both the retention
+  // count itself and the newest-row-never-deleted invariant it rests on.
+  it('prunes older checkpoint rows across many compactions, keeping only the newest rows, while reconstruction stays correct throughout', async () => {
+    const { pool, tables } = createFakePool();
+    const base = docWithText('seed');
+    await writeCheckpoint(pool, {
+      screenplayId: SCREENPLAY_A,
+      epoch: EPOCH,
+      throughSequence: 0,
+      doc: base,
+    });
+
+    const live = new Y.Doc();
+    Y.applyUpdate(live, Y.encodeStateAsUpdate(base));
+
+    // Five independent append-then-compact cycles -- well past `CHECKPOINTS_RETAINED` -- so a
+    // bound that only happened to hold for one or two compactions would not be mistaken for the
+    // real thing.
+    for (let cycle = 1; cycle <= 5; cycle += 1) {
+      const update = captureUpdate(live, () =>
+        live.getText('body').insert(live.getText('body').length, ` cycle${cycle}`),
+      );
+      await appendUpdate(pool, {
+        screenplayId: SCREENPLAY_A,
+        epoch: EPOCH,
+        update,
+        actorId: 'a',
+      });
+      const result = await createCheckpoint(pool, { screenplayId: SCREENPLAY_A, epoch: EPOCH });
+      expect(result).toBeDefined();
+
+      // The bound holds after *every* cycle, not just eventually: this is what makes it a bound
+      // rather than an average. `toBe`, not `toBeLessThanOrEqual` -- the seed checkpoint from
+      // `writeCheckpoint` above means there are already 2 rows after the very first compaction, so
+      // equality is the precise claim from the second cycle on, and this loop only asserts it once
+      // that point is reached.
+      if (cycle >= 1) {
+        expect(tables.checkpoints.length).toBe(2);
+      }
+
+      // And correctness never regresses while the bound is enforced: every cycle's reconstruction
+      // matches the real accumulated content exactly, including everything absorbed by earlier,
+      // now-pruned checkpoints -- the newest surviving row must still carry their content forward.
+      const reconstructed = await reconstructDocumentState(pool, SCREENPLAY_A, EPOCH);
+      expect(reconstructed!.doc.getText('body').toString()).toBe(live.getText('body').toString());
+    }
+
+    // No update rows are left lying around uncompacted either -- pruning the checkpoint table is
+    // independent of, and must not interfere with, the existing update-row compaction this test
+    // reuses from every cycle above.
+    expect(tables.updates).toHaveLength(0);
   });
 });
 

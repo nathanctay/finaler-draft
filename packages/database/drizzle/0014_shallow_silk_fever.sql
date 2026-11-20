@@ -1,0 +1,2 @@
+DROP INDEX "document_yjs_checkpoints_screenplay_epoch_index";--> statement-breakpoint
+CREATE INDEX "document_yjs_checkpoints_screenplay_epoch_index" ON "document_yjs_checkpoints" USING btree ("screenplay_id","epoch","id" DESC NULLS LAST);
