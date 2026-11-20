@@ -30,13 +30,19 @@ export interface SubscriptionProjection {
 export interface SubscriptionEventInput {
   eventId: string;
   eventType: string;
+  /**
+   * No longer a correctness guard (see `ProcessOutcome` and this file's module comment -- BIL-1
+   * retired the `created`-based ordering check entirely). Still threaded through and written to
+   * `last_event_created_at`, which stays `not null`, purely because dropping the column is a
+   * migration and out of this slice's scope; nothing reads it back to make a decision anymore.
+   */
   eventCreatedAt: Date;
   /**
    * The Better Auth user this Stripe customer belongs to, or `null` when it could not be
    * resolved from the event (see stripeWebhook.ts's `dispatchStripeEvent` for how this is read
-   * from `subscription.metadata.userId`). `recordSubscriptionEvent` falls back to an existing
-   * projection row for the same `stripeCustomerId` before giving up -- see its implementation
-   * comment for the known limitation this covers.
+   * from the *retrieved* subscription's `metadata.userId`, never the webhook payload's). Falls
+   * back to an existing projection row for the same `stripeCustomerId` before giving up -- see
+   * this function's implementation comment for the known limitation this covers.
    */
   userId: string | null;
   stripeCustomerId: string;
@@ -48,33 +54,30 @@ export interface SubscriptionEventInput {
   canceledAt: Date | null;
 }
 
-export interface InvoiceEventInput {
-  eventId: string;
-  eventType: string;
-  eventCreatedAt: Date;
-  stripeSubscriptionId: string;
-  status: 'active' | 'past_due';
-  /** Refreshed from the invoice's line-item billing period when Stripe includes one; `null`
-   * leaves the existing `currentPeriodEnd` untouched rather than clobbering it with nothing. */
-  currentPeriodEnd: Date | null;
-}
-
 /**
  * - `applied`: this event was new and its state change was written.
  * - `duplicate`: this exact `event.id` was already processed; no state change was made.
- * - `unresolved`: the event was new, but no Better Auth user could be resolved for it (only
- *   possible for `recordSubscriptionEvent` -- see its comment); recorded as processed anyway so
- *   Stripe's retries do not loop forever on it.
- * - `stale`: the event was new, but a later event already advanced this row past what this event
- *   would have written (the out-of-order guard); recorded as processed, state left untouched.
- * - `ignored`: the event was new but there was nothing to apply -- an unhandled event type, or
- *   (for invoices) no existing subscription row to update.
+ * - `unresolved`: the event was new, but no Better Auth user could be resolved for it; recorded
+ *   as processed anyway so Stripe's retries do not loop forever on it.
+ * - `ignored`: the event was new but there was nothing to apply -- an unhandled event type, or a
+ *   subscription with no line items (see stripeWebhook.ts).
+ *
+ * There is deliberately no `stale`/out-of-order outcome anymore (BIL-1): every application now
+ * writes whatever the retrieved subscription's own current state is, so there is no "this event's
+ * payload is older than what's already stored" question left to ask -- the payload's own age
+ * never enters into it.
  */
-export type ProcessOutcome = 'applied' | 'duplicate' | 'unresolved' | 'stale' | 'ignored';
+export type ProcessOutcome = 'applied' | 'duplicate' | 'unresolved' | 'ignored';
 
 export interface SubscriptionStore {
+  /**
+   * Upserts the full current state of one subscription, keyed by `eventId` for dedup. Used for
+   * both `customer.subscription.*` and `invoice.*` events (see stripeWebhook.ts's
+   * `dispatchStripeEvent`): both retrieve the subscription from Stripe first, so by the time
+   * either calls here, there is exactly one shape of write to make -- an invoice event is no
+   * longer a distinct, narrower write than a subscription event is (BIL-2).
+   */
   recordSubscriptionEvent(input: SubscriptionEventInput): Promise<ProcessOutcome>;
-  recordInvoiceEvent(input: InvoiceEventInput): Promise<ProcessOutcome>;
   /** Marks an event processed without applying any state change -- used for Stripe event types
    * this slice does not project (plan.md: "Return 2xx quickly for events you do not handle"). */
   recordIgnoredEvent(eventId: string, eventType: string): Promise<ProcessOutcome>;
@@ -140,7 +143,21 @@ export function createPostgresSubscriptionStore(pool: Pool): SubscriptionStore {
           await client.query('commit');
           return 'unresolved';
         }
-        const result = await client.query(
+        // No `where` clause gating this on `last_event_created_at` anymore (BIL-1): the caller
+        // (stripeWebhook.ts's `dispatchStripeEvent`) already retrieved this subscription from
+        // Stripe immediately before calling here, so `input` is Stripe's own current state, not
+        // a possibly-out-of-order snapshot from an event payload. There is no "is this older than
+        // what's already stored" question left to ask -- whichever retrieval happened most
+        // recently is definitionally the one to keep, and that is exactly the row this upsert
+        // writes every time.
+        // No `where` clause gating this on `last_event_created_at` anymore (BIL-1): the caller
+        // (stripeWebhook.ts's `dispatchStripeEvent`) already retrieved this subscription from
+        // Stripe immediately before calling here, so `input` is Stripe's own current state, not
+        // a possibly-out-of-order snapshot from an event payload. There is no "is this older than
+        // what's already stored" question left to ask -- whichever retrieval happened most
+        // recently is definitionally the one to keep, and that is exactly the row this upsert
+        // writes every time.
+        await client.query(
           `insert into subscriptions (
              user_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
              status, current_period_end, cancel_at_period_end, canceled_at,
@@ -155,9 +172,7 @@ export function createPostgresSubscriptionStore(pool: Pool): SubscriptionStore {
              cancel_at_period_end = excluded.cancel_at_period_end,
              canceled_at = excluded.canceled_at,
              last_event_created_at = excluded.last_event_created_at,
-             updated_at = now()
-           where subscriptions.last_event_created_at < excluded.last_event_created_at
-           returning user_id`,
+             updated_at = now()`,
           [
             resolvedUserId,
             input.stripeCustomerId,
@@ -171,46 +186,7 @@ export function createPostgresSubscriptionStore(pool: Pool): SubscriptionStore {
           ],
         );
         await client.query('commit');
-        // The `where` clause above is the out-of-order guard (plan.md: "An out-of-order arrival
-        // must not move state backwards"): on a fresh insert there is no conflict to evaluate it
-        // against, so it always applies; on a conflict, Postgres evaluates it per-row and simply
-        // omits the row from `returning` when it is false, rather than updating it -- so an empty
-        // result here means "a later event already won," not an error.
-        return result.rowCount === 1 ? 'applied' : 'stale';
-      } catch (error) {
-        await client.query('rollback');
-        throw error;
-      } finally {
-        client.release();
-      }
-    },
-    async recordInvoiceEvent(input) {
-      const client = await pool.connect();
-      try {
-        await client.query('begin');
-        const isNew = await markProcessed(client, input.eventId, input.eventType);
-        if (!isNew) {
-          await client.query('rollback');
-          return 'duplicate';
-        }
-        // Update-only, deliberately: creating a full projection row needs a resolved userId and
-        // a priceId, neither of which an invoice event reliably carries on its own in this API
-        // version (see stripeWebhook.ts's module comment for the full reasoning). If no matching
-        // subscription row exists yet, the upcoming customer.subscription.created/updated event
-        // for the same subscription is what establishes it; this invoice event is a safe no-op.
-        const result = await client.query(
-          `update subscriptions
-              set status = $1,
-                  current_period_end = coalesce($2, current_period_end),
-                  last_event_created_at = $3,
-                  updated_at = now()
-            where stripe_subscription_id = $4
-              and last_event_created_at < $3
-            returning user_id`,
-          [input.status, input.currentPeriodEnd, input.eventCreatedAt, input.stripeSubscriptionId],
-        );
-        await client.query('commit');
-        return result.rowCount === 1 ? 'applied' : 'ignored';
+        return 'applied';
       } catch (error) {
         await client.query('rollback');
         throw error;

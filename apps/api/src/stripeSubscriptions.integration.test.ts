@@ -140,7 +140,13 @@ describe.skipIf(!databaseUrl)('Stripe subscription projection (PostgreSQL)', () 
     });
   });
 
-  it('does not move state backwards when an older event arrives after a newer one', async () => {
+  // BIL-1: the old out-of-order guard compared the incoming event's `eventCreatedAt` against the
+  // stored `last_event_created_at` and refused to apply (classifying it `stale`) whenever the
+  // incoming value was not strictly newer. That guard is gone -- these two tests prove both
+  // halves of what replaced it directly against the real upsert SQL: a later call always wins,
+  // regardless of either call's own `eventCreatedAt`, because `dispatchStripeEvent` only ever
+  // calls here with Stripe's own just-retrieved current state.
+  it('applies an event whose eventCreatedAt is earlier than the currently stored row, since there is no ordering guard', async () => {
     await store!.recordSubscriptionEvent({
       eventId: `evt_${randomUUID()}`,
       eventType: 'customer.subscription.updated',
@@ -154,9 +160,9 @@ describe.skipIf(!databaseUrl)('Stripe subscription projection (PostgreSQL)', () 
       cancelAtPeriodEnd: false,
       canceledAt: null,
     });
-    // A different, later-arriving event.id, but describing an earlier point in time -- the
-    // out-of-order case plan.md calls out explicitly.
-    const staleOutcome = await store!.recordSubscriptionEvent({
+    // A different, later-arriving event.id, describing an earlier point in time. Under the old
+    // guard this was rejected as `stale`; now it applies.
+    const outcome = await store!.recordSubscriptionEvent({
       eventId: `evt_${randomUUID()}`,
       eventType: 'customer.subscription.updated',
       eventCreatedAt: new Date('2026-03-01T00:00:00Z'),
@@ -169,8 +175,47 @@ describe.skipIf(!databaseUrl)('Stripe subscription projection (PostgreSQL)', () 
       cancelAtPeriodEnd: false,
       canceledAt: null,
     });
-    expect(staleOutcome).toBe('stale');
+    expect(outcome).toBe('applied');
     await expect(store!.getSubscriptionForUser('user-b')).resolves.toMatchObject({
+      status: 'past_due',
+    });
+  });
+
+  it('applies two distinct events that share the exact same eventCreatedAt second, both writing their own state', async () => {
+    // The concrete BIL-1 scenario: `customer.subscription.created` (incomplete) and
+    // `customer.subscription.updated` (active) generated in the same second. Both must apply --
+    // under the old guard, whichever was written second would be classified `stale` and the row
+    // would be stuck on `incomplete`.
+    const sameSecond = new Date('2026-03-15T12:00:00.000Z');
+    const first = await store!.recordSubscriptionEvent({
+      eventId: `evt_${randomUUID()}`,
+      eventType: 'customer.subscription.created',
+      eventCreatedAt: sameSecond,
+      userId: 'user-a',
+      stripeCustomerId: 'cus_same_second',
+      stripeSubscriptionId: 'sub_same_second',
+      stripePriceId: 'price_monthly',
+      status: 'incomplete',
+      currentPeriodEnd: new Date('2026-04-15T00:00:00Z'),
+      cancelAtPeriodEnd: false,
+      canceledAt: null,
+    });
+    const second = await store!.recordSubscriptionEvent({
+      eventId: `evt_${randomUUID()}`,
+      eventType: 'customer.subscription.updated',
+      eventCreatedAt: sameSecond,
+      userId: 'user-a',
+      stripeCustomerId: 'cus_same_second',
+      stripeSubscriptionId: 'sub_same_second',
+      stripePriceId: 'price_monthly',
+      status: 'active',
+      currentPeriodEnd: new Date('2026-04-15T00:00:00Z'),
+      cancelAtPeriodEnd: false,
+      canceledAt: null,
+    });
+    expect(first).toBe('applied');
+    expect(second).toBe('applied');
+    await expect(store!.getSubscriptionForUser('user-a')).resolves.toMatchObject({
       status: 'active',
     });
   });
@@ -230,111 +275,15 @@ describe.skipIf(!databaseUrl)('Stripe subscription projection (PostgreSQL)', () 
     expect(row.rowCount).toBe(0);
   });
 
-  it('applies an invoice.paid event onto an existing subscription, refreshing its billing period', async () => {
-    await store!.recordSubscriptionEvent({
-      eventId: `evt_${randomUUID()}`,
-      eventType: 'customer.subscription.created',
-      eventCreatedAt: new Date('2026-07-01T00:00:00Z'),
-      userId: 'user-a',
-      stripeCustomerId: 'cus_invoice',
-      stripeSubscriptionId: 'sub_invoice',
-      stripePriceId: 'price_monthly',
-      status: 'past_due',
-      currentPeriodEnd: new Date('2026-07-15T00:00:00Z'),
-      cancelAtPeriodEnd: false,
-      canceledAt: null,
-    });
-    const outcome = await store!.recordInvoiceEvent({
-      eventId: `evt_${randomUUID()}`,
-      eventType: 'invoice.paid',
-      eventCreatedAt: new Date('2026-07-02T00:00:00Z'),
-      stripeSubscriptionId: 'sub_invoice',
-      status: 'active',
-      currentPeriodEnd: new Date('2026-08-01T00:00:00Z'),
-    });
-    expect(outcome).toBe('applied');
-    await expect(store!.getSubscriptionForUser('user-a')).resolves.toMatchObject({
-      status: 'active',
-      currentPeriodEnd: new Date('2026-08-01T00:00:00Z'),
-    });
-  });
-
-  it('leaves currentPeriodEnd untouched when an invoice event does not carry one', async () => {
-    await store!.recordSubscriptionEvent({
-      eventId: `evt_${randomUUID()}`,
-      eventType: 'customer.subscription.created',
-      eventCreatedAt: new Date('2026-09-01T00:00:00Z'),
-      userId: 'user-b',
-      stripeCustomerId: 'cus_no_period',
-      stripeSubscriptionId: 'sub_no_period',
-      stripePriceId: 'price_monthly',
-      status: 'active',
-      currentPeriodEnd: new Date('2026-09-15T00:00:00Z'),
-      cancelAtPeriodEnd: false,
-      canceledAt: null,
-    });
-    const outcome = await store!.recordInvoiceEvent({
-      eventId: `evt_${randomUUID()}`,
-      eventType: 'invoice.payment_failed',
-      eventCreatedAt: new Date('2026-09-02T00:00:00Z'),
-      stripeSubscriptionId: 'sub_no_period',
-      status: 'past_due',
-      currentPeriodEnd: null,
-    });
-    expect(outcome).toBe('applied');
-    await expect(store!.getSubscriptionForUser('user-b')).resolves.toMatchObject({
-      status: 'past_due',
-      currentPeriodEnd: new Date('2026-09-15T00:00:00Z'),
-    });
-  });
-
-  it('is a safe no-op when an invoice event references a subscription with no projection row yet', async () => {
-    const outcome = await store!.recordInvoiceEvent({
-      eventId: `evt_${randomUUID()}`,
-      eventType: 'invoice.paid',
-      eventCreatedAt: new Date('2026-01-01T00:00:00Z'),
-      stripeSubscriptionId: 'sub_never_created',
-      status: 'active',
-      currentPeriodEnd: new Date('2026-02-01T00:00:00Z'),
-    });
-    expect(outcome).toBe('ignored');
-  });
-
-  it('applies the same out-of-order guard to invoice events as to subscription events', async () => {
-    await store!.recordSubscriptionEvent({
-      eventId: `evt_${randomUUID()}`,
-      eventType: 'customer.subscription.created',
-      eventCreatedAt: new Date('2026-10-01T00:00:00Z'),
-      userId: 'user-a',
-      stripeCustomerId: 'cus_invoice_order',
-      stripeSubscriptionId: 'sub_invoice_order',
-      stripePriceId: 'price_monthly',
-      status: 'incomplete',
-      currentPeriodEnd: new Date('2026-10-15T00:00:00Z'),
-      cancelAtPeriodEnd: false,
-      canceledAt: null,
-    });
-    await store!.recordInvoiceEvent({
-      eventId: `evt_${randomUUID()}`,
-      eventType: 'invoice.paid',
-      eventCreatedAt: new Date('2026-10-05T00:00:00Z'),
-      stripeSubscriptionId: 'sub_invoice_order',
-      status: 'active',
-      currentPeriodEnd: new Date('2026-11-01T00:00:00Z'),
-    });
-    const staleOutcome = await store!.recordInvoiceEvent({
-      eventId: `evt_${randomUUID()}`,
-      eventType: 'invoice.payment_failed',
-      eventCreatedAt: new Date('2026-10-03T00:00:00Z'),
-      stripeSubscriptionId: 'sub_invoice_order',
-      status: 'past_due',
-      currentPeriodEnd: null,
-    });
-    expect(staleOutcome).toBe('ignored');
-    await expect(store!.getSubscriptionForUser('user-a')).resolves.toMatchObject({
-      status: 'active',
-    });
-  });
+  // There is no longer a store-level `recordInvoiceEvent` to test here (BIL-2): invoice events
+  // now reach `recordSubscriptionEvent` through `dispatchStripeEvent`'s own retrieval, carrying a
+  // full `SubscriptionEventInput` built from Stripe's retrieved subscription object, not a
+  // narrower invoice-shaped input. That retrieval-and-dispatch behaviour -- including the upsert
+  // (not update-only) fix for an invoice arriving before any projection row exists, and the
+  // canceled-subscription-stays-canceled fix -- is covered in stripeWebhook.test.ts, against a
+  // fake Stripe client; this suite's job is only to prove the real SQL `recordSubscriptionEvent`
+  // itself runs, which the tests above already do for every input shape an invoice event would
+  // now produce.
 
   it('dedupes recordIgnoredEvent independently, for event types this slice does not project', async () => {
     const eventId = `evt_${randomUUID()}`;

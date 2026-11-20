@@ -63,7 +63,7 @@ export type DeleteAccountOutcome =
 
 /**
  * `cancel`/`retrieve` only -- the same narrowing convention every other Stripe-touching port in
- * this codebase uses (`StripeWebhookPort.client: Pick<Stripe, 'webhooks'>`,
+ * this codebase uses (`StripeWebhookPort.client: Pick<Stripe, 'webhooks' | 'subscriptions'>`,
  * `BillingPort.client: Pick<Stripe, 'checkout' | 'billingPortal' | 'prices'>`), so a test can
  * supply a bare object with just these two methods stubbed instead of a full, real,
  * API-key-bearing `Stripe` instance -- see `accountDeletion.test.ts`'s `fakeStripeClient`.
