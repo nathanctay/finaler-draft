@@ -9,9 +9,22 @@ vi.mock('@tanstack/react-router', async (importOriginal) =>
   (await import('../test/routeHarness.js')).reactRouterMock(importOriginal),
 );
 
-const { Route } = await import('./account.delete.js');
+// `./account_.delete.js`, not `./account.delete.js`: the trailing underscore on the `account`
+// segment is TanStack Router's own "non-nested route" escape (confirmed against the installed
+// `@tanstack/router-generator`'s `hasParentRoute`/`removeUnderscores`), which keeps this route out
+// of the new Manage account layout (`routes/account.tsx`, progress/manage-account-page.md) while
+// its resolved path stays the unchanged `/account/delete` -- see that layout's own module comment
+// for why this page, unlike the three tabs, must not be nested under it. The filename is the only
+// thing that changed here; the component, its behaviour, and every assertion below are untouched.
+const { Route } = await import('./account_.delete.js');
 const DeleteAccountPage = Route.options.component!;
-const sessionUser: SessionUser = { email: 'writer@example.com', id: 'writer-1', name: 'Writer' };
+const sessionUser: SessionUser = {
+  createdAt: '2026-01-01T00:00:00.000Z',
+  email: 'writer@example.com',
+  emailVerified: true,
+  id: 'writer-1',
+  name: 'Writer',
+};
 const sharedProjectId = 'e3e6a7f0-7a0a-4b3e-9b8a-0a1b2c3d4e5f';
 const soleProjectId = '9c6a2b1e-4f3d-4a2b-8c1d-2e3f4a5b6c7d';
 
@@ -90,6 +103,28 @@ describe('account deletion page', () => {
       expect(screen.getByText('Checking your projects for other collaborators…')).toBeVisible();
       await screen.findByRole('button', { name: 'Delete account' });
       expect(screen.queryByRole('button', { name: 'Delete anyway' })).not.toBeInTheDocument();
+    });
+
+    it('offers a "Don’t delete" way back to the account settings, and calls nothing', async () => {
+      // This page *is* a confirmation step -- a writer arrives by pressing "Delete account" on the
+      // Account info tab -- and it shipped with the destructive button as its only control, so
+      // changing your mind meant reaching for the browser's back button. The owner's own report:
+      // "we don't have a 'dont delete' button. Just 'delete account'/'delete anyway'."
+      mockNoCollaborators();
+      renderPage();
+      const destructive = await screen.findByRole('button', { name: 'Delete account' });
+      const escape = screen.getByRole('link', { name: /Don.t delete/ });
+      expect(escape).toHaveAttribute('href', '/account');
+      // Ordered destructive-first, escape second -- the owner's explicit direction, and this
+      // product's own retro-desktop idiom (the Windows OK/Cancel order, not the macOS reverse).
+      // Compared by document position rather than by index, so this still holds if the row gains a
+      // third control. The order is asserted at all because it shipped the other way round once:
+      // an untested ordering is one nobody notices flipping.
+      const escapeComesAfter = Boolean(
+        destructive.compareDocumentPosition(escape) & Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+      expect(escapeComesAfter).toBe(true);
+      expect(deleteAccountCallCount()).toBe(0);
     });
 
     it('does not call the delete endpoint merely by opening the confirmation dialog', async () => {

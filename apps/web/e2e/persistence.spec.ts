@@ -518,9 +518,14 @@ test('a writer can delete a project and restore it from the Deleted page -- reac
   await page.reload();
   await expect(page.getByRole('link', { name: 'Delete-restore project' })).toHaveCount(0);
 
+  // The account menu's own "Manage account" entry, then that page's own left-side navigation to
+  // its Deleted items tab -- the account menu no longer links straight to `/deleted`
+  // (`progress/manage-account-page.md` collapsed it into the Manage account page's tabs).
   await page.getByRole('button', { name: 'Account menu' }).click();
-  await page.getByRole('menuitem', { name: 'Deleted items' }).click();
-  await expect(page).toHaveURL('/deleted');
+  await page.getByRole('menuitem', { name: 'Manage account' }).click();
+  await expect(page).toHaveURL('/account');
+  await page.getByRole('link', { name: 'Deleted items' }).click();
+  await expect(page).toHaveURL('/account/deleted');
   await expect(page.getByText('Delete-restore project')).toBeVisible();
 
   const restoreResponse = page.waitForResponse(

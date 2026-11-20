@@ -5,15 +5,24 @@ import { api } from './api.js';
 import { OverflowMenu } from './components/OverflowMenu.js';
 
 /**
- * The account menu: `Manage Subscription`, `Deleted items`, `Delete account`, `Sign out` -- one
- * definition, rendered identically on every screen that wears the shared app bar
- * (`applicationShell.tsx`'s `ApplicationTitlebar`). It used to be three hand-written copies (the
- * writing desk's own menu, and
+ * The account menu: `Manage account`, `Sign out` -- one definition, rendered identically on every
+ * screen that wears the shared app bar (`applicationShell.tsx`'s `ApplicationTitlebar`). It used
+ * to be three hand-written copies (the writing desk's own menu, and
  * the dead `<span className="account-button">` the project screen, the Deleted screen, the editor
  * and the revision-diff view each carried instead of a working one) -- see
  * `progress/app-bar-navigation.md`'s "the account-menu seam" for why a fourth or fifth copy was
  * rejected in favour of this one component, rather than a per-caller item list the bar itself
  * assembles.
+ *
+ * **Collapsed from four entries to two**, `progress/manage-account-page.md`: `Manage Subscription`,
+ * `Deleted items`, and `Delete account` used to be three separate flat routes linked straight from
+ * here. The owner's own words: "I also think we should consolidate the links from the account
+ * dropdown into a manage account page... We can use left side navigation to switch between tabs."
+ * All three destinations are tabs under the new `/account` layout now (`routes/account.tsx`), so
+ * this menu's job shrinks to getting a writer *into* that page -- the page's own left nav is what
+ * picks a tab, not a second menu duplicating that choice here. The old paths still redirect
+ * (`routes/billing.subscription.tsx`, `routes/deleted.tsx`), so a link or bookmark built against
+ * the old four-entry menu still lands somewhere real.
  *
  * Deliberately **not** inside `applicationShell.tsx`. That module is rendered by the lazily-loaded
  * editor (`App.tsx`) and by the read-only revision-diff route, and `App.tsx`'s own standalone test
@@ -59,19 +68,10 @@ export function AccountMenu() {
     <div className="account-menu">
       <OverflowMenu
         items={[
-          // A single, always-available entry rather than two tier-conditional ones: both
-          // destinations are the same page (routes/billing.subscription.tsx), which shows the
-          // writer's actual plan and status and offers the right action from there.
-          {
-            label: 'Manage Subscription',
-            onSelect: () => void navigate({ to: '/billing/subscription' }),
-          },
-          { label: 'Deleted items', onSelect: () => void navigate({ to: '/deleted' }) },
-          // routes/account.delete.tsx. Plain navigation, like the two items above, rather than a
-          // dialog opened straight from this menu: the page itself runs a precheck and owns two
-          // separate confirmations (plain and collaborator-aware), which is more than an
-          // `onSelect` handler here should try to hold.
-          { label: 'Delete account', onSelect: () => void navigate({ to: '/account/delete' }) },
+          // routes/account.tsx (the index tab, routes/account/index.tsx): account info, Manage
+          // Subscription, Deleted items, and the way to Delete account are all reached from
+          // there now -- see this component's own module comment.
+          { label: 'Manage account', onSelect: () => void navigate({ to: '/account' }) },
           {
             label: 'Sign out',
             onSelect: () => {

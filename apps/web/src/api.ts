@@ -595,6 +595,30 @@ export const api = {
     authClient()
       .sendVerificationEmail({ callbackURL: appUrl('/verify-email'), email })
       .then(unwrapAuthClientResult),
+  // The Account info tab's name field (routes/account/index.tsx), `progress/manage-account-page.
+  // md`: "Name changes apply immediately -- trimmed, non-empty." Better Auth's own `/update-user`
+  // rejects a body carrying `email` outright (`BASE_ERROR_CODES.EMAIL_CAN_NOT_BE_UPDATED`,
+  // confirmed against the installed `api/routes/update-user.mjs`) -- which is exactly why this is
+  // a separate call from `changeEmail` below rather than one combined "save account info" request,
+  // and why this function's signature takes no email parameter to be tempted into trying.
+  updateName: (name: string) => authClient().updateUser({ name }).then(unwrapAuthClientResult),
+  // The Account info tab's email field. Thin on purpose -- every real decision (verification
+  // before the change ever applies, no `updateEmailWithoutVerification`, no password re-prompt)
+  // lives in `packages/auth-server/src/index.ts`'s `user.changeEmail` configuration, which this
+  // just calls through to, matching how `requestPasswordReset`/`resetPassword` above already wrap
+  // Better Auth's own mechanism rather than reimplementing it. `callbackURL` matches every other
+  // emailed-link flow in this file, landing on the same confirmation page `verify-email.tsx`
+  // already renders for sign-up and password reset.
+  //
+  // Always resolves `{status: true}` on a 200 -- including when `newEmail` already belongs to
+  // another account, which the installed `changeEmail` handler answers identically to "a
+  // verification email is on its way" (Better Auth's own anti-enumeration design; see that
+  // config's own comment). `routes/account/index.tsx` is worded accordingly: it reports what was
+  // sent, never a claim that this server cannot actually back up.
+  changeEmail: (newEmail: string) =>
+    authClient()
+      .changeEmail({ callbackURL: appUrl('/verify-email'), newEmail })
+      .then(unwrapAuthClientResult),
   projects: () => json('/api/projects', z.array(projectSchema)),
   createProject: (title: string) =>
     json('/api/projects', projectSchema.pick({ id: true, title: true }), {

@@ -8,14 +8,9 @@ import {
 } from '@finaler-draft/config';
 import { z } from 'zod';
 import { AuthApiError, GENERIC_AUTH_ERROR_MESSAGE, api } from '../api.js';
-import { emailFieldSchema } from '../formFieldSchemas.js';
+import { emailFieldSchema, nameFieldSchema } from '../formFieldSchemas.js';
 import { guardSessionUser, sessionQueryOptions } from '../session.js';
 import { describedBy, useFormValidation } from '../useFormValidation.js';
-
-/** "Not blank" is this one's whole rule -- Better Auth's own sign-up accepts any non-empty name,
- * and there is no server-side bound beyond that to share (see `useFormValidation.ts`'s own top
- * comment on why a field with no shared bound still gets a schema, for uniformity). */
-const nameFieldSchema = z.string().trim().min(1, 'Enter your name.');
 
 /**
  * Sign-up's password field enforces the real bound -- `packages/auth-server/src/index.ts`'s
