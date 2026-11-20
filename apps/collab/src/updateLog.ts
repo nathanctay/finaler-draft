@@ -20,6 +20,23 @@ export interface Checkpoint {
 }
 
 /**
+ * How many of the newest `document_yjs_checkpoints` rows `createCheckpoint` keeps for a given
+ * (screenplayId, epoch), once pruning runs (COL-2, progress/collab-durability-and-checkpoints.md).
+ * Before this, nothing ever deleted a checkpoint row, and each one holds the *entire* merged Yjs
+ * state -- hundreds of KB for a feature-length screenplay, written at least as often as every
+ * debounced save. Unbounded, that fills the production Postgres volume in on the order of tens of
+ * writer-hours.
+ *
+ * `2`, not `1`: `reconstructDocumentState`'s proof (see that function's own comment) only requires
+ * the *newest* row to survive, so `1` would already be sound. The second row is a margin against
+ * its two unlocked reads straddling more than one compaction commit, not a correctness requirement
+ * -- see `reconstructDocumentState`'s comment for why that margin, not strict minimality, is the
+ * right trade here. Kept as a named constant, not a literal, so the reasoning above and the number
+ * it is about cannot drift apart.
+ */
+const CHECKPOINTS_RETAINED = 2;
+
+/**
  * Every append and every compaction for the *same* (screenplayId, epoch) pair takes this
  * transaction-scoped advisory lock before touching `document_yjs_updates`/
  * `document_yjs_checkpoints` for that pair. This is the mechanism the sharp invariant --
@@ -172,9 +189,18 @@ export async function updatesAfter(
  * compaction against another *compaction*, both thoroughly, but never reconstruction against a
  * concurrent compaction. A safety argument was asserted, documented as tested, and never exercised.
  *
- * **Why the order below is correct**, resting on two invariants that hold by construction: a
- * checkpoint row is never deleted (confirmed: no `delete from document_yjs_checkpoints` exists
- * anywhere), and an update row is deleted in exactly one place -- `createCheckpoint` -- in the same
+ * **Why the order below is correct**, resting on two invariants that hold by construction. The
+ * first used to read "a checkpoint row is never deleted" -- true when this comment was written,
+ * false since COL-2 (progress/collab-durability-and-checkpoints.md): `createCheckpoint` now prunes
+ * older checkpoint rows for the same `(screenplayId, epoch)` in the same transaction that inserts
+ * the new one, to keep `document_yjs_checkpoints` from growing by one full merged Yjs state (hund-
+ * reds of KB to low MB for a feature-length screenplay) every few seconds, forever. The invariant
+ * this proof actually needs survives that change intact, restated precisely: **the newest
+ * checkpoint row for a given `(screenplayId, epoch)` is never deleted.** Pruning only ever removes
+ * rows *older* than the ones it keeps, and it never deletes the row it just inserted in the same
+ * transaction -- so at every instant, the row `latestCheckpoint` would return already exists and
+ * has existed, uninterrupted, since the compaction that created it committed. The second invariant
+ * is unchanged: an update row is deleted in exactly one place -- `createCheckpoint` -- in the same
  * transaction that inserts the checkpoint absorbing it. So:
  *
  *  - the floor read bounds the tail scan, exactly as before, so this costs one extra single-row
@@ -185,8 +211,25 @@ export async function updatesAfter(
  *    passed the tail filter (the floor can only be older than the applied checkpoint, as
  *    `through_sequence` advances monotonically), so it was absent only if deleted before the tail
  *    read, which implies an absorbing checkpoint with `through_sequence >= s` committed before the
- *    tail read -- and the checkpoint read *after* the tail therefore sees it, giving
- *    `through_sequence >= s` and contradicting `s` being uncovered.
+ *    tail read. That checkpoint's own row might since have been pruned by a *later* compaction --
+ *    but pruning never deletes the newest row, through_sequence only ever increases, and the
+ *    checkpoint read *after* the tail reads whatever is newest at that moment -- so it has
+ *    `through_sequence` at least as large as the absorbing one's, giving `through_sequence >= s`
+ *    and contradicting `s` being uncovered. Pruning more than the single newest row (the next
+ *    paragraph) is what keeps this margin from being exactly zero in practice.
+ *
+ * **Why `createCheckpoint` keeps more than one row, not exactly one.** The proof above only ever
+ * needs the newest row to survive, so keeping one would already be sufficient for correctness. The
+ * two reads this function makes are unlocked, though -- unlike compaction, which holds the
+ * `(screenplayId, epoch)` advisory lock for its entire transaction, nothing stops an arbitrary
+ * number of compactions from committing, one after another, between this function's floor read
+ * and its final checkpoint read. Retaining a short run of recent rows rather than pruning down to
+ * the bare minimum the proof requires is the margin against exactly that -- a reconstruction that
+ * is this slow relative to a burst of compactions is a symptom worth being able to see in
+ * `document_yjs_checkpoints` directly, not a case this function needs to special-case, and keeping
+ * one full checkpoint beyond the strict minimum costs at most one extra full-document row per
+ * `(screenplayId, epoch)` pair -- negligible next to what COL-2 unbounded growth cost before this
+ * change. See `createCheckpoint`'s own comment for the exact number kept.
  *
  * No transaction, no advisory lock, and no dependence on the isolation level. A read-verify-retry
  * loop was prototyped first and does also close the race, but it is strictly weaker: it is
@@ -305,13 +348,23 @@ export async function writeCheckpoint(
  *     process happened to call this relative to when a keystroke was applied to an in-memory
  *     `Y.Doc`. `database.ts`'s `createStore` still separately reads the live `Document` it was
  *     handed, but only for the unrelated `canonical_screenplay` projection, never for durability.
- *  4. Insert the new checkpoint and delete every row with `sequence <= throughSequence`, in the
- *     same transaction, then commit (releasing the lock).
+ *  4. Insert the new checkpoint and delete every update row with `sequence <= throughSequence`, in
+ *     the same transaction, then commit (releasing the lock).
+ *  5. Prune `document_yjs_checkpoints` itself for this (screenplayId, epoch), keeping only the
+ *     newest `CHECKPOINTS_RETAINED` rows (COL-2). Still inside the same transaction and under the
+ *     same lock as steps 1-4 -- the row this step's own insert just wrote is always among the rows
+ *     kept, so this can never prune the checkpoint it just created. See `CHECKPOINTS_RETAINED`'s
+ *     own comment for why that number, and `reconstructDocumentState`'s comment for why pruning
+ *     older rows here does not break the floor/tail/checkpoint read order that function depends
+ *     on: both of its invariants are stated in terms of the *newest* row, which this step never
+ *     removes.
  *
  * Returns `undefined`, doing nothing, when there is nothing new to absorb (no updates logged
  * since the last checkpoint, including "no checkpoint and no updates at all" for a document that
  * has never been opened collaboratively) -- there is no reason to write an identical checkpoint
- * on every debounced save of a document nobody is actively editing.
+ * on every debounced save of a document nobody is actively editing. Pruning is skipped along with
+ * everything else in that case: there is nothing new to prune either, since the previous call
+ * already pruned down to `CHECKPOINTS_RETAINED` rows.
  */
 export async function createCheckpoint(
   pool: Pool,
@@ -369,6 +422,20 @@ export async function createCheckpoint(
       `delete from document_yjs_updates
         where screenplay_id = $1 and epoch = $2 and sequence <= $3`,
       [params.screenplayId, params.epoch, throughSequence],
+    );
+    // COL-2 pruning (step 5 above): keeps only the newest `CHECKPOINTS_RETAINED` rows for this
+    // (screenplayId, epoch), including the one just inserted. `id desc` orders identically to
+    // `latestCheckpoint`'s own query, so "newest" means the same thing in both places.
+    await client.query(
+      `delete from document_yjs_checkpoints
+        where screenplay_id = $1 and epoch = $2
+          and id not in (
+            select id from document_yjs_checkpoints
+             where screenplay_id = $1 and epoch = $2
+             order by id desc
+             limit ${CHECKPOINTS_RETAINED}
+          )`,
+      [params.screenplayId, params.epoch],
     );
 
     await client.query('commit');

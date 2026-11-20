@@ -268,9 +268,21 @@ export const documentYjsUpdates = pgTable(
 // 1's `document_yjs_state`. Deliberately append-only itself (a new row per compaction, never an
 // `update` to an existing one) rather than one upserted row per screenplay: `updateLog.ts`'s
 // `createCheckpoint` reconstruction logic only ever needs the *latest* checkpoint for a
-// (screenplayId, epoch) pair (highest `throughSequence`), so keeping the history costs one small
-// row per compaction and buys a diagnosable trail of exactly what was compacted and when, which an
-// upserted single row would destroy on every write.
+// (screenplayId, epoch) pair (highest `throughSequence`).
+//
+// **This row is not small.** It was described as costing "one small row per compaction" before
+// COL-2 (progress/collab-durability-and-checkpoints.md); that was wrong, and the mistake mattered.
+// `mergedUpdate` is the *entire* merged Yjs state, not a diff -- the audit measured a
+// feature-length (3,000-block) screenplay's Yjs state at 622,241 bytes, and production compacts at
+// least every 10 seconds per active writer (Hocuspocus's own debounce/maxDebounce defaults).
+// Nothing ever deleted a row here before COL-2, which meant this table alone could fill the
+// production Postgres volume (5,000 MB) after a few tens of writer-hours on full-length scripts --
+// a full volume stops Postgres, which stops everything. `updateLog.ts`'s `createCheckpoint` now
+// prunes older rows for the same `(screenplayId, epoch)` in the same transaction that inserts a
+// new one, keeping only the newest few (see that function's own comment, and
+// `CHECKPOINTS_RETAINED`'s, for the exact number and why). The diagnosable-trail benefit the old
+// comment described is accordingly bounded, not unlimited: enough rows survive to see what the
+// last few compactions did, not every compaction this document has ever had.
 //
 // **What happened to `document_yjs_state`.** It does not survive alongside these two tables --
 // keeping it would mean three overlapping stores of the same information (the raw log, a
@@ -310,7 +322,19 @@ export const documentYjsCheckpoints = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    index('document_yjs_checkpoints_screenplay_epoch_index').on(table.screenplayId, table.epoch),
+    // COL-2 (progress/collab-durability-and-checkpoints.md). `latestCheckpoint` (`updateLog.ts`)
+    // filters on `(screenplayId, epoch)` and orders by `id desc limit 1`; the pruning delete
+    // `createCheckpoint` now runs on every compaction does the identical filter-and-order to find
+    // the rows it keeps. The previous two-column index covered only the filter, not the order, so
+    // every lookup sorted every checkpoint row that document had ever had -- harmless at the row
+    // counts a document could reach before COL-2's pruning, increasingly not harmless the longer a
+    // screenplay had been edited. Adding `id desc` lets both queries satisfy "newest N for this
+    // pair" directly from the index, with no separate sort step.
+    index('document_yjs_checkpoints_screenplay_epoch_index').on(
+      table.screenplayId,
+      table.epoch,
+      table.id.desc(),
+    ),
   ],
 );
 
