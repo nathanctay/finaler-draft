@@ -7,8 +7,9 @@ export type BillingPlan = 'monthly' | 'annual';
 /**
  * Dependencies both `createCheckoutSession` and `createPortalSession` need. `client` is typed
  * down to just the two resources this module calls -- the same narrowing convention `app.ts`'s
- * `StripeWebhookPort` already uses for `client.webhooks` (`Pick<Stripe, 'webhooks'>`), for the
- * identical testing reason: a test can supply a bare object with
+ * `StripeWebhookPort` already uses for `client.webhooks`/`client.subscriptions`
+ * (`Pick<Stripe, 'webhooks' | 'subscriptions'>`), for the identical testing reason: a test can
+ * supply a bare object with
  * `checkout.sessions.create`/`billingPortal.sessions.create` stubs instead of a full, real,
  * API-key-bearing `Stripe` instance.
  */
