@@ -35,7 +35,19 @@ let admin: Pool | undefined;
 let databaseCreated = false;
 
 const cliPath = fileURLToPath(new URL('./accountPurgeCli.ts', import.meta.url));
-const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
+/**
+ * **`apps/api`, not the repo root.** `tsx` is a devDependency of `apps/api` and `apps/collab` only,
+ * never of the workspace root, so pnpm links it at `apps/api/node_modules/.bin/tsx` and nowhere
+ * else. Spawning `pnpm exec tsx` with the root as its working directory therefore failed with
+ * `Command "tsx" not found` -- every test in this file, on every machine, since the file was
+ * written. Nothing caught it because the whole suite skips without `TEST_DATABASE_URL`, which CI
+ * never sets.
+ *
+ * `apps/api` is also the working directory the real cron runs from: Railway's start command is
+ * `pnpm --filter @finaler-draft/api purge:accounts`, so this is the more faithful choice as well as
+ * the working one.
+ */
+const cliWorkingDirectory = fileURLToPath(new URL('../', import.meta.url));
 
 describe.skipIf(!databaseUrl)('accountPurgeCli (real process)', () => {
   beforeAll(async () => {
@@ -54,7 +66,7 @@ describe.skipIf(!databaseUrl)('accountPurgeCli (real process)', () => {
 
   it('exits with code 0 and terminates on its own against a real, empty backlog', async () => {
     const { stdout } = await executeFile('pnpm', ['exec', 'tsx', cliPath], {
-      cwd: repoRoot,
+      cwd: cliWorkingDirectory,
       env: { ...process.env, DATABASE_URL: databaseUrl, FINALER_SYSTEM_TEST: 'true' },
       timeout: 20_000,
     });
@@ -65,7 +77,7 @@ describe.skipIf(!databaseUrl)('accountPurgeCli (real process)', () => {
 
   it('exits with code 0 in --dry-run mode too', async () => {
     const { stdout } = await executeFile('pnpm', ['exec', 'tsx', cliPath, '--dry-run'], {
-      cwd: repoRoot,
+      cwd: cliWorkingDirectory,
       env: { ...process.env, DATABASE_URL: databaseUrl, FINALER_SYSTEM_TEST: 'true' },
       timeout: 20_000,
     });
@@ -82,7 +94,7 @@ describe.skipIf(!databaseUrl)('accountPurgeCli (real process)', () => {
     delete envWithoutDatabase.DATABASE_URL;
     await expect(
       executeFile('pnpm', ['exec', 'tsx', cliPath], {
-        cwd: repoRoot,
+        cwd: cliWorkingDirectory,
         env: envWithoutDatabase,
         timeout: 20_000,
       }),
