@@ -113,13 +113,17 @@ export interface AuthPort {
 
 /**
  * The webhook route's dependencies (app.ts's `POST /api/webhooks/stripe` registration below).
- * `client` is typed down to just `webhooks` -- the only member this route calls
- * (`client.webhooks.constructEvent`) -- rather than the full `Stripe` class, so a test can supply
- * a client built from nothing but a signing secret (signature verification is pure HMAC, no
- * network access or API key required) instead of a full, real, API-key-bearing instance.
+ * `client` is typed down to just `webhooks` and `subscriptions` -- the only members this route (by
+ * way of `dispatchStripeEvent`) calls (`client.webhooks.constructEvent` for signature
+ * verification, `client.subscriptions.retrieve` for the BIL-1/BIL-2 fix's authoritative read) --
+ * rather than the full `Stripe` class. `webhooks` alone used to be enough, before
+ * `dispatchStripeEvent` needed to retrieve a subscription instead of trusting the event payload;
+ * widened deliberately, not to the whole client, so a test can still supply a client built from
+ * nothing but a signing secret plus a stub `subscriptions.retrieve`, rather than a full, real,
+ * API-key-bearing instance.
  */
 export interface StripeWebhookPort {
-  client: Pick<Stripe, 'webhooks'>;
+  client: Pick<Stripe, 'webhooks' | 'subscriptions'>;
   webhookSecret: string;
   store: SubscriptionStore;
   /**
@@ -175,8 +179,9 @@ export interface BuildAppOptions {
    * Backs `POST /api/billing/checkout-session`, `POST /api/billing/portal-session`, and
    * `GET /api/billing/subscription` -- the purchase, manage-billing, and billing-status-read entry
    * points this slice adds. Deliberately a separate option from `stripe` above rather than reusing
-   * the same port: `stripe`'s `client` is narrowed to `Pick<Stripe, 'webhooks'>` because the
-   * webhook route only ever verifies and dispatches an already-received event, while these routes
+   * the same port: `stripe`'s `client` is narrowed to `Pick<Stripe, 'webhooks' | 'subscriptions'>`
+   * because the webhook route only ever verifies an already-received event and (as of the
+   * BIL-1/BIL-2 fix) retrieves the subscription it names, while these routes
    * only ever *create* Checkout/Portal sessions (or read this app's own `subscriptions` projection,
    * never Stripe directly) and never see a webhook payload -- two disjoint capabilities of the same
    * underlying `Stripe` client, each narrowed to exactly what its own routes call (see
@@ -1101,7 +1106,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
           );
           return reply.code(400).send({ error: 'Invalid signature' });
         }
-        const outcome = await dispatchStripeEvent(stripe.store, event);
+        const outcome = await dispatchStripeEvent(stripe.store, stripe.client, event);
         request.log.info(
           { event: 'stripe_webhook_processed', type: event.type, outcome },
           'Processed a Stripe webhook event',
